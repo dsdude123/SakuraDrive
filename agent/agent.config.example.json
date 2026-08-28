@@ -1,0 +1,20 @@
+{
+  "ServerUrl": "http://nas.local:8080",
+  "Token": "paste-the-token-from-Settings-Agents-here",
+  "IntervalSeconds": 900,
+
+  "SmartctlPath": "",
+  "DpcmdPath": "",
+
+  "DuplicationDepth": 3,
+  "PerformanceSamples": 3,
+
+  "CollectSmart": true,
+  "CollectPerformance": true,
+  "CollectDrivePool": true,
+  "CollectPrimoCache": true,
+
+  "SkipCertificateCheck": false,
+  "TimeoutSeconds": 120,
+  "LogPath": "C:\\ProgramData\\SakuraDrive\\agent.log"
+}

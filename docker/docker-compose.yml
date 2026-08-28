@@ -1,0 +1,55 @@
+# SakuraDrive on Docker inside WSL2.
+#
+# Everything else — pools, schedule, notifications, backups, thresholds — is
+# configured from the web interface, so this file only has to cover the things Docker
+# itself owns: the port, the data volume and which host paths the container can see.
+#
+# Windows drives appear inside WSL2 under /mnt/<letter>. The pool mounts below are
+# read-only on purpose: SakuraDrive never writes to your data.
+
+services:
+  sakuradrive:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: sakuradrive:latest
+    container_name: sakuradrive
+    restart: unless-stopped
+
+    ports:
+      - "${SAKURADRIVE_PORT:-8080}:8080"
+
+    environment:
+      # Only affects log timestamps; the schedule uses the timezone set in the UI.
+      TZ: ${TZ:-UTC}
+      SAKURADRIVE_LOG_LEVEL: ${SAKURADRIVE_LOG_LEVEL:-info}
+      # Set to true only on a trusted network, or behind an authenticating proxy.
+      SAKURADRIVE_DISABLE_AUTH: ${SAKURADRIVE_DISABLE_AUTH:-false}
+
+    volumes:
+      # Database, generated export bundles and the Kopia cache.
+      - sakuradrive-data:/data
+
+      # --- The pools, as seen from WSL2 -----------------------------------
+      # P: is the HDD pool's DrivePool virtual drive.
+      - /mnt/p:/mnt/pools/hdd:ro
+      # S: is the SSD pool.
+      - /mnt/s:/mnt/pools/ssd:ro
+
+      # --- Individual pool parts (optional but strongly recommended) -------
+      # Cataloguing each disk's PoolPart folder separately is what lets the
+      # disaster-recovery report say exactly which files a specific dead disk
+      # took with it. Add one line per pool disk.
+      - /mnt/e:/mnt/parts/drivepool27:ro
+      - /mnt/f:/mnt/parts/drivepool28:ro
+
+      # --- The standalone PrimoCache SSD ----------------------------------
+      - /mnt/g:/mnt/disks/ssdcache:ro
+
+      # --- Where automatic export bundles are written ---------------------
+      # Point this at a folder the host already backs up to Backblaze: the catalog
+      # is most valuable exactly when this container's own storage is gone.
+      - /mnt/d/SakuraDriveExports:/backup/sakuradrive
+
+volumes:
+  sakuradrive-data:

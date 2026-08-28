@@ -1,0 +1,322 @@
+{
+  "protocolVersion": 1,
+  "agentVersion": "1.0.0",
+  "hostname": "NAS-01",
+  "collectedAt": "2024-03-05T03:15:00.000Z",
+  "intervalSeconds": 900,
+  "physicalDisks": [
+    {
+      "deviceId": "\\\\.\\PHYSICALDRIVE3",
+      "friendlyName": "WDC WD140EDGZ-11B1PA0",
+      "model": "WDC WD140EDGZ-11B1PA0",
+      "serialNumber": "WD-ABC123",
+      "firmwareVersion": "85.00A85",
+      "sizeBytes": 14000519643136,
+      "mediaType": "HDD",
+      "busType": "SATA",
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "physicalLocation": "Bay 7",
+      "adapterSerialNumber": "",
+      "temperatureC": 37
+    },
+    {
+      "deviceId": "\\\\.\\PHYSICALDRIVE4",
+      "friendlyName": "WDC WD140EDGZ-11B1PA0",
+      "model": "WDC WD140EDGZ-11B1PA0",
+      "serialNumber": "WD-DEF456",
+      "firmwareVersion": "85.00A85",
+      "sizeBytes": 14000519643136,
+      "mediaType": "HDD",
+      "busType": "SATA",
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "physicalLocation": "Bay 8",
+      "adapterSerialNumber": "",
+      "temperatureC": 39
+    },
+    {
+      "deviceId": "\\\\.\\PHYSICALDRIVE1",
+      "friendlyName": "Samsung SSD 990 PRO 2TB",
+      "model": "Samsung SSD 990 PRO 2TB",
+      "serialNumber": "S6Z1NJ0T900001",
+      "firmwareVersion": "4B2QJXD7",
+      "sizeBytes": 2000398934016,
+      "mediaType": "SSD",
+      "busType": "NVMe",
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "physicalLocation": "M.2 slot 1",
+      "adapterSerialNumber": "",
+      "temperatureC": 43
+    }
+  ],
+  "volumes": [
+    {
+      "volumeId": "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\",
+      "label": "DRIVEPOOL27",
+      "driveLetter": "E",
+      "path": "E:\\",
+      "fileSystem": "NTFS",
+      "fileSystemLabel": "DRIVEPOOL27",
+      "sizeBytes": 14000000000000,
+      "freeBytes": 3958241161216,
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "dirty": false,
+      "physicalDiskIds": [
+        "\\\\.\\PHYSICALDRIVE3"
+      ]
+    },
+    {
+      "volumeId": "\\\\?\\Volume{22222222-2222-2222-2222-222222222222}\\",
+      "label": "DRIVEPOOL28",
+      "driveLetter": "F",
+      "path": "F:\\",
+      "fileSystem": "NTFS",
+      "fileSystemLabel": "DRIVEPOOL28",
+      "sizeBytes": 14000000000000,
+      "freeBytes": 966367641,
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "dirty": true,
+      "physicalDiskIds": [
+        "\\\\.\\PHYSICALDRIVE4"
+      ]
+    },
+    {
+      "volumeId": "\\\\?\\Volume{33333333-3333-3333-3333-333333333333}\\",
+      "label": "SSDPOOL1",
+      "driveLetter": "G",
+      "path": "G:\\",
+      "fileSystem": "NTFS",
+      "fileSystemLabel": "SSDPOOL1",
+      "sizeBytes": 2000000000000,
+      "freeBytes": 1200000000000,
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "dirty": false,
+      "physicalDiskIds": [
+        "\\\\.\\PHYSICALDRIVE1"
+      ]
+    },
+    {
+      "volumeId": "\\\\?\\Volume{44444444-4444-4444-4444-444444444444}\\",
+      "label": "HDD Pool",
+      "driveLetter": "P",
+      "path": "P:\\",
+      "fileSystem": "Covefs",
+      "fileSystemLabel": "HDD Pool",
+      "sizeBytes": 28000000000000,
+      "freeBytes": 3959207528857,
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "dirty": false,
+      "physicalDiskIds": []
+    }
+  ],
+  "smart": [
+    {
+      "deviceId": "\\\\.\\PHYSICALDRIVE3",
+      "serialNumber": "WD-ABC123",
+      "model": "WDC WD140EDGZ-11B1PA0",
+      "firmware": "85.00A85",
+      "source": "smartctl",
+      "smartSupported": true,
+      "smartEnabled": true,
+      "overallHealthPassed": true,
+      "temperatureC": 37.0,
+      "powerOnHours": 28451.0,
+      "powerCycles": 63.0,
+      "rotationRate": 7200.0,
+      "protocol": "ATA",
+      "attributes": [
+        {
+          "id": 5,
+          "name": "Reallocated_Sector_Ct",
+          "value": 100.0,
+          "worst": 100.0,
+          "threshold": 10.0,
+          "raw": 0.0,
+          "rawString": "0",
+          "whenFailed": "",
+          "flags": ""
+        },
+        {
+          "id": 9,
+          "name": "Power_On_Hours",
+          "value": 61.0,
+          "worst": 61.0,
+          "threshold": 0.0,
+          "raw": 28451.0,
+          "rawString": "28451",
+          "whenFailed": "",
+          "flags": ""
+        },
+        {
+          "id": 197,
+          "name": "Current_Pending_Sector",
+          "value": 100.0,
+          "worst": 100.0,
+          "threshold": 0.0,
+          "raw": 2.0,
+          "rawString": "2",
+          "whenFailed": "",
+          "flags": ""
+        },
+        {
+          "id": 199,
+          "name": "UDMA_CRC_Error_Count",
+          "value": 200.0,
+          "worst": 200.0,
+          "threshold": 0.0,
+          "raw": 0.0,
+          "rawString": "0",
+          "whenFailed": "",
+          "flags": ""
+        }
+      ],
+      "nvme": null,
+      "selfTest": {
+        "status": "Completed without error",
+        "failed": false,
+        "lastHours": 28100.0,
+        "remainingPercent": null
+      }
+    },
+    {
+      "deviceId": "\\\\.\\PHYSICALDRIVE1",
+      "serialNumber": "S6Z1NJ0T900001",
+      "model": "Samsung SSD 990 PRO 2TB",
+      "firmware": "4B2QJXD7",
+      "source": "smartctl",
+      "smartSupported": null,
+      "smartEnabled": null,
+      "overallHealthPassed": true,
+      "temperatureC": 43.0,
+      "powerOnHours": 9120.0,
+      "powerCycles": null,
+      "rotationRate": null,
+      "protocol": "NVMe",
+      "attributes": [],
+      "nvme": {
+        "availableSpare": 100.0,
+        "availableSpareThreshold": 10.0,
+        "percentageUsed": 7.0,
+        "mediaErrors": 0.0,
+        "errorLogEntries": 3.0,
+        "criticalWarning": 0.0,
+        "dataUnitsRead": 4210000.0,
+        "dataUnitsWritten": 9880000.0,
+        "unsafeShutdowns": 11.0
+      },
+      "selfTest": null
+    }
+  ],
+  "pools": [
+    {
+      "poolId": "{hdd-pool}",
+      "name": "HDD Pool",
+      "driveLetter": "P",
+      "sizeBytes": 28000000000000,
+      "freeBytes": 3959207528857,
+      "duplicatedBytes": null,
+      "unduplicatedBytes": null,
+      "parts": [
+        {
+          "partId": "PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c",
+          "name": "DRIVEPOOL27",
+          "volumeId": "",
+          "volumeLabel": "DRIVEPOOL27",
+          "driveLetter": "E",
+          "path": "E:\\PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c",
+          "sizeBytes": 13963797672755,
+          "freeBytes": 3958241859994,
+          "usedBytes": null,
+          "physicalDiskId": "\\\\.\\PHYSICALDRIVE3",
+          "missing": false,
+          "readOnly": false
+        },
+        {
+          "partId": "PoolPart.7b52c4d1-2e3f-4a5b-8c9d-1e2f3a4b5c6d",
+          "name": "DRIVEPOOL28",
+          "volumeId": "",
+          "volumeLabel": "DRIVEPOOL28",
+          "driveLetter": "F",
+          "path": "F:\\PoolPart.7b52c4d1-2e3f-4a5b-8c9d-1e2f3a4b5c6d",
+          "sizeBytes": 13963797672755,
+          "freeBytes": 966367641600,
+          "usedBytes": null,
+          "physicalDiskId": "\\\\.\\PHYSICALDRIVE4",
+          "missing": false,
+          "readOnly": false
+        }
+      ]
+    }
+  ],
+  "duplication": [
+    {
+      "poolId": "{hdd-pool}",
+      "path": "",
+      "level": 1
+    },
+    {
+      "poolId": "{hdd-pool}",
+      "path": "Backups",
+      "level": 3
+    },
+    {
+      "poolId": "{hdd-pool}",
+      "path": "Media",
+      "level": 2
+    },
+    {
+      "poolId": "{hdd-pool}",
+      "path": "Media/Movies/4K",
+      "level": 3
+    }
+  ],
+  "performance": [
+    {
+      "instance": "3 E:",
+      "deviceId": "\\\\.\\PHYSICALDRIVE3",
+      "readLatencyMs": 4.2,
+      "writeLatencyMs": 3.1,
+      "queueLength": 0.4,
+      "readBytesPerSec": 41000000.0,
+      "writeBytesPerSec": 12000000.0,
+      "readsPerSec": null,
+      "writesPerSec": null,
+      "idlePercent": 71.5,
+      "busyPercent": 28.5,
+      "sampleSeconds": 3
+    },
+    {
+      "instance": "4 F:",
+      "deviceId": "\\\\.\\PHYSICALDRIVE4",
+      "readLatencyMs": 912.0,
+      "writeLatencyMs": 740.0,
+      "queueLength": 44.2,
+      "readBytesPerSec": 900000.0,
+      "writeBytesPerSec": 400000.0,
+      "readsPerSec": null,
+      "writesPerSec": null,
+      "idlePercent": 2.1,
+      "busyPercent": 97.9,
+      "sampleSeconds": 3
+    }
+  ],
+  "primoCache": {
+    "available": false,
+    "version": null,
+    "reason": "PrimoCache is installed but exposes no command line interface this agent can read.",
+    "caches": []
+  },
+  "errors": [
+    {
+      "collector": "primocache",
+      "message": "No command line interface found",
+      "detail": ""
+    }
+  ]
+}
