@@ -267,14 +267,18 @@ export class WorkflowManager extends EventEmitter {
         }
       }
 
-      if (!open || !settings.schedule.autoResume) return;
-
       for (const definition of this.orderedDefinitions()) {
-        if (!definition.autoStart || !definition.respectsSchedule) continue;
+        if (!definition.autoStart) continue;
+        // Heavy-I/O workflows wait for a painted window; light ones (verification,
+        // exports, retention) run whenever they say they have work.
+        if (definition.respectsSchedule && !open) continue;
         if (this.active.has(definition.id)) continue;
         if (this.groupBusy(definition.concurrencyGroup)) continue;
+
         const resumable = this.resumableRun(definition.id);
+        if (resumable && !settings.schedule.autoResume) continue;
         if (!resumable && !(await definition.hasWork())) continue;
+
         try {
           await this.start(definition.id, { trigger: 'schedule' });
         } catch (error) {

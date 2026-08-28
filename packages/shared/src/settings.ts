@@ -228,9 +228,18 @@ export const settingsSchema = z.object({
         .default({}),
       password: z.string().default(''),
       configFile: z.string().default(''),
+      /**
+       * `manifest` mode reads a plain listing instead of talking to the repository —
+       * useful when the container cannot reach Backblaze, or to verify against a
+       * listing produced elsewhere (`kopia ls -lr <snapshot> > /data/backup-list.txt`).
+       * Accepts NDJSON objects, `size<TAB>mtime<TAB>path` rows, or bare paths.
+       */
+      manifestPath: z.string().default(''),
       cacheDirectory: z.string().default('/data/kopia-cache'),
       extraArgs: z.array(z.string()).default([]),
       expectations: z.array(backupExpectationSchema).default([]),
+      /** How often the backup verification workflow runs itself. */
+      verifyIntervalHours: z.number().int().min(1).default(24),
       /** Stop listing after this many entries to bound memory on huge repositories. */
       maxEntriesPerSnapshot: z.number().int().min(1000).default(5_000_000),
     })
