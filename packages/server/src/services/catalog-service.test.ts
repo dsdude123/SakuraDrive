@@ -54,6 +54,18 @@ function addFile(rootId: string, relPath: string, size: number, duplication = 1)
   );
 }
 
+/**
+ * Record which physical disk a pool part sits on, the way the agent's pool report does.
+ * DrivePool's duplication promise is about disks, so the catalog resolves every part to
+ * one before it counts copies.
+ */
+function setPartDisk(volumeLabel: string, deviceKey: string, poolId = 'hdd'): void {
+  db.prepare(
+    `INSERT INTO pool_parts (pool_id, part_id, name, volume_label, device_key, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, 'now')`,
+  ).run(poolId, `${poolId}:${volumeLabel}`, volumeLabel, volumeLabel, deviceKey);
+}
+
 beforeEach(() => {
   db = openTestDatabase();
   settings = new SettingsService(db);
@@ -210,6 +222,89 @@ describe('disaster recovery', () => {
 
   it('reports nothing when no pool parts are catalogued', () => {
     expect(catalog.findUnderDuplicated('hdd')).toEqual([]);
+  });
+
+  // DrivePool's duplication setting is a promise about *physical disks*: two copies are
+  // only two copies if they are on two drives. If both pool parts happen to be on one
+  // disk, that disk's death takes both, and the tool has to say so.
+  describe('when two pool parts share a physical disk', () => {
+    beforeEach(() => {
+      configurePoolRoots();
+      setPartDisk('DRIVEPOOL27', 'disk-4');
+      setPartDisk('DRIVEPOOL28', 'disk-4');
+    });
+
+    it('counts one copy, not two, for a file written to both parts', () => {
+      addFile('part27', 'Media/dup.mkv', 100, 2);
+      addFile('part28', 'Media/dup.mkv', 100, 2);
+
+      const under = catalog.findUnderDuplicated('hdd');
+      expect(under).toHaveLength(1);
+      expect(under[0]).toMatchObject({ relPath: 'Media/dup.mkv', observedLevel: 1, expectedLevel: 2 });
+    });
+
+    it('loses both copies with the disk', () => {
+      addFile('part27', 'Media/dup.mkv', 100, 2);
+      addFile('part28', 'Media/dup.mkv', 100, 2);
+      addFile('part27', 'Media/only-here.mkv', 500);
+
+      const impact = catalog.diskLossImpact('part27');
+      expect(impact.deviceKey).toBe('disk-4');
+      expect(impact.sharedDiskRootIds).toEqual(['part28']);
+      // Two distinct paths, counted once each despite dup.mkv having two rows.
+      expect(impact.unrecoverableFiles).toBe(2);
+      expect(impact.unrecoverableBytes).toBe(600);
+      expect(impact.duplicatedFiles).toBe(0);
+
+      const { files, total } = catalog.listUnrecoverableFiles('part27');
+      expect(total).toBe(2);
+      expect(files.map((file) => file.relPath)).toEqual(['Media/only-here.mkv', 'Media/dup.mkv']);
+    });
+
+    it('reports the parts sharing the disk so the layout can be fixed', () => {
+      const collisions = catalog.findPartsSharingADisk('hdd');
+      expect(collisions).toHaveLength(1);
+      expect(collisions[0]!.deviceKey).toBe('disk-4');
+      expect(collisions[0]!.rootIds.sort()).toEqual(['part27', 'part28']);
+      expect(collisions[0]!.labels.sort()).toEqual(['DRIVEPOOL27', 'DRIVEPOOL28']);
+    });
+
+    it('shows the pool view a duplicated file occupying only one disk', () => {
+      addFile('part27', 'Media/dup.mkv', 100, 2);
+      addFile('part28', 'Media/dup.mkv', 100, 2);
+      catalog.rebuildPoolDirStats('hdd');
+      const entry = catalog
+        .listDirectory('pool:hdd', 'Media')
+        .entries.find((candidate) => candidate.name === 'dup.mkv')!;
+      // Observed copies, which is what the pool view shows as the duplication level.
+      expect(entry.duplicationLevel).toBe(1);
+    });
+  });
+
+  it('keeps parts on different disks as separate failure domains', () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/dup.mkv', 100, 2);
+    addFile('part28', 'Media/dup.mkv', 100, 2);
+
+    expect(catalog.findPartsSharingADisk('hdd')).toEqual([]);
+    expect(catalog.findUnderDuplicated('hdd')).toEqual([]);
+    const impact = catalog.diskLossImpact('part27');
+    expect(impact.sharedDiskRootIds).toEqual([]);
+    expect(impact.unrecoverableFiles).toBe(0);
+    expect(impact.duplicatedFiles).toBe(1);
+  });
+
+  it('treats a part whose disk is unknown as a failure domain of its own', () => {
+    // Two unknowns must not be assumed to be the same disk: that would report data as
+    // lost when it is fine. The conservative reading of missing data is "separate".
+    configurePoolRoots();
+    addFile('part27', 'Media/dup.mkv', 100, 2);
+    addFile('part28', 'Media/dup.mkv', 100, 2);
+
+    expect(catalog.findPartsSharingADisk('hdd')).toEqual([]);
+    expect(catalog.diskLossImpact('part27').unrecoverableFiles).toBe(0);
   });
 });
 

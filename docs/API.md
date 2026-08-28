@@ -98,7 +98,11 @@ Workflow ids: `catalog.scan`, `catalog.hash`, `catalog.duplication`, `backup.ver
 | GET | `/api/bitrot.csv` | |
 | GET | `/api/dr/impact` | `?rootId=` — what a disk takes with it, plus the file list |
 | GET | `/api/dr/impact.csv` | The full list, unpaginated |
-| GET | `/api/dr/under-duplicated` | `?poolId=` — fewer copies than configured |
+| GET | `/api/dr/under-duplicated` | `?poolId=` — copies on fewer physical disks than configured |
+
+`/api/dr/impact` treats a **physical disk** as the failure domain, not a pool part: any
+other part on the same drive is listed in `sharedDiskRoots` and counted as lost with it,
+and `siblingRoots` holds only the parts on other drives that a copy could survive on.
 
 ## Backup
 

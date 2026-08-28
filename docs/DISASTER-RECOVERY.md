@@ -37,12 +37,33 @@ look identical from inside a container.
 
 **Disaster recovery** page, select the failed disk. It splits its contents into:
 
-- **Would be lost** — files with no copy on any other pool part. These need a backup.
-- **Survives in the pool** — duplicated elsewhere; DrivePool will re-balance them.
+- **Would be lost** — files with no copy on any *other physical disk*. These need a backup.
+- **Survives in the pool** — duplicated onto another disk; DrivePool will re-balance them.
 
 If the disk's `PoolPart.*` folder was catalogued as its own root, these numbers are
 exact. If not, the page says so and falls back to configured duplication levels — which
 can only tell you what *should* have had a second copy.
+
+#### Why "physical disk" and not "pool part"
+
+StableBit DrivePool's duplication setting is a promise about drives: at 2x, the two
+copies of a file are supposed to land on two different disks. That is the whole point —
+one disk dying must not take both copies.
+
+So SakuraDrive resolves every pool part to the physical disk behind it (the agent reports
+this with the pool inventory) and counts *distinct disks*, not parts. It matters when two
+partitions of one drive are both added to a pool: DrivePool will happily write "two
+copies", both on the same drive, and part-counting would call that file safe. Here it is
+reported as one copy, and as unrecoverable when that disk is selected on this page.
+
+That layout also raises a critical **duplication** alert of its own — "Pool *x* has *n*
+parts on one physical disk" — because no amount of re-balancing fixes it. The pool has
+nowhere else to put the copies until one of those parts is removed or moved to another
+drive.
+
+A part whose physical disk the agent cannot determine is treated as a failure domain of
+its own. Two unknowns are never assumed to be the same drive: that would report healthy
+data as lost, where the reverse mistake is caught by the alert above.
 
 ### 3. Check the backup
 

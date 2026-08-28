@@ -144,21 +144,42 @@ Catalogue each disk's `PoolPart.*` folder as its own root with the same pool id 
 question "what does this disk take with it?" becomes exact:
 
 ```sql
-SELECT COUNT(*), SUM(size_bytes) FROM files f
- WHERE f.root_id = :thisDisk AND f.deleted_at IS NULL
-   AND NOT EXISTS (SELECT 1 FROM files o
-                    WHERE o.root_id IN (:otherPartsOfThisPool)
-                      AND o.path_key = f.path_key
-                      AND o.deleted_at IS NULL)
+SELECT COUNT(*), SUM(size_bytes) FROM (
+  SELECT f.path_key, MAX(f.size_bytes) AS size_bytes FROM files f
+   WHERE f.root_id IN (:partsOnThisDisk) AND f.deleted_at IS NULL
+     AND NOT EXISTS (SELECT 1 FROM files o
+                      WHERE o.root_id IN (:partsOnOtherDisks)
+                        AND o.path_key = f.path_key
+                        AND o.deleted_at IS NULL)
+   GROUP BY f.path_key)
 ```
 
-A file is unrecoverable exactly when no sibling pool part holds the same pool-relative
-path. Without pool-part roots the report falls back to configured duplication levels and
-says so in the response — useful, but it can only tell you what *should* have a second
-copy, not what does.
+A file is unrecoverable exactly when no part **on another physical disk** holds the same
+pool-relative path. Without pool-part roots the report falls back to configured
+duplication levels and says so in the response — useful, but it can only tell you what
+*should* have a second copy, not what does.
 
-The same comparison run the other way finds under-duplicated files: paths whose observed
-copy count is below the level their DrivePool rule requires.
+### The failure domain is a disk, not a pool part
+
+DrivePool's duplication setting promises that the N copies of a file land on N different
+*drives*; that is what makes it redundancy at all. So every pool-part root is resolved to
+the physical disk behind it — `pool_parts.device_key` from the agent's pool inventory,
+falling back to the volume's device list — and copies are counted with
+`COUNT(DISTINCT <device>)` rather than `COUNT(*)`.
+
+The difference bites when two partitions of one drive are both members of a pool.
+DrivePool writes two copies, both on that drive; counting parts would call the file
+duplicated, and losing the drive would lose it anyway. Counting disks reports one copy,
+marks it under-duplicated, and treats every part of that disk as a single failure domain
+in the DR report. The layout itself raises a critical alert
+(`duplication:<pool>:shared-disk:<device>`), since re-balancing cannot fix it.
+
+A part whose disk cannot be determined becomes its own failure domain: assuming two
+unknowns were the same drive would understate redundancy and cry wolf about healthy data,
+while the opposite mistake is what the shared-disk alert exists to catch.
+
+The same comparison run the other way finds under-duplicated files: paths present on
+fewer distinct disks than the level their DrivePool rule requires.
 
 ## Duplication
 

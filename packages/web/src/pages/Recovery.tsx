@@ -18,6 +18,7 @@ interface ImpactResponse {
   impact: DiskLossImpact;
   precise: boolean;
   siblingRoots: Array<{ id: string; name: string }>;
+  sharedDiskRoots: Array<{ id: string; name: string }>;
   backupExpectations: Array<{ id: string; name: string }>;
   files: { files: Array<{ relPath: string; sizeBytes: number; mtimeMs: number }>; total: number };
 }
@@ -85,6 +86,19 @@ export function RecoveryPage(): JSX.Element {
 
             {impact.data && (
               <>
+                {impact.data.sharedDiskRoots.length > 0 && (
+                  <Banner
+                    tone="critical"
+                    title="More than one pool part is on this physical disk"
+                  >
+                    {impact.data.sharedDiskRoots.map((root) => root.name).join(', ')} share this
+                    drive with {impact.data.impact.label ?? 'it'}, so anything DrivePool duplicated
+                    between them dies with the one disk. Duplication only protects data when each
+                    part of the pool is on a drive of its own — the numbers below already count
+                    those copies as lost.
+                  </Banner>
+                )}
+
                 {!impact.data.precise && (
                   <Banner tone="warning" title="Estimated from duplication settings">
                     No sibling pool parts are catalogued for this pool, so the numbers below count
@@ -117,12 +131,13 @@ export function RecoveryPage(): JSX.Element {
                     </span>
                   </div>
                   <div className="stat">
-                    <span className="label">Compared against</span>
+                    <span className="label">Copies could survive on</span>
                     <span className="value" style={{ fontSize: 18 }}>
-                      {impact.data.siblingRoots.length} part{impact.data.siblingRoots.length === 1 ? '' : 's'}
+                      {impact.data.siblingRoots.length} disk{impact.data.siblingRoots.length === 1 ? '' : 's'}
                     </span>
                     <span className="hint">
-                      {impact.data.siblingRoots.map((root) => root.name).join(', ') || 'no siblings catalogued'}
+                      {impact.data.siblingRoots.map((root) => root.name).join(', ') ||
+                        'no other disk catalogued'}
                     </span>
                   </div>
                 </div>

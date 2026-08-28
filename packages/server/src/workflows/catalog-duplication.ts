@@ -19,8 +19,9 @@ export interface DuplicationDeps {
  * Two jobs in one pass, because both depend on the same rule set:
  *  - recompute every file's duplication level so the storage view reports the space a
  *    file really consumes (a 1 GB file at 2x duplication occupies 2 GB of pool);
- *  - compare configured duplication against how many pool parts hold each file, which
- *    only DrivePool itself would otherwise tell you, and only if you went looking.
+ *  - compare configured duplication against how many *physical disks* hold each file,
+ *    which is what DrivePool's duplication setting actually promises and what a disk
+ *    failure actually tests.
  */
 export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefinition {
   const { db, settings, catalog, alerts } = deps;
@@ -29,7 +30,7 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
     id: 'catalog.duplication',
     name: 'Duplication check',
     description:
-      'Recomputes the duplication level of every catalogued file and reports files stored on fewer pool parts than their DrivePool duplication setting requires.',
+      'Recomputes the duplication level of every catalogued file and reports files whose copies are spread across fewer physical disks than their DrivePool duplication setting requires.',
     respectsSchedule: false,
     concurrencyGroup: null,
     autoStart: true,
@@ -62,18 +63,47 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
         catalog.rebuildPoolsContaining(root.id);
       }
 
+      const poolIds = [
+        ...new Set(
+          settings
+            .get()
+            .catalog.roots.filter((root) => root.kind === 'poolpart' && root.poolId)
+            .map((root) => root.poolId as string),
+        ),
+      ];
+      const active = new Set<string>();
+
+      // Two parts of one pool on one physical disk. DrivePool believes it has placed
+      // the copies on separate disks; it has not, and no amount of re-balancing will
+      // fix it, because the pool has nowhere else to put them. Always checked, since
+      // this is a layout fault rather than the transient shortfall the flag is about.
+      let sharedDisks = 0;
+      for (const poolId of poolIds) {
+        for (const collision of catalog.findPartsSharingADisk(poolId)) {
+          sharedDisks += 1;
+          const dedupeKey = `duplication:${poolId}:shared-disk:${collision.deviceKey}`;
+          active.add(dedupeKey);
+          alerts.raise({
+            dedupeKey,
+            category: 'duplication',
+            severity: 'critical',
+            title: `Pool ${poolId} has ${collision.rootIds.length} parts on one physical disk`,
+            detail:
+              `${collision.labels.join(', ')} are all on the same disk, so duplicated files whose copies ` +
+              'landed there are lost together when it fails. Duplication only protects data when each part ' +
+              'of the pool is on a disk of its own — remove one of these from the pool, or move it to another disk.',
+            context: {
+              pool: poolId,
+              disk: collision.deviceKey,
+              parts: collision.labels.join(', '),
+            },
+          });
+        }
+      }
+
       let underDuplicated = 0;
       let underDuplicatedBytes = 0;
       if (config.duplication.alertOnUnderDuplication) {
-        const poolIds = [
-          ...new Set(
-            settings
-              .get()
-              .catalog.roots.filter((root) => root.kind === 'poolpart' && root.poolId)
-              .map((root) => root.poolId as string),
-          ),
-        ];
-        const active = new Set<string>();
         for (const poolId of poolIds) {
           const mismatches = catalog.findUnderDuplicated(poolId, 500);
           if (mismatches.length === 0) {
@@ -90,7 +120,7 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
             severity: 'warning',
             title: `${mismatches.length} file${mismatches.length === 1 ? '' : 's'} in pool ${poolId} have fewer copies than configured`,
             detail:
-              'These files are stored on fewer pool parts than their duplication setting requires, so losing one disk would lose them. ' +
+              'These files exist on fewer physical disks than their duplication setting requires, so losing one disk would lose them. ' +
               'DrivePool usually fixes this on its own once it has free space and time to re-balance — if the count is not falling, check the balancer.',
             context: {
               pool: poolId,
@@ -100,15 +130,16 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
             },
           });
         }
-        alerts.reconcile('duplication', active);
       }
+      alerts.reconcile('duplication', active);
 
       ctx.log(
-        `Updated ${updated.toLocaleString()} duplication levels; ${underDuplicated} under-duplicated file(s)`,
+        `Updated ${updated.toLocaleString()} duplication levels; ${underDuplicated} under-duplicated file(s)` +
+          (sharedDisks > 0 ? `; ${sharedDisks} pool disk(s) hosting more than one part` : ''),
       );
       return {
         state: 'completed',
-        stats: { levelsUpdated: updated, underDuplicated, underDuplicatedBytes },
+        stats: { levelsUpdated: updated, underDuplicated, underDuplicatedBytes, sharedDisks },
       };
     },
   };

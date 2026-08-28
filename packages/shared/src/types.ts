@@ -310,6 +310,12 @@ export interface DiskLossImpact {
   deviceKey: string;
   label: string | null;
   poolId: string | null;
+  /**
+   * Other pool-part roots on the same physical disk, which are lost with it.
+   * Normally empty: DrivePool's duplication only protects anything when each part
+   * of a pool is on a disk of its own.
+   */
+  sharedDiskRootIds: string[];
   /** Files that lived only on this disk and have no other copy in the pool. */
   unrecoverableFiles: number;
   unrecoverableBytes: number;

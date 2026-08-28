@@ -414,3 +414,77 @@ describe('removed catalog roots', () => {
     expect(h.services.catalog.rootStats('r1').files).toBe(0);
   });
 });
+
+describe('disaster recovery report', () => {
+  /** A pool whose two parts both sit on physical disk 4 — duplication protecting nothing. */
+  async function configureSharedDiskPool(): Promise<void> {
+    await h.signIn();
+    h.services.settings.update({
+      catalog: {
+        roots: [
+          {
+            id: 'part27',
+            name: 'DRIVEPOOL27',
+            kind: 'poolpart',
+            poolId: 'hdd',
+            containerPath: '/mnt/parts/27',
+            driveLabel: 'DRIVEPOOL27',
+          },
+          {
+            id: 'part28',
+            name: 'DRIVEPOOL28',
+            kind: 'poolpart',
+            poolId: 'hdd',
+            containerPath: '/mnt/parts/28',
+            driveLabel: 'DRIVEPOOL28',
+          },
+        ],
+      },
+    });
+    for (const label of ['DRIVEPOOL27', 'DRIVEPOOL28']) {
+      h.services.db
+        .prepare(
+          `INSERT INTO pool_parts (pool_id, part_id, name, volume_label, device_key, last_seen_at)
+           VALUES ('hdd', ?, ?, ?, 'disk-4', 'now')`,
+        )
+        .run(`hdd:${label}`, label, label);
+    }
+    for (const rootId of ['part27', 'part28']) {
+      h.services.db
+        .prepare(
+          `INSERT INTO files (root_id, rel_path, path_key, dir_key, name, size_bytes, mtime_ms,
+                              duplication_level, first_seen_at, last_seen_at)
+           VALUES (?, 'Media/dup.mkv', 'media/dup.mkv', 'media', 'dup.mkv', 100, 1, 2, 'now', 'now')`,
+        )
+        .run(rootId);
+    }
+  }
+
+  it('counts a copy on the same physical disk as lost, not as protection', async () => {
+    await configureSharedDiskPool();
+    const body = json(await request(h, { method: 'GET', url: '/api/dr/impact?rootId=part27' }));
+    const impact = body.impact as unknown as { unrecoverableFiles: number; duplicatedFiles: number };
+
+    expect(impact.unrecoverableFiles).toBe(1);
+    expect(impact.duplicatedFiles).toBe(0);
+    expect(body.sharedDiskRoots).toEqual([{ id: 'part28', name: 'DRIVEPOOL28' }]);
+    // Nothing is left to compare against: both parts die with the one disk.
+    expect(body.siblingRoots).toEqual([]);
+    expect(body.precise).toBe(true);
+  });
+
+  it('counts a copy on another physical disk as surviving', async () => {
+    await configureSharedDiskPool();
+    h.services.db
+      .prepare(`UPDATE pool_parts SET device_key = 'disk-9' WHERE volume_label = 'DRIVEPOOL28'`)
+      .run();
+
+    const body = json(await request(h, { method: 'GET', url: '/api/dr/impact?rootId=part27' }));
+    const impact = body.impact as unknown as { unrecoverableFiles: number; duplicatedFiles: number };
+
+    expect(impact.unrecoverableFiles).toBe(0);
+    expect(impact.duplicatedFiles).toBe(1);
+    expect(body.sharedDiskRoots).toEqual([]);
+    expect(body.siblingRoots).toEqual([{ id: 'part28', name: 'DRIVEPOOL28' }]);
+  });
+});

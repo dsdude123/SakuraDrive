@@ -285,9 +285,14 @@ export function registerCatalogRoutes(app: FastifyInstance, services: Services):
     const root = config.catalog.roots.find((candidate) => candidate.id === query.rootId);
     if (!root) return reply.code(404).send({ error: 'not_found', message: 'Unknown catalog root' });
 
+    const impact = catalog.diskLossImpact(query.rootId);
+
+    // Only parts on *other* physical disks can hold a copy that survives this one, so
+    // they are what the comparison is against. A part sharing the disk dies with it.
+    const lostWithIt = new Set([root.id, ...impact.sharedDiskRootIds]);
     const siblings = config.catalog.roots.filter(
       (candidate) =>
-        candidate.id !== root.id &&
+        !lostWithIt.has(candidate.id) &&
         candidate.kind === 'poolpart' &&
         candidate.poolId !== null &&
         candidate.poolId === root.poolId,
@@ -298,10 +303,14 @@ export function registerCatalogRoutes(app: FastifyInstance, services: Services):
     );
 
     return {
-      impact: catalog.diskLossImpact(query.rootId),
+      impact,
       /** False means the numbers come from duplication rules, not observed copies. */
-      precise: siblings.length > 0,
+      precise: siblings.length > 0 || impact.sharedDiskRootIds.length > 0,
       siblingRoots: siblings.map((sibling) => ({ id: sibling.id, name: sibling.name })),
+      /** Other pool parts on this same physical disk, which the failure takes too. */
+      sharedDiskRoots: config.catalog.roots
+        .filter((candidate) => impact.sharedDiskRootIds.includes(candidate.id))
+        .map((candidate) => ({ id: candidate.id, name: candidate.name })),
       backupExpectations: backupRules.map((rule) => ({ id: rule.id, name: rule.name })),
       files: catalog.listUnrecoverableFiles(query.rootId, query.limit, query.offset),
     };

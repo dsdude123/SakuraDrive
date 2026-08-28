@@ -373,6 +373,100 @@ export class CatalogService {
   }
 
   /**
+   * Which physical disk each pool-part root lives on.
+   *
+   * This is the crux of the redundancy model. StableBit DrivePool's guarantee is that
+   * the N copies of a duplicated file land on N *different physical disks* — that is
+   * the entire point of duplication. Counting pool parts is therefore only a valid
+   * proxy while every part sits on its own disk. Two parts on one disk (two partitions
+   * of the same drive added to the pool) would report "2 copies" for a file that one
+   * disk failure destroys outright.
+   *
+   * So copies are counted per distinct physical disk, and a root whose disk cannot be
+   * determined is treated as its own failure domain — the conservative reading, since
+   * assuming two unknowns are the same disk would understate redundancy instead.
+   */
+  partDeviceKeys(rootIds: readonly string[]): Map<string, string> {
+    const roots = this.settings.get().catalog.roots;
+    const mapping = new Map<string, string>();
+
+    for (const rootId of rootIds) {
+      const root = roots.find((candidate) => candidate.id === rootId);
+      const label = root?.driveLabel?.trim();
+
+      // The agent reports the physical disk behind each pool part; prefer that.
+      let deviceKey: string | null = null;
+      if (label) {
+        deviceKey =
+          this.db
+            .prepare<[string], { device_key: string | null }>(
+              'SELECT device_key FROM pool_parts WHERE volume_label = ? AND device_key IS NOT NULL LIMIT 1',
+            )
+            .get(label)?.device_key ?? null;
+
+        if (!deviceKey) {
+          const volume = this.db
+            .prepare<[string], { device_keys: string }>(
+              'SELECT device_keys FROM volumes WHERE label = ? LIMIT 1',
+            )
+            .get(label);
+          deviceKey = volume ? (JSON.parse(volume.device_keys) as string[])[0] ?? null : null;
+        }
+      }
+
+      // Unknown disk: keep the root as its own failure domain rather than guessing.
+      mapping.set(rootId, deviceKey ?? `root:${rootId}`);
+    }
+    return mapping;
+  }
+
+  /**
+   * A SQL expression mapping `root_id` to its physical disk, for counting distinct
+   * disks rather than distinct parts. Root ids are bound, never interpolated.
+   */
+  private deviceExpression(rootIds: readonly string[]): { expr: string; params: string[] } {
+    const mapping = this.partDeviceKeys(rootIds);
+    const params: string[] = [];
+    let expr = 'CASE root_id';
+    for (const [rootId, deviceKey] of mapping) {
+      expr += ' WHEN ? THEN ?';
+      params.push(rootId, deviceKey);
+    }
+    expr += ' ELSE root_id END';
+    return { expr, params };
+  }
+
+  /**
+   * Pool parts of one pool that share a physical disk.
+   *
+   * Duplication cannot protect anything stored only on these: DrivePool would believe
+   * it had placed copies on separate disks when it had not. Worth an alert of its own.
+   */
+  findPartsSharingADisk(poolId: string): Array<{ deviceKey: string; rootIds: string[]; labels: string[] }> {
+    const rootIds = this.partRootIds(poolId);
+    const mapping = this.partDeviceKeys(rootIds);
+    const roots = this.settings.get().catalog.roots;
+
+    const byDevice = new Map<string, string[]>();
+    for (const [rootId, deviceKey] of mapping) {
+      // A root whose disk is unknown is its own domain, so it can never collide.
+      if (deviceKey.startsWith('root:')) continue;
+      byDevice.set(deviceKey, [...(byDevice.get(deviceKey) ?? []), rootId]);
+    }
+
+    return [...byDevice.entries()]
+      .filter(([, ids]) => ids.length > 1)
+      .map(([deviceKey, ids]) => ({
+        deviceKey,
+        rootIds: ids,
+        labels: ids.map((id) => {
+          const root = roots.find((candidate) => candidate.id === id);
+          return root?.driveLabel || root?.name || id;
+        }),
+      }));
+  }
+
+  /**
    * One row per distinct pool-relative path across a pool's member disks.
    *
    * `copies` is how many parts hold the path, which is the observed duplication —
@@ -382,18 +476,21 @@ export class CatalogService {
     const rootIds = this.partRootIds(poolId);
     if (rootIds.length === 0) return null;
     const placeholders = rootIds.map(() => '?').join(', ');
+    const device = this.deviceExpression(rootIds);
     return {
+      // `copies` counts distinct physical disks, because that is what DrivePool's
+      // duplication guarantee is about and what survives a disk failure.
       sql: `SELECT path_key,
-                   MIN(rel_path)          AS rel_path,
-                   MAX(size_bytes)        AS size_bytes,
-                   MAX(mtime_ms)          AS mtime_ms,
-                   MAX(duplication_level) AS duplication_level,
-                   COUNT(*)               AS copies,
-                   MAX(hash)              AS hash
+                   MIN(rel_path)               AS rel_path,
+                   MAX(size_bytes)             AS size_bytes,
+                   MAX(mtime_ms)               AS mtime_ms,
+                   MAX(duplication_level)      AS duplication_level,
+                   COUNT(DISTINCT ${device.expr}) AS copies,
+                   MAX(hash)                   AS hash
               FROM files
              WHERE root_id IN (${placeholders}) AND deleted_at IS NULL ${extraWhere}
              GROUP BY path_key`,
-      params: [...rootIds, ...params],
+      params: [...device.params, ...rootIds, ...params],
     };
   }
 
@@ -1096,30 +1193,58 @@ export class CatalogService {
   /* ------------------------------------------------------- disaster recovery */
 
   /**
+   * The catalog roots that die together with one pool part.
+   *
+   * The failure domain is a *physical disk*, not a pool part. StableBit DrivePool
+   * promises that the N copies of a duplicated file land on N different disks, so the
+   * question "what survives if this disk dies?" has to be asked of disks: every pool
+   * part sharing the dead disk goes with it, and only parts on other disks survive.
+   * Treating one part as the unit would call a file safe because a second copy sits on
+   * another partition of the very disk that just failed.
+   */
+  private failureDomain(partRootId: string) {
+    const roots = this.settings.get().catalog.roots;
+    const root = roots.find((candidate) => candidate.id === partRootId);
+    const peers = roots
+      .filter(
+        (candidate) =>
+          candidate.kind === 'poolpart' &&
+          candidate.poolId !== null &&
+          candidate.poolId === root?.poolId,
+      )
+      .map((candidate) => candidate.id);
+    const ids = peers.includes(partRootId) ? peers : [partRootId, ...peers];
+
+    const mapping = this.partDeviceKeys(ids);
+    const deviceKey = mapping.get(partRootId) ?? `root:${partRootId}`;
+
+    const lost: string[] = [];
+    const surviving: string[] = [];
+    for (const id of ids) {
+      if (mapping.get(id) === deviceKey) lost.push(id);
+      else surviving.push(id);
+    }
+    return { root, deviceKey, lost, surviving };
+  }
+
+  /**
    * What is lost if a specific disk dies.
    *
-   * Precise only when the disk's `PoolPart.*` folder is catalogued as its own root:
-   * then a file is unrecoverable exactly when no sibling pool part holds the same
-   * pool-relative path. Without pool-part roots this falls back to the duplication
-   * rules, which can only say what *should* have a second copy.
+   * Precise only when the pool's `PoolPart.*` folders are catalogued as their own
+   * roots: then a file is unrecoverable exactly when no part on a surviving disk holds
+   * the same pool-relative path. With only one part catalogued this falls back to the
+   * duplication rules, which can say what *should* have a second copy but not where.
    */
   diskLossImpact(partRootId: string): DiskLossImpact {
-    const settings = this.settings.get();
-    const root = settings.catalog.roots.find((candidate) => candidate.id === partRootId);
-    const siblings = settings.catalog.roots.filter(
-      (candidate) =>
-        candidate.id !== partRootId &&
-        candidate.kind === 'poolpart' &&
-        candidate.poolId !== null &&
-        candidate.poolId === root?.poolId,
-    );
-
+    const { root, deviceKey, lost, surviving } = this.failureDomain(partRootId);
     const generatedAt = nowIso();
+
     if (!root) {
       return {
         deviceKey: partRootId,
         label: null,
         poolId: null,
+        sharedDiskRootIds: [],
         unrecoverableFiles: 0,
         unrecoverableBytes: 0,
         duplicatedFiles: 0,
@@ -1130,8 +1255,19 @@ export class CatalogService {
       };
     }
 
-    if (siblings.length === 0) {
-      // Fall back to configured duplication: level 1 means no second copy exists.
+    const base = {
+      deviceKey,
+      label: root.driveLabel || root.name,
+      poolId: root.poolId,
+      sharedDiskRootIds: lost.filter((id) => id !== partRootId),
+      backedUpFiles: 0,
+      backedUpBytes: 0,
+      generatedAt,
+    };
+
+    if (surviving.length === 0 && lost.length === 1) {
+      // Only this part of the pool is catalogued, so the catalog cannot say where the
+      // other copies are. Fall back to configured duplication: level 1 means none.
       const row = this.db
         .prepare<[string], { files: number; bytes: number; dup_files: number; dup_bytes: number }>(
           `SELECT
@@ -1143,51 +1279,61 @@ export class CatalogService {
         )
         .get(partRootId);
       return {
-        deviceKey: partRootId,
-        label: root.driveLabel || root.name,
-        poolId: root.poolId,
+        ...base,
         unrecoverableFiles: row?.files ?? 0,
         unrecoverableBytes: row?.bytes ?? 0,
         duplicatedFiles: row?.dup_files ?? 0,
         duplicatedBytes: row?.dup_bytes ?? 0,
-        backedUpFiles: 0,
-        backedUpBytes: 0,
-        generatedAt,
       };
     }
 
-    const placeholders = siblings.map(() => '?').join(', ');
+    const lostPlaceholders = lost.map(() => '?').join(', ');
+    // Distinct pool-relative paths, not rows: a file duplicated onto two parts of this
+    // same disk is one file lost, and it is lost, not duplicated.
+    const total = this.db
+      .prepare<unknown[], { files: number; bytes: number }>(
+        `SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes), 0) AS bytes
+           FROM (SELECT path_key, MAX(size_bytes) AS size_bytes
+                   FROM files
+                  WHERE root_id IN (${lostPlaceholders}) AND deleted_at IS NULL
+                  GROUP BY path_key)`,
+      )
+      .get(...lost);
+
+    if (surviving.length === 0) {
+      // Every catalogued part of this pool sits on the one disk. Duplication placed no
+      // copy beyond it, so the whole of it goes.
+      return {
+        ...base,
+        unrecoverableFiles: total?.files ?? 0,
+        unrecoverableBytes: total?.bytes ?? 0,
+        duplicatedFiles: 0,
+        duplicatedBytes: 0,
+      };
+    }
+
+    const survivingPlaceholders = surviving.map(() => '?').join(', ');
     const row = this.db
       .prepare<unknown[], { files: number; bytes: number }>(
-        `SELECT COUNT(*) AS files, COALESCE(SUM(f.size_bytes), 0) AS bytes
-           FROM files f
-          WHERE f.root_id = ? AND f.deleted_at IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM files o
-               WHERE o.root_id IN (${placeholders})
-                 AND o.path_key = f.path_key
-                 AND o.deleted_at IS NULL)`,
-      )
-      .get(partRootId, ...siblings.map((sibling) => sibling.id));
-
-    const total = this.db
-      .prepare<[string], { files: number; bytes: number }>(
         `SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes), 0) AS bytes
-           FROM files WHERE root_id = ? AND deleted_at IS NULL`,
+           FROM (SELECT f.path_key, MAX(f.size_bytes) AS size_bytes
+                   FROM files f
+                  WHERE f.root_id IN (${lostPlaceholders}) AND f.deleted_at IS NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM files o
+                       WHERE o.root_id IN (${survivingPlaceholders})
+                         AND o.path_key = f.path_key
+                         AND o.deleted_at IS NULL)
+                  GROUP BY f.path_key)`,
       )
-      .get(partRootId);
+      .get(...lost, ...surviving);
 
     return {
-      deviceKey: partRootId,
-      label: root.driveLabel || root.name,
-      poolId: root.poolId,
+      ...base,
       unrecoverableFiles: row?.files ?? 0,
       unrecoverableBytes: row?.bytes ?? 0,
       duplicatedFiles: (total?.files ?? 0) - (row?.files ?? 0),
       duplicatedBytes: (total?.bytes ?? 0) - (row?.bytes ?? 0),
-      backedUpFiles: 0,
-      backedUpBytes: 0,
-      generatedAt,
     };
   }
 
@@ -1197,30 +1343,24 @@ export class CatalogService {
     limit = 1000,
     offset = 0,
   ): { files: Array<{ relPath: string; sizeBytes: number; mtimeMs: number }>; total: number } {
-    const settings = this.settings.get();
-    const root = settings.catalog.roots.find((candidate) => candidate.id === partRootId);
-    const siblings = settings.catalog.roots.filter(
-      (candidate) =>
-        candidate.id !== partRootId &&
-        candidate.kind === 'poolpart' &&
-        candidate.poolId !== null &&
-        candidate.poolId === root?.poolId,
-    );
+    const { lost, surviving } = this.failureDomain(partRootId);
 
-    if (siblings.length === 0) {
+    const read = (condition: string, params: unknown[]) => {
       const rows = this.db
-        .prepare<[string, number, number], { rel_path: string; size_bytes: number; mtime_ms: number }>(
-          `SELECT rel_path, size_bytes, mtime_ms FROM files
-            WHERE root_id = ? AND deleted_at IS NULL AND duplication_level <= 1
+        .prepare<unknown[], { rel_path: string; size_bytes: number; mtime_ms: number }>(
+          `SELECT MIN(f.rel_path) AS rel_path, MAX(f.size_bytes) AS size_bytes,
+                  MAX(f.mtime_ms) AS mtime_ms
+             FROM files f WHERE ${condition}
+            GROUP BY f.path_key
             ORDER BY size_bytes DESC LIMIT ? OFFSET ?`,
         )
-        .all(partRootId, limit, offset);
+        .all(...params, limit, offset);
       const total =
         this.db
-          .prepare<[string], { n: number }>(
-            `SELECT COUNT(*) AS n FROM files WHERE root_id = ? AND deleted_at IS NULL AND duplication_level <= 1`,
+          .prepare<unknown[], { n: number }>(
+            `SELECT COUNT(*) AS n FROM (SELECT 1 FROM files f WHERE ${condition} GROUP BY f.path_key)`,
           )
-          .get(partRootId)?.n ?? 0;
+          .get(...params)?.n ?? 0;
       return {
         total,
         files: rows.map((row) => ({
@@ -1229,32 +1369,27 @@ export class CatalogService {
           mtimeMs: row.mtime_ms,
         })),
       };
+    };
+
+    if (surviving.length === 0 && lost.length === 1) {
+      return read('f.root_id = ? AND f.deleted_at IS NULL AND f.duplication_level <= 1', [
+        partRootId,
+      ]);
     }
 
-    const placeholders = siblings.map(() => '?').join(', ');
-    const siblingIds = siblings.map((sibling) => sibling.id);
-    const condition = `f.root_id = ? AND f.deleted_at IS NULL
-        AND NOT EXISTS (SELECT 1 FROM files o WHERE o.root_id IN (${placeholders})
-                          AND o.path_key = f.path_key AND o.deleted_at IS NULL)`;
-    const rows = this.db
-      .prepare<unknown[], { rel_path: string; size_bytes: number; mtime_ms: number }>(
-        `SELECT f.rel_path, f.size_bytes, f.mtime_ms FROM files f WHERE ${condition}
-          ORDER BY f.size_bytes DESC LIMIT ? OFFSET ?`,
-      )
-      .all(partRootId, ...siblingIds, limit, offset);
-    const total =
-      this.db
-        .prepare<unknown[], { n: number }>(`SELECT COUNT(*) AS n FROM files f WHERE ${condition}`)
-        .get(partRootId, ...siblingIds)?.n ?? 0;
+    const lostPlaceholders = lost.map(() => '?').join(', ');
+    if (surviving.length === 0) {
+      return read(`f.root_id IN (${lostPlaceholders}) AND f.deleted_at IS NULL`, [...lost]);
+    }
 
-    return {
-      total,
-      files: rows.map((row) => ({
-        relPath: row.rel_path,
-        sizeBytes: row.size_bytes,
-        mtimeMs: row.mtime_ms,
-      })),
-    };
+    const survivingPlaceholders = surviving.map(() => '?').join(', ');
+    return read(
+      `f.root_id IN (${lostPlaceholders}) AND f.deleted_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM files o
+                          WHERE o.root_id IN (${survivingPlaceholders})
+                            AND o.path_key = f.path_key AND o.deleted_at IS NULL)`,
+      [...lost, ...surviving],
+    );
   }
 
   /**
@@ -1273,12 +1408,18 @@ export class CatalogService {
     );
     if (partRoots.length === 0) return [];
 
-    const placeholders = partRoots.map(() => '?').join(', ');
+    const rootIds = partRoots.map((root) => root.id);
+    const placeholders = rootIds.map(() => '?').join(', ');
+    const device = this.deviceExpression(rootIds);
     const rows = this.db
       .prepare<unknown[], {
         path_key: string; rel_path: string; copies: number; size_bytes: number; duplication_level: number;
       }>(
-        `SELECT path_key, MIN(rel_path) AS rel_path, COUNT(*) AS copies,
+        // Distinct physical disks, not distinct pool parts: two copies on one disk are
+        // one copy as far as surviving that disk's failure goes, and DrivePool's
+        // duplication level is a promise about disks.
+        `SELECT path_key, MIN(rel_path) AS rel_path,
+                COUNT(DISTINCT ${device.expr}) AS copies,
                 MAX(size_bytes) AS size_bytes, MAX(duplication_level) AS duplication_level
            FROM files
           WHERE root_id IN (${placeholders}) AND deleted_at IS NULL
@@ -1287,7 +1428,7 @@ export class CatalogService {
           ORDER BY size_bytes DESC
           LIMIT ?`,
       )
-      .all(...partRoots.map((root) => root.id), limit);
+      .all(...device.params, ...rootIds, limit);
 
     return rows.map((row) => ({
       relPath: row.rel_path,
