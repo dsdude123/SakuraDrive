@@ -1,0 +1,364 @@
+/**
+ * Application settings.
+ *
+ * Everything the operator can tune lives here and is edited from the UI — the Docker
+ * container itself only needs a data volume, the bind mounts for the pools and a port.
+ * The schema is the single source of truth: the server validates writes against it,
+ * the UI builds forms from it and the export/import bundle carries it verbatim.
+ */
+
+import { z } from 'zod';
+import { defaultSchedule, normalizeSchedule } from './schedule.js';
+
+export const HASH_ALGORITHMS = ['sha256', 'sha1', 'md5', 'blake2b512'] as const;
+export type HashAlgorithm = (typeof HASH_ALGORITHMS)[number];
+
+export const scanRootSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  /**
+   * `pool`     — the DrivePool virtual drive; the logical view of the data.
+   * `poolpart` — one underlying disk's `PoolPart.*` folder; tells us which physical
+   *              disk holds each file, which is what makes the DR report possible.
+   * `disk`     — any other volume, e.g. the standalone PrimoCache SSD.
+   */
+  kind: z.enum(['pool', 'poolpart', 'disk']).default('pool'),
+  /** Groups `poolpart` roots with their `pool` root. */
+  poolId: z.string().nullable().default(null),
+  /** Path inside the container, i.e. the bind mount target. */
+  containerPath: z.string().min(1),
+  /** Matching Windows path, shown in the UI and in alerts so paths are actionable. */
+  hostPath: z.string().default(''),
+  /** Volume label of the underlying disk, e.g. `DRIVEPOOL27`. */
+  driveLabel: z.string().default(''),
+  enabled: z.boolean().default(true),
+  /** When false the root is catalogued but never hashed (e.g. a scratch disk). */
+  hashEnabled: z.boolean().default(true),
+  includeGlobs: z.array(z.string()).default([]),
+  excludeGlobs: z.array(z.string()).default([]),
+  /** Skip files smaller/larger than these when hashing. 0 disables the bound. */
+  minHashSizeBytes: z.number().int().nonnegative().default(0),
+  maxHashSizeBytes: z.number().int().nonnegative().default(0),
+});
+export type ScanRoot = z.infer<typeof scanRootSchema>;
+
+export const duplicationRuleSchema = z.object({
+  id: z.string().min(1),
+  poolId: z.string().nullable().default(null),
+  /** Pool-relative folder path; empty string sets the pool default. */
+  path: z.string().default(''),
+  level: z.number().int().min(1).max(10).default(1),
+  source: z.enum(['drivepool', 'manual']).default('manual'),
+  note: z.string().default(''),
+});
+export type DuplicationRuleSetting = z.infer<typeof duplicationRuleSchema>;
+
+export const backupExpectationSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  enabled: z.boolean().default(true),
+  /** Catalog root whose files this rule covers. */
+  rootId: z.string().min(1),
+  /** Only files matching these globs are expected in the backup. Empty = everything. */
+  includeGlobs: z.array(z.string()).default([]),
+  excludeGlobs: z.array(z.string()).default([]),
+  /** Kopia source path this root maps to, e.g. `SERVER\\user:P:\\Media`. */
+  kopiaSource: z.string().default(''),
+  /** Path prefix inside the Kopia snapshot, when the source root differs from ours. */
+  kopiaPathPrefix: z.string().default(''),
+  /** Files smaller than this are not expected to be backed up. */
+  minFileSizeBytes: z.number().int().nonnegative().default(0),
+  /** Flag a backed-up file as stale when the snapshot copy is older than this. */
+  maxSnapshotAgeHours: z.number().int().nonnegative().default(24 * 8),
+});
+export type BackupExpectation = z.infer<typeof backupExpectationSchema>;
+
+export const exportDestinationSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  /** Directory inside the container, normally a bind mount that is itself backed up. */
+  path: z.string().min(1),
+  enabled: z.boolean().default(true),
+  /** Keep this many bundles here; older ones are pruned after a successful write. */
+  retain: z.number().int().min(1).max(365).default(14),
+});
+export type ExportDestination = z.infer<typeof exportDestinationSchema>;
+
+export const smartThresholdSettingsSchema = z.object({
+  temperatureWarnC: z.number().default(50),
+  temperatureCritC: z.number().default(60),
+  nvmeWearWarnPercent: z.number().default(85),
+  nvmeWearCritPercent: z.number().default(95),
+  agentStaleMinutes: z.number().int().min(5).default(60),
+  /** Per-attribute overrides, keyed by SMART attribute id. */
+  attributeOverrides: z
+    .array(
+      z.object({
+        id: z.number().int(),
+        warnAbove: z.number(),
+        critAbove: z.number(),
+        increaseSeverity: z.enum(['info', 'warning', 'critical']).nullable().default(null),
+        enabled: z.boolean().default(true),
+      }),
+    )
+    .default([]),
+});
+
+export const settingsSchema = z.object({
+  general: z
+    .object({
+      siteName: z.string().default('SakuraDrive'),
+      /** IANA timezone used for every schedule decision and timestamp in the UI. */
+      timezone: z.string().default('UTC'),
+      /** Retention for time-series data that would otherwise grow without bound. */
+      smartHistoryDays: z.number().int().min(1).default(365),
+      performanceHistoryDays: z.number().int().min(1).default(30),
+      alertHistoryDays: z.number().int().min(1).default(365),
+      workflowRunHistory: z.number().int().min(10).default(500),
+    })
+    .default({}),
+
+  schedule: z
+    .object({
+      /** 7x24 grid of hours during which heavy I/O workflows may run. */
+      heavyIo: z.array(z.string()).default(defaultSchedule()),
+      /** Pause a running workflow when its window closes instead of letting it finish. */
+      pauseOutsideWindow: z.boolean().default(true),
+      /** Resume paused work automatically when the next window opens. */
+      autoResume: z.boolean().default(true),
+      /** Cap hashing throughput. 0 = unthrottled. */
+      maxHashMBps: z.number().min(0).default(0),
+      /** Sleep between files, a cheap way to leave headroom for clients. */
+      interFileDelayMs: z.number().int().min(0).max(5000).default(0),
+      /** Parallel hashing workers. 1 is gentlest on spinning rust. */
+      hashConcurrency: z.number().int().min(1).max(16).default(2),
+      /** Parallel directory walkers during cataloguing. */
+      scanConcurrency: z.number().int().min(1).max(16).default(2),
+    })
+    .default({}),
+
+  catalog: z
+    .object({
+      roots: z.array(scanRootSchema).default([]),
+      hashAlgorithm: z.enum(HASH_ALGORITHMS).default('sha256'),
+      /** Re-hash a file this many days after its last hash to detect silent corruption. */
+      rehashIntervalDays: z.number().int().min(0).default(90),
+      /** Globs applied to every root in addition to the root's own excludes. */
+      globalExcludeGlobs: z
+        .array(z.string())
+        .default([
+          '**/$RECYCLE.BIN/**',
+          '**/System Volume Information/**',
+          '**/.covefs/**',
+          '**/Thumbs.db',
+          '**/desktop.ini',
+        ]),
+      followSymlinks: z.boolean().default(false),
+      /** Keep this many catalog scan runs' change records. */
+      changeHistoryRuns: z.number().int().min(2).default(50),
+    })
+    .default({}),
+
+  duplication: z
+    .object({
+      defaultLevel: z.number().int().min(1).max(10).default(1),
+      rules: z.array(duplicationRuleSchema).default([]),
+      /** Let agent-reported `dpcmd` values create/refresh rules automatically. */
+      acceptAgentRules: z.boolean().default(true),
+      /** Alert when a file is stored on fewer parts than its rule requires. */
+      alertOnUnderDuplication: z.boolean().default(true),
+    })
+    .default({}),
+
+  smart: smartThresholdSettingsSchema.default({}),
+
+  performance: z
+    .object({
+      enabled: z.boolean().default(true),
+      latencyWarnMs: z.number().default(100),
+      latencyCritMs: z.number().default(500),
+      queueWarn: z.number().default(8),
+      queueCrit: z.number().default(32),
+      consecutiveSamples: z.number().int().min(1).max(20).default(3),
+    })
+    .default({}),
+
+  bitrot: z
+    .object({
+      enabled: z.boolean().default(true),
+      /**
+       * A file whose content hash changed while size and mtime stayed identical is the
+       * classic bit-rot signature. Some applications rewrite files while preserving
+       * mtime, so the tolerance below lets you require an exact mtime match.
+       */
+      mtimeToleranceMs: z.number().int().min(0).default(0),
+      /** Re-read a suspected file immediately to rule out a transient read error. */
+      verifyOnDetect: z.boolean().default(true),
+      /** Raise one alert per finding rather than a single grouped alert per run. */
+      alertPerFile: z.boolean().default(false),
+    })
+    .default({}),
+
+  backup: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** `kopia` shells out to the bundled CLI; `manifest` imports a file listing. */
+      mode: z.enum(['kopia', 'manifest', 'disabled']).default('disabled'),
+      kopiaBinary: z.string().default('kopia'),
+      /** Repository connection. Only what `kopia repository connect b2` needs. */
+      repository: z
+        .object({
+          type: z.enum(['b2', 'filesystem', 's3', 'existing']).default('b2'),
+          bucket: z.string().default(''),
+          prefix: z.string().default(''),
+          keyId: z.string().default(''),
+          key: z.string().default(''),
+          endpoint: z.string().default(''),
+          path: z.string().default(''),
+        })
+        .default({}),
+      password: z.string().default(''),
+      configFile: z.string().default(''),
+      cacheDirectory: z.string().default('/data/kopia-cache'),
+      extraArgs: z.array(z.string()).default([]),
+      expectations: z.array(backupExpectationSchema).default([]),
+      /** Stop listing after this many entries to bound memory on huge repositories. */
+      maxEntriesPerSnapshot: z.number().int().min(1000).default(5_000_000),
+    })
+    .default({}),
+
+  notifications: z
+    .object({
+      discord: z
+        .object({
+          enabled: z.boolean().default(false),
+          webhookUrl: z.string().default(''),
+          username: z.string().default('SakuraDrive'),
+          minSeverity: z.enum(['info', 'warning', 'critical']).default('warning'),
+          /** Role/user mention prepended to critical alerts, e.g. `<@&123>`. */
+          mentionOnCritical: z.string().default(''),
+          /** Batch alerts raised within this many seconds into one message. 0 = never batch. */
+          batchWindowSeconds: z.number().int().min(0).max(3600).default(30),
+          notifyOnResolved: z.boolean().default(true),
+          notifyOnWorkflowFailure: z.boolean().default(true),
+          /** Suppress repeat notifications for an alert already sent within this window. */
+          renotifyAfterHours: z.number().int().min(0).default(24),
+        })
+        .default({}),
+    })
+    .default({}),
+
+  autoExport: z
+    .object({
+      enabled: z.boolean().default(true),
+      destinations: z.array(exportDestinationSchema).default([]),
+      /** Local time of day to run, `HH:MM`. */
+      timeOfDay: z.string().default('04:30'),
+      daysOfWeek: z.array(z.number().int().min(0).max(6)).default([0, 1, 2, 3, 4, 5, 6]),
+      includeCatalog: z.boolean().default(true),
+      includeSmartHistory: z.boolean().default(true),
+      includePerformanceHistory: z.boolean().default(false),
+      /**
+       * Replace credentials with placeholders in the bundle. The export is meant to
+       * survive a drive failure by living off-box, so secrets are excluded by default.
+       */
+      redactSecrets: z.boolean().default(true),
+      /** Verify each bundle by re-reading it and comparing the record count. */
+      verifyAfterWrite: z.boolean().default(true),
+    })
+    .default({}),
+
+  security: z
+    .object({
+      /** When false the UI is open to anyone who can reach the port (LAN-only setups). */
+      requireLogin: z.boolean().default(true),
+      sessionDays: z.number().int().min(1).max(365).default(30),
+    })
+    .default({}),
+});
+
+export type Settings = z.infer<typeof settingsSchema>;
+
+/** Fully-populated defaults; also what a fresh install starts from. */
+export function defaultSettings(): Settings {
+  return settingsSchema.parse({});
+}
+
+/**
+ * Parse persisted/imported settings, filling in anything missing so a bundle written by
+ * an older version still loads.
+ */
+export function parseSettings(input: unknown): Settings {
+  const parsed = settingsSchema.parse(input ?? {});
+  parsed.schedule.heavyIo = normalizeSchedule(parsed.schedule.heavyIo);
+  return parsed;
+}
+
+/** Dotted paths of every field that holds a credential. */
+export const SECRET_SETTING_PATHS = [
+  'backup.password',
+  'backup.repository.key',
+  'backup.repository.keyId',
+  'notifications.discord.webhookUrl',
+] as const;
+
+export const SECRET_PLACEHOLDER = '__REDACTED__';
+
+function getPath(target: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>((acc, key) => {
+    if (acc && typeof acc === 'object') return (acc as Record<string, unknown>)[key];
+    return undefined;
+  }, target);
+}
+
+function setPath(target: unknown, path: string, value: unknown): void {
+  const keys = path.split('.');
+  const last = keys.pop();
+  if (!last) return;
+  const parent = keys.reduce<unknown>((acc, key) => {
+    if (acc && typeof acc === 'object') return (acc as Record<string, unknown>)[key];
+    return undefined;
+  }, target);
+  if (parent && typeof parent === 'object') {
+    (parent as Record<string, unknown>)[last] = value;
+  }
+}
+
+/** Copy of `settings` with every credential replaced by a placeholder. */
+export function redactSettings(settings: Settings): Settings {
+  const copy = structuredClone(settings) as Settings;
+  for (const path of SECRET_SETTING_PATHS) {
+    const current = getPath(copy, path);
+    if (typeof current === 'string' && current.length > 0) {
+      setPath(copy, path, SECRET_PLACEHOLDER);
+    }
+  }
+  return copy;
+}
+
+/**
+ * Merge an incoming settings patch, treating the redaction placeholder as "keep the
+ * value already stored" so the UI can render a masked field without wiping the secret.
+ */
+export function mergeSettings(current: Settings, patch: unknown): Settings {
+  const merged = deepMerge(structuredClone(current), patch);
+  for (const path of SECRET_SETTING_PATHS) {
+    if (getPath(merged, path) === SECRET_PLACEHOLDER) {
+      setPath(merged, path, getPath(current, path));
+    }
+  }
+  return parseSettings(merged);
+}
+
+function deepMerge(target: unknown, source: unknown): unknown {
+  if (Array.isArray(source)) return source;
+  if (source === null || typeof source !== 'object') return source === undefined ? target : source;
+  const base: Record<string, unknown> =
+    target && typeof target === 'object' && !Array.isArray(target)
+      ? (target as Record<string, unknown>)
+      : {};
+  for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+    base[key] = deepMerge(base[key], value);
+  }
+  return base;
+}

@@ -1,0 +1,24 @@
+{
+  "name": "sakuradrive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NAS monitoring, cataloging and disaster-recovery tooling for StableBit DrivePool servers",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "workspaces": ["packages/shared", "packages/server", "packages/web"],
+  "scripts": {
+    "build": "npm run build -w @sakuradrive/shared && npm run build -w @sakuradrive/server && npm run build -w @sakuradrive/web",
+    "dev": "npm run dev -w @sakuradrive/server & npm run dev -w @sakuradrive/web",
+    "test": "npm run test -w @sakuradrive/shared && npm run test -w @sakuradrive/server && npm run test -w @sakuradrive/web",
+    "test:coverage": "npm run test:coverage -w @sakuradrive/server",
+    "typecheck": "npm run typecheck -w @sakuradrive/shared && npm run typecheck -w @sakuradrive/server && npm run typecheck -w @sakuradrive/web",
+    "lint": "npm run typecheck",
+    "start": "node packages/server/dist/main.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5",
+    "@types/node": "^22.13.1"
+  }
+}
