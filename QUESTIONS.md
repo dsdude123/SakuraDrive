@@ -135,6 +135,7 @@ UI route works.
 | **Credentials redacted from export bundles by default** | Bundles are written outside the app and end up in cloud storage | Toggle in Settings |
 | **A mass deletion raises a critical alert at 10%** | A dead disk and an unmounted share look identical from inside a container | Threshold is configurable |
 | **An unreadable root skips the scan entirely** | Otherwise a missing bind mount would mark the whole catalog deleted | — |
+| **Removing a root keeps its catalog** | A root deleted by accident must not take the record of what was on that disk with it. It is listed as orphaned with an explicit purge button | — |
 | **Single admin account** | It is your NAS | Multi-user is a schema change |
 | **Kopia bundled in the image (~40 MB)** | Backup verification needs it | `--build-arg INSTALL_KOPIA=false` |
 | **Default schedule: 01:00–07:00 weeknights, 01:00–10:00 weekends** | A guess at when nobody is streaming | Repaint on the Schedule page |
@@ -199,7 +200,7 @@ rewriting a file to the same byte count with its mtime restored — the scanner 
 it, confirmed it on re-read, raised the critical alert, and cleared the alert when the
 finding was resolved.
 
-- 529 automated tests (shared 163, server 329, web 37), all green
+- 535 automated tests (shared 163, server 335, web 37), all green
 - 53 Pester tests for the agent's parsers, all green
 - The agent runs end-to-end and degrades gracefully: on a machine with no Windows cmdlets
   at all it still produces a valid report naming every collector that could not run

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   SECRET_PLACEHOLDER,
   formatBytes,
+  formatCount,
   formatRelative,
   type AgentSummary,
   type AgentToken,
@@ -257,7 +258,23 @@ function GeneralTab({
 function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.Element {
   const [checking, setChecking] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, { readable: boolean; hint?: string; entries: string[] }>>({});
+  const orphaned = useQuery<{ roots: Array<{ rootId: string; stats: { files: number; bytes: number } }> }>(
+    '/api/catalog/orphaned',
+  );
+  const mutation = useMutation();
   const toast = useToast();
+
+  const purge = async (rootId: string) => {
+    const result = await mutation.run(`/api/catalog/roots/${encodeURIComponent(rootId)}/data`, {
+      method: 'DELETE',
+    });
+    if (result) {
+      toast.push(`Purged the catalog of ${rootId}`, 'success');
+      orphaned.refresh();
+    } else if (mutation.error) {
+      toast.push(mutation.error, 'error');
+    }
+  };
 
   const addRoot = () => {
     patch((next) => {
@@ -302,6 +319,30 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
         cataloguing those as well is what lets the disaster-recovery report say exactly which files a
         specific dead disk took with it. Give a pool and its parts the same pool id to link them.
       </Banner>
+
+      {(orphaned.data?.roots.length ?? 0) > 0 && (
+        <Card
+          title="Catalog data from removed roots"
+          description="Kept on purpose — a root deleted by accident must not take the record of what was on that disk with it"
+        >
+          <div className="stack">
+            {orphaned.data!.roots.map((entry) => (
+              <div key={entry.rootId} className="rule-row">
+                <div>
+                  <strong className="mono">{entry.rootId}</strong>
+                  <div className="faint" style={{ fontSize: 12 }}>
+                    {formatCount(entry.stats.files)} files · {formatBytes(entry.stats.bytes)} — still
+                    searchable under Catalog, including files marked deleted.
+                  </div>
+                </div>
+                <button className="small danger" onClick={() => void purge(entry.rootId)}>
+                  Purge permanently
+                </button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {draft.catalog.roots.length === 0 && (
         <EmptyState title="No roots configured" action={<button className="primary" onClick={addRoot}>Add a root</button>}>

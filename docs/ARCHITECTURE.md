@@ -107,9 +107,15 @@ instant.
 
 **`alerts`** are conditions, not events. Raising the same `dedupe_key` twice updates the
 row. A drive with a pending sector produces one alert that stays open until the condition
-clears — not one per poll. Collectors call `reconcile(category, activeKeys)` to say
-"these are all the problems I can see right now", which resolves anything they previously
-reported and no longer do.
+clears — not one per poll. Collectors call `reconcile(category, activeKeys, keyPrefix)` to
+say "these are all the problems I can see right now", which resolves anything they
+previously reported and no longer do.
+
+The `keyPrefix` matters more than it looks. Reconciliation is scoped per entity — per
+drive, per volume, per pool — so a poll in which smartctl failed to read one disk clears
+nothing for that disk. Clearing the whole category would mean an unreadable drive's real
+alerts silently resolving, which is the worst failure a monitor has: reporting a dying
+disk as healthy because it could not see it.
 
 ## Disaster recovery, precisely
 
@@ -172,7 +178,7 @@ back and comparing the record count, and pruned to a retention count.
 
 ## Testing
 
-529 automated tests across the three packages, plus 53 Pester tests for the agent.
+535 automated tests across the three packages, plus 53 Pester tests for the agent.
 
 The one that ties the halves together is the contract test: `agent/tools/New-ContractFixture.ps1`
 runs the agent's own parsing functions over representative smartctl and dpcmd output and

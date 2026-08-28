@@ -109,6 +109,59 @@ describe('SMART evaluation', () => {
     expect(ctx.alerts.list({ state: 'resolved' }).total).toBe(1);
   });
 
+  it('does not clear another drive\'s alerts when one drive drops out of the report', () => {
+    // Two failing drives, then a report that could only read one of them. The drive
+    // that went missing must keep its alert: a monitor that reports a failing disk as
+    // healthy because it could not see it is worse than no monitor at all.
+    const both = buildAgentReport();
+    both.physicalDisks.push({
+      ...both.physicalDisks[0]!,
+      deviceId: '\\\\.\\PHYSICALDRIVE4',
+      serialNumber: 'WD-DEF456',
+    });
+    both.smart = [
+      { ...both.smart[0]!, attributes: [smartAttribute({ id: 197, raw: 4 })] },
+      {
+        ...both.smart[0]!,
+        deviceId: '\\\\.\\PHYSICALDRIVE4',
+        serialNumber: 'WD-DEF456',
+        attributes: [smartAttribute({ id: 197, raw: 6 })],
+      },
+    ];
+    ctx.agents.ingest(both);
+    expect(ctx.alerts.list().alerts.filter((a) => a.category === 'smart')).toHaveLength(2);
+
+    // smartctl could not read the second drive this time round.
+    const partial = { ...both, smart: [both.smart[0]!] };
+    ctx.agents.ingest(partial);
+
+    const keys = ctx.alerts.list().alerts.map((a) => a.dedupeKey);
+    expect(keys).toContain('smart:sn:WD-ABC123:smart.attr.197');
+    expect(keys).toContain('smart:sn:WD-DEF456:smart.attr.197');
+  });
+
+  it('still clears an alert for a drive the report did cover', () => {
+    const bad = buildAgentReport();
+    bad.smart[0]!.attributes = [smartAttribute({ id: 197, raw: 4 })];
+    ctx.agents.ingest(bad);
+    expect(ctx.alerts.list().total).toBe(1);
+
+    const good = buildAgentReport();
+    good.smart[0]!.attributes = [smartAttribute({ id: 197, raw: 0 })];
+    ctx.agents.ingest(good);
+    expect(ctx.alerts.list().total).toBe(0);
+  });
+
+  it('keeps a volume alert when that volume is absent from a later report', () => {
+    const dirty = buildAgentReport();
+    dirty.volumes[0]!.dirty = true;
+    ctx.agents.ingest(dirty);
+    expect(ctx.alerts.list().alerts.some((a) => a.category === 'volume')).toBe(true);
+
+    ctx.agents.ingest(buildAgentReport({ volumes: [] }));
+    expect(ctx.alerts.list().alerts.some((a) => a.category === 'volume')).toBe(true);
+  });
+
   it('stores a snapshot and a sparse attribute history', () => {
     const first = buildAgentReport();
     first.smart[0]!.attributes = [smartAttribute({ id: 5, raw: 0 })];
@@ -166,6 +219,17 @@ describe('pool parts', () => {
     expect(alert!.severity).toBe('critical');
     expect(alert!.title).toContain('DRIVEPOOL27');
     expect(alert!.detail).toContain('Disaster Recovery');
+  });
+
+  it('keeps a missing-part alert when the pool is absent from a later report', () => {
+    // DrivePool's service being down must not look like the disk having come back.
+    const missing = buildAgentReport();
+    missing.pools[0]!.parts[0]!.missing = true;
+    ctx.agents.ingest(missing);
+    expect(ctx.alerts.list().alerts.some((a) => a.category === 'pool')).toBe(true);
+
+    ctx.agents.ingest(buildAgentReport({ pools: [] }));
+    expect(ctx.alerts.list().alerts.some((a) => a.category === 'pool')).toBe(true);
   });
 
   it('resolves once the part comes back', () => {

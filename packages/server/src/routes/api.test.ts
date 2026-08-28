@@ -375,3 +375,42 @@ describe('not found', () => {
     expect(json(response).error).toBe('not_found');
   });
 });
+
+describe('removed catalog roots', () => {
+  beforeEach(async () => {
+    await h.signIn();
+    await request(h, {
+      method: 'PATCH',
+      url: '/api/settings',
+      payload: {
+        catalog: { roots: [{ id: 'r1', name: 'Pool', containerPath: '/mnt/pool' }] },
+      },
+    });
+    h.services.db
+      .prepare(
+        `INSERT INTO files (root_id, rel_path, path_key, dir_key, name, size_bytes, first_seen_at, last_seen_at)
+         VALUES ('r1', 'Media/a.mkv', 'media/a.mkv', 'media', 'a.mkv', 100, 'now', 'now')`,
+      )
+      .run();
+  });
+
+  it('keeps the catalog when a root is removed from settings', async () => {
+    await request(h, { method: 'PATCH', url: '/api/settings', payload: { catalog: { roots: [] } } });
+    expect(h.services.catalog.rootStats('r1').files).toBe(1);
+
+    const orphaned = json(await request(h, { method: 'GET', url: '/api/catalog/orphaned' }));
+    expect((orphaned.roots as unknown as Array<{ rootId: string }>)[0]!.rootId).toBe('r1');
+  });
+
+  it('purges only when asked, and only for a root that is really gone', async () => {
+    const inUse = await request(h, { method: 'DELETE', url: '/api/catalog/roots/r1/data' });
+    expect(inUse.statusCode).toBe(409);
+    expect(h.services.catalog.rootStats('r1').files).toBe(1);
+
+    await request(h, { method: 'PATCH', url: '/api/settings', payload: { catalog: { roots: [] } } });
+    const purged = await request(h, { method: 'DELETE', url: '/api/catalog/roots/r1/data' });
+    expect(purged.statusCode).toBe(200);
+    expect(json(purged).removed).toBe(1);
+    expect(h.services.catalog.rootStats('r1').files).toBe(0);
+  });
+});

@@ -123,6 +123,12 @@ supposed to help with are exactly the ones that could corrupt its own data.
 - **An empty backup listing is treated as an error**, not as "everything is missing".
 - **Bit-rot findings are re-read before being confirmed**, so a transient controller
   fault does not produce a false alarm.
+- **Removing a root does not delete its catalog.** The rows are kept and listed as
+  orphaned, so a root deleted by accident does not take the record of what was on that
+  disk with it. Purging is an explicit, separate action.
+- **An alert is only cleared by a report that actually covered its drive.** A poll where
+  smartctl failed to read one disk leaves that disk's alerts alone, rather than reporting
+  a failing drive as healthy because it could not be seen.
 - **Credentials are redacted from export bundles by default**, because those bundles are
   written outside the app and often end up in cloud storage.
 - **The pool mounts are read-only.** SakuraDrive never writes to your data.
@@ -133,7 +139,7 @@ supposed to help with are exactly the ones that could corrupt its own data.
 
 ```bash
 npm install
-npm test          # 529 tests: shared (163), server (329), web (37)
+npm test          # 535 tests: shared (163), server (335), web (37)
 npm run typecheck
 npm run build
 

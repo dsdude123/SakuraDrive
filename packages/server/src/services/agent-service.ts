@@ -117,10 +117,15 @@ export class AgentService {
       if (result.isNew || result.escalated) raised += 1;
     }
 
-    // Anything previously reported by a hardware collector and no longer present has
-    // cleared — a replaced cable, a cooled-down drive, a chkdsk that ran.
-    for (const category of ['smart', 'volume', 'performance'] as const) {
-      this.alerts.reconcile(category, activeKeys);
+    // Anything previously reported for an entity *this report covered* and no longer
+    // present has cleared — a replaced cable, a cooled-down drive, a chkdsk that ran.
+    //
+    // Reconciliation is scoped per entity on purpose. Clearing the whole category
+    // would mean that a poll where smartctl failed to read one drive silently resolved
+    // that drive's real alerts, which is the worst thing a monitor can do: report a
+    // failing disk as healthy because it could not see it.
+    for (const [category, prefix] of this.reconcileScopes(report)) {
+      this.alerts.reconcile(category, activeKeys, prefix);
     }
 
     this.checkPoolParts(report);
@@ -593,6 +598,33 @@ export class AgentService {
     this.settings.update({ duplication: { rules: [...manual, ...fromAgent] } });
   }
 
+  /**
+   * Which alert keys this report is entitled to clear.
+   *
+   * One scope per drive that produced a SMART reading, per volume that was reported,
+   * and per drive that produced a performance sample. An entity missing from the
+   * report keeps whatever alerts it already had.
+   */
+  private reconcileScopes(report: AgentReport): Array<['smart' | 'volume' | 'performance', string]> {
+    const scopes: Array<['smart' | 'volume' | 'performance', string]> = [];
+    const deviceKeyById = new Map<string, string>();
+    for (const disk of report.physicalDisks) deviceKeyById.set(disk.deviceId, deviceKey(disk));
+
+    for (const smart of report.smart) {
+      scopes.push(['smart', `smart:${deviceKey(smart)}:`]);
+    }
+    for (const volume of report.volumes) {
+      scopes.push(['volume', `volume:${volume.volumeId}:`]);
+    }
+    if (this.settings.get().performance.enabled) {
+      for (const sample of report.performance) {
+        const key = sample.deviceId ? deviceKeyById.get(sample.deviceId) : undefined;
+        if (key) scopes.push(['performance', `perf:${key}:`]);
+      }
+    }
+    return scopes;
+  }
+
   /** A pool part DrivePool reports as missing means a disk has dropped out. */
   private checkPoolParts(report: AgentReport): void {
     const active = new Set<string>();
@@ -617,7 +649,10 @@ export class AgentService {
         }
       }
     }
-    this.alerts.reconcile('pool', active);
+    // Same reasoning: only clear missing-part alerts for pools this report described.
+    for (const pool of report.pools) {
+      this.alerts.reconcile('pool', active, `pool:${pool.poolId}:`);
+    }
   }
 
   /** Raise an alert for any agent that has stopped reporting. */

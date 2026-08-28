@@ -85,6 +85,8 @@ Workflow ids: `catalog.scan`, `catalog.hash`, `catalog.duplication`, `backup.ver
 | GET | `/api/catalog/runs/:runId/diff` | Created / modified / deleted counts and bytes |
 | GET | `/api/catalog/changes` | `?runId=&rootId=&kind=&since=&search=` |
 | GET | `/api/catalog/changes.csv` | Same filters. **The list to keep after a disk dies** |
+| GET | `/api/catalog/orphaned` | Catalog data left by roots no longer configured |
+| DELETE | `/api/catalog/roots/:rootId/data` | Purge that data. 409 while the root is still configured |
 
 ## Storage, bit rot and recovery
 
@@ -112,7 +114,7 @@ Workflow ids: `catalog.scan`, `catalog.hash`, `catalog.duplication`, `backup.ver
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/settings` | Credentials masked as `__REDACTED__` |
-| PATCH | `/api/settings` | Deep merge. Sending the mask back keeps the stored secret. Arrays are replaced wholesale |
+| PATCH | `/api/settings` | Deep merge. Sending the mask back keeps the stored secret. Arrays are replaced wholesale. Removing a root keeps its catalog; the response lists it under `orphanedRoots` |
 | POST | `/api/settings/validate` | Validate without saving |
 | PUT | `/api/settings/schedule` | `{heavyIo: string[7]}` of 24 `0`/`1` characters |
 | GET | `/api/settings/check-path` | `?path=` — is this visible inside the container? |

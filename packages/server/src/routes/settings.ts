@@ -34,13 +34,15 @@ export function registerSettingsRoutes(app: FastifyInstance, services: Services)
   app.patch('/api/settings', async (request, reply) => {
     try {
       const next = settings.update(request.body);
-      // A root removed from settings leaves its catalog rows behind otherwise.
+      // Removing a root deliberately leaves its catalog in place. This is a
+      // disaster-recovery tool: a root deleted by accident must not take the record of
+      // what was on that disk with it. The rows are surfaced as "orphaned" and can be
+      // purged explicitly once the operator confirms they are not needed.
       const knownRoots = new Set(next.catalog.roots.map((root) => root.id));
-      for (const rootId of orphanedRoots(services, knownRoots)) {
-        services.logger.info({ rootId }, 'purging catalog for a removed root');
-        catalog.purgeRoot(rootId);
-      }
-      return { settings: settings.getRedacted() };
+      return {
+        settings: settings.getRedacted(),
+        orphanedRoots: orphanedRoots(services, knownRoots),
+      };
     } catch (error) {
       return reply.code(400).send({
         error: 'invalid_settings',
@@ -60,6 +62,32 @@ export function registerSettingsRoutes(app: FastifyInstance, services: Services)
       });
     }
     return { ok: true };
+  });
+
+  /** Catalog data left behind by roots that are no longer configured. */
+  app.get('/api/catalog/orphaned', async () => {
+    const knownRoots = new Set(settings.get().catalog.roots.map((root) => root.id));
+    return {
+      roots: orphanedRoots(services, knownRoots).map((rootId) => ({
+        rootId,
+        stats: catalog.rootStats(rootId),
+      })),
+    };
+  });
+
+  app.delete<{ Params: { rootId: string } }>('/api/catalog/roots/:rootId/data', async (request, reply) => {
+    const { rootId } = request.params;
+    // Only ever purge a root that is genuinely gone from the configuration, so a typo
+    // in a URL cannot erase the catalog of a root that is still in use.
+    if (settings.get().catalog.roots.some((root) => root.id === rootId)) {
+      return reply.code(409).send({
+        error: 'root_in_use',
+        message: 'That root is still configured. Remove it from settings first.',
+      });
+    }
+    const removed = catalog.purgeRoot(rootId);
+    services.logger.info({ rootId, removed }, 'purged the catalog of a removed root');
+    return { rootId, removed };
   });
 
   app.put('/api/settings/schedule', async (request, reply) => {
