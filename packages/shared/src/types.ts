@@ -157,6 +157,8 @@ export interface VolumeSummary {
   operationalStatus: string | null;
   dirty: boolean | null;
   deviceKeys: string[];
+  /** Folder mount points, for a volume with no drive letter. */
+  mountPoints: string[];
   lastSeenAt: string | null;
 }
 

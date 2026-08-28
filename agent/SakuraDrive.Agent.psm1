@@ -43,6 +43,9 @@ function Get-DefaultAgentConfig {
         # StableBit DrivePool's command line tool, used for pool membership and
         # duplication settings.
         DpcmdPath            = ''
+        # PrimoCache's command line tool. It cannot run while the PrimoCache GUI is
+        # open, which the agent detects and reports rather than treating as a fault.
+        RxpccPath            = ''
         # How deep below each pool root to probe duplication settings. DrivePool
         # inherits downward, so only folders that differ from their parent are
         # reported; a depth of 3 covers a normal media library cheaply.
@@ -368,11 +371,16 @@ function ConvertFrom-DpcmdPoolParts {
     .SYNOPSIS
         Parse `dpcmd list-poolparts <pool>` output into pool part records.
     .DESCRIPTION
-        dpcmd prints a banner, then one indented block per pool part. The format has
-        varied across DrivePool releases, so this reads it line by line and keeps
-        whatever it recognises rather than insisting on an exact layout: a part is
-        identified by its PoolPart folder, and the surrounding lines supply the drive
-        letter, label and sizes when they are present.
+        DrivePool 2.3.x prints one block per pool:
+
+            + Pool ID 'd304fce8-5935-49cb-a280-e93bf43d12bd':
+              - '\\?\GLOBALROOT\Device\HarddiskVolume2\PoolPart.4f0ccc7c-...' [Device 0]
+
+        Note what is *not* there: no drive letter, no label, no capacity. Parts are
+        identified by an NT device path, so the letter and label are resolved separately
+        by finding which volume actually holds that PoolPart folder (see
+        Resolve-PoolPartVolume). Each part is tagged with the pool it belongs to, which
+        is what lets the server group parts by pool without the operator saying so.
     #>
     [CmdletBinding()]
     param(
@@ -382,95 +390,215 @@ function ConvertFrom-DpcmdPoolParts {
     $parts = New-Object System.Collections.Generic.List[object]
     if ($null -eq $Lines) { return , $parts.ToArray() }
 
-    $current = $null
-    $flush = {
-        if ($null -ne $current -and $current.partId) { $parts.Add($current) }
-    }
-
+    $poolId = ''
     foreach ($rawLine in $Lines) {
         if ($null -eq $rawLine) { continue }
         $line = $rawLine.Trim()
         if (-not $line) { continue }
 
-        # A line containing a PoolPart folder starts a new part.
-        if ($line -match '(?<letter>[A-Za-z]):\\(?<part>PoolPart\.[0-9a-fA-F-]+)') {
-            & $flush
-            $current = [ordered]@{
-                partId          = $Matches['part']
-                name            = ''
-                volumeId        = ''
-                volumeLabel     = ''
-                driveLetter     = $Matches['letter'].ToUpperInvariant()
-                path            = "$($Matches['letter'].ToUpperInvariant()):\$($Matches['part'])"
-                sizeBytes       = $null
-                freeBytes       = $null
-                usedBytes       = $null
-                physicalDiskId  = $null
-                missing         = $false
-                readOnly        = $false
+        if ($line -match "^\+?\s*Pool ID\s*'(?<pool>[^']+)'") {
+            $poolId = $Matches['pool']
+            continue
+        }
+
+        # ` - '<device path>\PoolPart.<guid>' [Device N]`
+        if ($line -match "^-?\s*'(?<path>[^']*PoolPart\.(?<guid>[0-9a-fA-F-]+))'\s*(\[\s*Device\s*(?<device>\d+)\s*\])?") {
+            # Capture everything from this match before running another one: a later
+            # -match replaces $Matches wholesale.
+            $devicePath = $Matches['path']
+            $partGuid = $Matches['guid']
+            $deviceIndex = if ($Matches['device']) { [int]$Matches['device'] } else { $null }
+
+            $volumeDevice = ''
+            if ($devicePath -match '(?<vol>\\Device\\HarddiskVolume\d+)') {
+                $volumeDevice = $Matches['vol']
             }
+            $parts.Add([ordered]@{
+                    partId          = "PoolPart.$partGuid"
+                    poolId          = $poolId
+                    name            = ''
+                    volumeId        = ''
+                    volumeLabel     = ''
+                    driveLetter     = $null
+                    path            = $devicePath
+                    volumeDevice    = $volumeDevice
+                    deviceIndex     = $deviceIndex
+                    sizeBytes       = $null
+                    freeBytes       = $null
+                    usedBytes       = $null
+                    physicalDiskId  = $null
+                    missing         = $false
+                    readOnly        = $false
+                })
             continue
         }
 
-        if ($null -eq $current) { continue }
-
-        if ($line -match '^(Name|Label)\s*[:=]\s*(?<value>.+)$') {
-            $current.name = $Matches['value'].Trim()
-            if (-not $current.volumeLabel) { $current.volumeLabel = $current.name }
-            continue
-        }
-        if ($line -match '^(Total|Size|Capacity)\s*[:=]\s*(?<value>.+)$') {
-            $current.sizeBytes = ConvertFrom-SizeString $Matches['value']
-            continue
-        }
-        if ($line -match '^(Free|Available)\s*[:=]\s*(?<value>.+)$') {
-            $current.freeBytes = ConvertFrom-SizeString $Matches['value']
-            continue
-        }
-        if ($line -match '^(Used)\s*[:=]\s*(?<value>.+)$') {
-            $current.usedBytes = ConvertFrom-SizeString $Matches['value']
-            continue
-        }
-        if ($line -match 'missing|not\s+connected|unavailable') {
-            $current.missing = $true
-            continue
-        }
-        if ($line -match 'read[-\s]?only') {
-            $current.readOnly = $true
-            continue
+        # DrivePool marks an absent disk in the part list rather than omitting it.
+        if ($line -match 'missing|not\s+connected|unavailable' -and $parts.Count -gt 0) {
+            $parts[$parts.Count - 1].missing = $true
         }
     }
 
-    & $flush
     , $parts.ToArray()
 }
 
-function ConvertFrom-DpcmdDuplication {
+function ConvertFrom-DpcmdDuplicationDetail {
     <#
     .SYNOPSIS
-        Extract the duplication count from `dpcmd get-duplication <path>` output.
-    .OUTPUTS
-        The integer level, or $null when the output does not contain one.
+        Parse the whole of `dpcmd get-duplication <path>` output.
+    .DESCRIPTION
+        DrivePool 2.3.x prints:
+
+            Found '\\?\J:\Tier1\'
+              Expected number of copies: 2
+              Found number of copies: 14
+              Is directory: True
+              Has multiple sub-duplication counts: False
+
+        Two fields matter beyond the level itself:
+
+        `Has multiple sub-duplication counts` is False when everything below this folder
+        shares one duplication level, which means there is nothing to learn by
+        descending — the probe can prune the whole subtree instead of walking it.
+
+        `Found number of copies` is only a real copy count for a *file*. For a directory
+        it counts how many pool parts have that folder, which on a 14-disk pool reads as
+        14 regardless of the duplication setting, so it is not treated as an observed
+        duplication level unless `Is directory` is False.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
     )
 
-    if ($null -eq $Lines) { return $null }
+    $result = [ordered]@{
+        path                = ''
+        expectedCopies      = $null
+        foundCopies         = $null
+        isDirectory         = $null
+        hasMixedSubCounts   = $null
+        found               = $false
+    }
+    if ($null -eq $Lines) { return $result }
 
     foreach ($rawLine in $Lines) {
         if ($null -eq $rawLine) { continue }
         $line = $rawLine.Trim()
-        if ($line -match 'duplicat\w*\s*(count|level)?\s*[:=]\s*(?<level>\d+)') {
-            return [int]$Matches['level']
+        if (-not $line) { continue }
+
+        if ($line -match "^Found\s+'(?<path>[^']+)'") {
+            $result.path = $Matches['path']
+            $result.found = $true
+            continue
         }
-        # Some builds print "File duplication is 2x" or simply "2x".
-        if ($line -match '\b(?<level>\d+)\s*x\b') {
-            return [int]$Matches['level']
+        if ($line -match '^Expected number of copies\s*:\s*(?<n>\d+)') {
+            $result.expectedCopies = [int]$Matches['n']
+            continue
+        }
+        if ($line -match '^Found number of copies\s*:\s*(?<n>\d+)') {
+            $result.foundCopies = [int]$Matches['n']
+            continue
+        }
+        if ($line -match '^Is directory\s*:\s*(?<v>True|False)') {
+            $result.isDirectory = ($Matches['v'] -eq 'True')
+            continue
+        }
+        if ($line -match '^Has multiple sub-duplication counts\s*:\s*(?<v>True|False)') {
+            $result.hasMixedSubCounts = ($Matches['v'] -eq 'True')
+            continue
         }
     }
-    $null
+
+    $result
+}
+
+function ConvertFrom-DpcmdDuplication {
+    <#
+    .SYNOPSIS
+        The configured duplication level from `dpcmd get-duplication`, or $null.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+    )
+
+    (ConvertFrom-DpcmdDuplicationDetail -Lines $Lines).expectedCopies
+}
+
+function Resolve-PoolPartVolume {
+    <#
+    .SYNOPSIS
+        Attach drive letters, labels and capacities to parts that dpcmd named only by
+        NT device path.
+    .DESCRIPTION
+        `dpcmd list-poolparts` identifies a part as
+        `\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.<guid>` — no letter, no label.
+        Rather than translating NT device names (which needs QueryDosDevice and still
+        misses volumes with no letter), each part is matched by looking for its
+        PoolPart folder at the root of every known volume. The folder name contains a
+        GUID, so exactly one volume can hold it.
+
+        `TestPath` is injected so the matching logic can be tested without a filesystem;
+        in production it is `Test-Path`.
+    .OUTPUTS
+        The parts, with volume details filled in and `missing` set where no volume on
+        this host holds the folder — which is precisely a pool disk that has dropped out.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array] $Parts,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array] $Volumes,
+        [Parameter(Mandatory)] [scriptblock] $TestPath
+    )
+
+    foreach ($part in $Parts) {
+        $matched = $null
+        foreach ($volume in $Volumes) {
+            # A pool drive contains the pooled view, not the PoolPart folders.
+            if ($volume.fileSystem -match 'covefs') { continue }
+
+            # On an array with more disks than there are drive letters, pool members
+            # are normally mounted without one — so try the volume's own GUID path and
+            # any folder mount point as well, not just `X:\`.
+            $roots = New-Object System.Collections.Generic.List[string]
+            if ($volume.driveLetter) { $roots.Add("$($volume.driveLetter):\") }
+            if ($volume.path) { $roots.Add(([string]$volume.path).TrimEnd('\') + '\') }
+            foreach ($mountPoint in @($volume.mountPoints)) {
+                if ($mountPoint) { $roots.Add(([string]$mountPoint).TrimEnd('\') + '\') }
+            }
+
+            foreach ($root in ($roots | Select-Object -Unique)) {
+                $candidate = "$root$($part.partId)"
+                if (& $TestPath $candidate) {
+                    $matched = $volume
+                    $part.path = $candidate
+                    break
+                }
+            }
+            if ($null -ne $matched) { break }
+        }
+
+        if ($null -eq $matched) {
+            # dpcmd listed the part but no volume here holds it: the disk is gone.
+            $part.missing = $true
+            continue
+        }
+
+        $part.driveLetter = $matched.driveLetter
+        $part.volumeId = $matched.volumeId
+        $part.volumeLabel = $matched.label
+        if (-not $part.name) { $part.name = $matched.label }
+        $part.sizeBytes = $matched.sizeBytes
+        $part.freeBytes = $matched.freeBytes
+        if ($null -ne $matched.sizeBytes -and $null -ne $matched.freeBytes) {
+            $part.usedBytes = $matched.sizeBytes - $matched.freeBytes
+        }
+        if ($matched.physicalDiskIds -and $matched.physicalDiskIds.Count -gt 0) {
+            $part.physicalDiskId = $matched.physicalDiskIds[0]
+        }
+    }
+
+    , $Parts
 }
 
 function Select-ChangedDuplicationRules {
@@ -541,6 +669,336 @@ function Get-PoolRelativePath {
         return ($normalizedPath -replace '\\', '/').TrimStart('/')
     }
     ($normalizedPath.Substring($normalizedRoot.Length) -replace '\\', '/').Trim('/')
+}
+
+#endregion
+
+#region PrimoCache ------------------------------------------------------------
+
+function ConvertFrom-RxpccStatus {
+    <#
+    .SYNOPSIS
+        Parse `rxpcc status` into cache-task records.
+    .DESCRIPTION
+        PrimoCache prints one block per cache task, then one block per cached volume:
+
+            Cache Task #1 {507EEFF9-...}
+            ----------------------------------------------------
+              Status: Active
+              Level-1 Cache: 262144MB
+                MM: 262144MB, IM: 0MB
+              Level-2 Cache: 953618MB
+                Storage: {D4CEAE5C-...}
+              Block Size: 32KB
+              Strategy: Read & Write
+              Defer-Write: Enabled
+                Latency: 300s
+              Overhead: 12.48GB
+
+            Volume #8: Cache (Active)
+              Strategy: Read & Write
+
+        Indentation is not reliable across versions, so blocks are delimited by their
+        headers and every key is matched on its own. Sizes are normalised to bytes.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+    )
+
+    $caches = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Lines) { return , $caches.ToArray() }
+
+    $current = $null
+    $section = ''   # 'l1' or 'l2' — which cache level the indented keys belong to
+
+    $flush = {
+        if ($null -ne $current) { $caches.Add($current) }
+    }
+
+    foreach ($rawLine in $Lines) {
+        if ($null -eq $rawLine) { continue }
+        $line = $rawLine.Trim()
+        if (-not $line -or $line -match '^-{3,}$') { continue }
+
+        if ($line -match '^Cache Task\s*#(?<index>\d+)\s*(?<guid>\{[^}]+\})?') {
+            & $flush
+            $section = ''
+            $current = [ordered]@{
+                name               = "Cache Task #$($Matches['index'])"
+                level              = ''
+                targetVolumes      = @()
+                cacheSizeBytes     = $null
+                usedBytes          = $null
+                readHitRate        = $null
+                writeHitRate       = $null
+                readHits           = $null
+                readMisses         = $null
+                writeHits          = $null
+                writeMisses        = $null
+                deferredWriteBytes = $null
+                pendingWriteBlocks = $null
+                freeDeferredBlocks = $null
+                status             = ''
+                blockSize          = ''
+                strategy           = ''
+                deferWrite         = $null
+                taskId             = if ($Matches['guid']) { $Matches['guid'] } else { '' }
+                level1SizeBytes    = $null
+                level2SizeBytes    = $null
+            }
+            continue
+        }
+
+        # A cached volume belongs to the task above it.
+        if ($line -match '^Volume\s*#(?<index>\d+)\s*:\s*(?<name>[^(]+)?\s*(\((?<state>[^)]+)\))?') {
+            if ($null -ne $current) {
+                $current.targetVolumes = @($current.targetVolumes) + "#$($Matches['index'])"
+            }
+            $section = 'volume'
+            continue
+        }
+
+        if ($null -eq $current) { continue }
+
+        # Each `Volume #N` block repeats `Level-2 Cache: Enabled` and the strategy
+        # keys. Those describe the volume, not the task, and must not overwrite the
+        # task's parsed sizes with an unparseable word.
+        if ($section -ne 'volume') {
+            if ($line -match '^Level-1 Cache\s*:\s*(?<size>\S+)') {
+                $section = 'l1'
+                $current.level1SizeBytes = ConvertFrom-SizeString $Matches['size']
+                continue
+            }
+            if ($line -match '^Level-2 Cache\s*:\s*(?<size>\S+)') {
+                $section = 'l2'
+                $current.level2SizeBytes = ConvertFrom-SizeString $Matches['size']
+                continue
+            }
+            if ($line -match '^Status\s*:\s*(?<v>.+)$') { $current.status = $Matches['v'].Trim(); continue }
+            if ($line -match '^Block Size\s*:\s*(?<v>.+)$') { $current.blockSize = $Matches['v'].Trim(); continue }
+            if ($line -match '^Strategy\s*:\s*(?<v>.+)$') { $current.strategy = $Matches['v'].Trim(); continue }
+            if ($line -match '^Defer-Write\s*:\s*(?<v>.+)$') {
+                $current.deferWrite = ($Matches['v'].Trim() -match '^Enabled')
+                continue
+            }
+            if ($line -match '^Overhead\s*:\s*(?<size>\S+)') {
+                $current.usedBytes = ConvertFrom-SizeString $Matches['size']
+                continue
+            }
+        }
+    }
+
+    & $flush
+
+    # The reported cache size is L1 plus L2, which is what the volume is actually
+    # backed by; the individual levels are kept for the drive detail page.
+    foreach ($cache in $caches) {
+        $total = 0
+        if ($null -ne $cache.level1SizeBytes) { $total += $cache.level1SizeBytes }
+        if ($null -ne $cache.level2SizeBytes) { $total += $cache.level2SizeBytes }
+        if ($total -gt 0) { $cache.cacheSizeBytes = $total }
+        $cache.level = if ($null -ne $cache.level2SizeBytes -and $cache.level2SizeBytes -gt 0) { 'L1+L2' } else { 'L1' }
+    }
+
+    , $caches.ToArray()
+}
+
+function ConvertFrom-RxpccVolumeList {
+    <#
+    .SYNOPSIS
+        Parse `rxpcc ls` into volume records.
+    .DESCRIPTION
+        The listing is column-formatted and indented under each disk:
+
+            Disk4      ATA     ST8000VN004-3CP1        7452.04GB
+              Vol #7   Local Volume                    16MB
+              Vol #8   DRIVEPOOL4   NTFS  272.14GB/7452.02GB  4KB  1
+
+        The trailing column is the cache task number, present only for cached volumes.
+        This is the one place the agent learns which PrimoCache task fronts which
+        labelled volume, which is what lets the interface say "the cache in front of
+        DRIVEPOOL4" instead of "cache task 1".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+    )
+
+    $volumes = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Lines) { return , $volumes.ToArray() }
+
+    $disk = ''
+    foreach ($rawLine in $Lines) {
+        if ($null -eq $rawLine) { continue }
+        $line = $rawLine.TrimEnd()
+        if (-not $line.Trim()) { continue }
+        if ($line -match '^-{3,}' -or $line -match '^\s*Index\s+Name') { continue }
+
+        if ($line -match '^(?<disk>Disk\d+)\s+(?<model>.+?)\s{2,}(?<size>[\d.]+[KMGTP]?B)\s*$') {
+            $disk = $Matches['disk']
+            continue
+        }
+
+        if ($line -match '^\s+Vol\s*#(?<index>\d+)\s+(?<rest>.+)$') {
+            $rest = $Matches['rest'].Trim()
+            $entry = [ordered]@{
+                disk        = $disk
+                index       = [int]$Matches['index']
+                label       = ''
+                driveLetter = $null
+                fileSystem  = ''
+                freeBytes   = $null
+                sizeBytes   = $null
+                cacheTask   = $null
+            }
+
+            # `NAME (L:)  NTFS  free/capacity  cluster  cacheTask`
+            if ($rest -match '^(?<name>.+?)\s{2,}(?<fs>[A-Za-z0-9]+)\s+(?<free>[\d.]+[KMGTP]?B)/(?<size>[\d.]+[KMGTP]?B)(\s+(?<cluster>\S+))?(\s+(?<task>\d+))?\s*$') {
+                $name = $Matches['name'].Trim()
+                if ($name -match '^(?<label>.*?)\s*\((?<letter>[A-Za-z]):\)$') {
+                    $entry.label = $Matches['label'].Trim()
+                    $entry.driveLetter = $Matches['letter'].ToUpperInvariant()
+                }
+                else {
+                    $entry.label = $name
+                }
+                $entry.fileSystem = $Matches['fs']
+                $entry.freeBytes = ConvertFrom-SizeString $Matches['free']
+                $entry.sizeBytes = ConvertFrom-SizeString $Matches['size']
+                if ($Matches['task']) { $entry.cacheTask = [int]$Matches['task'] }
+            }
+            else {
+                # `Local Volume  16MB` — a recovery partition with no filesystem shown.
+                $entry.label = ($rest -replace '\s{2,}.*$', '').Trim()
+            }
+
+            $volumes.Add($entry)
+            continue
+        }
+    }
+
+    , $volumes.ToArray()
+}
+
+function ConvertFrom-RxpccPerf {
+    <#
+    .SYNOPSIS
+        Parse `rxpcc perf` into hit-rate statistics, keyed by whatever the tool labels.
+    .DESCRIPTION
+        The exact layout of `perf` is not documented publicly and varies by version, so
+        this reads defensively: any `Label: value` pair whose label mentions hits,
+        misses or a rate is captured, and percentages and counts are normalised. A
+        version whose wording is not recognised yields an empty result rather than a
+        wrong one — the caller then reports statistics as unavailable, which is honest,
+        instead of inventing a hit rate.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+    )
+
+    $result = [ordered]@{
+        readHitRate  = $null
+        writeHitRate = $null
+        readHits     = $null
+        readMisses   = $null
+        writeHits    = $null
+        writeMisses  = $null
+        recognised   = $false
+    }
+    if ($null -eq $Lines) { return $result }
+
+    foreach ($rawLine in $Lines) {
+        if ($null -eq $rawLine) { continue }
+        $line = $rawLine.Trim()
+        if (-not $line) { continue }
+        if ($line -notmatch '^(?<key>[^:]+?)\s*:\s*(?<value>.+)$') { continue }
+
+        $key = $Matches['key'].Trim().ToLowerInvariant()
+        $value = $Matches['value'].Trim()
+
+        $percent = $null
+        if ($value -match '(?<n>[\d.]+)\s*%') { $percent = [double]$Matches['n'] / 100 }
+        $count = $null
+        if ($value -match '^(?<n>[\d,]+)\s*$') { $count = [double]($Matches['n'] -replace ',', '') }
+
+        if ($key -match 'read' -and $key -match 'hit' -and $key -match 'rate|ratio') {
+            $result.readHitRate = $percent; $result.recognised = $true; continue
+        }
+        if ($key -match 'write' -and $key -match 'hit' -and $key -match 'rate|ratio') {
+            $result.writeHitRate = $percent; $result.recognised = $true; continue
+        }
+        if ($key -match 'read' -and $key -match 'hit') {
+            $result.readHits = $count; $result.recognised = $true; continue
+        }
+        if ($key -match 'read' -and $key -match 'miss') {
+            $result.readMisses = $count; $result.recognised = $true; continue
+        }
+        if ($key -match 'write' -and $key -match 'hit') {
+            $result.writeHits = $count; $result.recognised = $true; continue
+        }
+        if ($key -match 'write' -and $key -match 'miss') {
+            $result.writeMisses = $count; $result.recognised = $true; continue
+        }
+    }
+
+    # Derive a rate when only raw counts were reported.
+    if ($null -eq $result.readHitRate -and $null -ne $result.readHits -and $null -ne $result.readMisses) {
+        $total = $result.readHits + $result.readMisses
+        if ($total -gt 0) { $result.readHitRate = $result.readHits / $total }
+    }
+    if ($null -eq $result.writeHitRate -and $null -ne $result.writeHits -and $null -ne $result.writeMisses) {
+        $total = $result.writeHits + $result.writeMisses
+        if ($total -gt 0) { $result.writeHitRate = $result.writeHits / $total }
+    }
+
+    $result
+}
+
+function Join-PrimoCacheReport {
+    <#
+    .SYNOPSIS
+        Combine `status`, `ls` and `perf` output into the report section the server takes.
+    .DESCRIPTION
+        Names each cache task after the labelled volumes it fronts, so the interface can
+        say "L1+L2 in front of DRIVEPOOL4, DRIVEPOOL9" rather than "Cache Task #1".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array] $Caches,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [array] $Volumes,
+        [AllowNull()] $Perf = $null,
+        [string] $Version = ''
+    )
+
+    foreach ($cache in $Caches) {
+        $index = 0
+        if ($cache.name -match '#(?<n>\d+)') { $index = [int]$Matches['n'] }
+
+        $labels = @(
+            $Volumes |
+                Where-Object { $null -ne $_.cacheTask -and $_.cacheTask -eq $index -and $_.label } |
+                ForEach-Object { if ($_.driveLetter) { "$($_.label) ($($_.driveLetter):)" } else { $_.label } }
+        )
+        if ($labels.Count -gt 0) { $cache.targetVolumes = $labels }
+
+        if ($null -ne $Perf -and $Perf.recognised) {
+            $cache.readHitRate = $Perf.readHitRate
+            $cache.writeHitRate = $Perf.writeHitRate
+            $cache.readHits = $Perf.readHits
+            $cache.readMisses = $Perf.readMisses
+            $cache.writeHits = $Perf.writeHits
+            $cache.writeMisses = $Perf.writeMisses
+        }
+    }
+
+    [ordered]@{
+        available = ($Caches.Count -gt 0)
+        version   = $Version
+        reason    = if ($Caches.Count -gt 0) { $null } else { 'rxpcc reported no cache tasks.' }
+        caches    = @($Caches)
+    }
 }
 
 #endregion
@@ -754,8 +1212,14 @@ Export-ModuleMember -Function @(
     'ConvertFrom-StorageReliabilityCounter'
     'ConvertFrom-DpcmdPoolParts'
     'ConvertFrom-DpcmdDuplication'
+    'ConvertFrom-DpcmdDuplicationDetail'
+    'Resolve-PoolPartVolume'
     'Select-ChangedDuplicationRules'
     'Get-PoolRelativePath'
+    'ConvertFrom-RxpccStatus'
+    'ConvertFrom-RxpccVolumeList'
+    'ConvertFrom-RxpccPerf'
+    'Join-PrimoCacheReport'
     'ConvertTo-PerformanceSample'
     'ConvertTo-DeviceIdFromInstance'
     'Get-JsonValue'

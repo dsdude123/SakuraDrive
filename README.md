@@ -36,9 +36,9 @@ docker compose up -d --build
 
 Open `http://<host>:8080`, create the account it asks for, then:
 
-1. **Settings → Catalog roots** — add your pools. `/mnt/p` inside WSL2 is Windows `P:`.
-   Press *Check mount* on each one; it tells you straight away whether the container can
-   actually see the path.
+1. **Settings → Catalog roots** — add the pool **member disks**, not the pooled drive.
+   `/mnt/d` inside WSL2 is Windows `D:`. Press *Check mount* on each one; it tells you
+   straight away whether the container can actually see the path.
 2. **Settings → Agents** — create a token, then run the installer on the Windows host
    (see [docs/AGENT.md](docs/AGENT.md)). Without it there is no SMART data.
 3. **Schedule** — paint the hours when heavy I/O is acceptable. The default is
@@ -85,6 +85,18 @@ Every feature is a workflow with the same lifecycle: it can be started on demand
 stopped on demand, reports progress, and — if it is heavy — pauses at the edge of its
 scheduled window and resumes from a saved cursor rather than starting over.
 
+### The pool is a view, not a root
+
+Catalogue each pool **member disk**. The pool itself is derived from them — the union of
+its members, deduplicated by path — so it appears in the catalog browser, the storage map
+and search like any other root, without being read a second time.
+
+That is strictly more informative than scanning the pooled drive: the number of members
+holding a path *is* its real duplication, so the storage map shows what the pool actually
+spends rather than what the duplication rule asks for, and "what did this disk take with
+it" becomes an exact list rather than an estimate. It also halves the I/O, which is the
+scarce resource here.
+
 | Workflow | Respects the I/O window | What it does |
 | --- | --- | --- |
 | `catalog.scan` | yes | Walks every root, records created / modified / deleted files, rebuilds directory rollups |
@@ -123,6 +135,10 @@ supposed to help with are exactly the ones that could corrupt its own data.
 - **An empty backup listing is treated as an error**, not as "everything is missing".
 - **Bit-rot findings are re-read before being confirmed**, so a transient controller
   fault does not produce a false alarm.
+- **An unreadable root is an alarm, not a silence.** Every configured root is checked
+  for readability at least twice a day, independently of the scan schedule, and a root
+  the container cannot open raises a critical alert immediately — a vanished bind mount
+  and an offline disk both deserve to be noticed the same day, not at the next scan.
 - **Removing a root does not delete its catalog.** The rows are kept and listed as
   orphaned, so a root deleted by accident does not take the record of what was on that
   disk with it. Purging is an explicit, separate action.
@@ -139,7 +155,7 @@ supposed to help with are exactly the ones that could corrupt its own data.
 
 ```bash
 npm install
-npm test          # 535 tests: shared (163), server (335), web (37)
+npm test          # 552 tests: shared (163), server (352), web (37)
 npm run typecheck
 npm run build
 
@@ -149,7 +165,7 @@ npm run dev       # API on :8080, UI on :5173 with a proxy
 Agent tests need PowerShell 7 and Pester 5+:
 
 ```bash
-pwsh -Command "Invoke-Pester -Path agent/tests -Output Detailed"     # 53 tests
+pwsh -Command "Invoke-Pester -Path agent/tests -Output Detailed"     # 78 tests
 ```
 
 | Package | What it holds |

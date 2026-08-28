@@ -242,68 +242,225 @@ Describe 'ConvertFrom-StorageReliabilityCounter' {
 }
 
 Describe 'ConvertFrom-DpcmdPoolParts' {
-    It 'parses a pool part block' {
+    BeforeAll {
+        # Verbatim output from DrivePool 2.3.13.1687 on the target host.
+        $script:PoolPartsOutput = @'
+dpcmd - StableBit DrivePool command line interface
+
+Version 2.3.13.1687
+
+ + Pool ID 'd304fce8-5935-49cb-a280-e93bf43d12bd':
+  - '\\?\GLOBALROOT\Device\HarddiskVolume2\PoolPart.4f0ccc7c-7f7f-40e8-ad6c-745d52d96842' [Device 0]
+  - '\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.a546b1c2-8af0-47a5-b2ee-d5eeadb98481' [Device 4]
+  - '\\?\GLOBALROOT\Device\HarddiskVolume10\PoolPart.e83fad5b-1e0d-4101-b337-b308443ca478' [Device 5]
+'@ -split "`r?`n"
+    }
+
+    It 'parses the real DrivePool 2.3.x listing' {
+        $parts = ConvertFrom-DpcmdPoolParts -Lines $script:PoolPartsOutput
+        $parts.Count | Should -Be 3
+        $parts[0].partId | Should -Be 'PoolPart.4f0ccc7c-7f7f-40e8-ad6c-745d52d96842'
+        $parts[0].poolId | Should -Be 'd304fce8-5935-49cb-a280-e93bf43d12bd'
+        $parts[0].volumeDevice | Should -Be '\Device\HarddiskVolume2'
+        $parts[0].deviceIndex | Should -Be 0
+        $parts[2].volumeDevice | Should -Be '\Device\HarddiskVolume10'
+        $parts[2].deviceIndex | Should -Be 5
+    }
+
+    It 'tags every part with the pool it belongs to' {
+        $parts = ConvertFrom-DpcmdPoolParts -Lines $script:PoolPartsOutput
+        ($parts | ForEach-Object { $_.poolId } | Select-Object -Unique).Count | Should -Be 1
+    }
+
+    It 'keeps parts of two pools apart' {
         $lines = @(
-            'dpcmd - StableBit DrivePool command line interface',
-            'Version 2.3.8.1600',
-            '',
-            'Listing pool parts...',
-            '  Pool part: E:\PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c',
-            '    Name: DRIVEPOOL27',
-            '    Total: 12.7 TB',
-            '    Free: 3.6 TB',
-            '  Pool part: F:\PoolPart.7b52c4d1-2e3f-4a5b-8c9d-1e2f3a4b5c6d',
-            '    Name: DRIVEPOOL28',
-            '    Total: 12.7 TB',
-            '    Free: 900 GB'
+            " + Pool ID 'pool-a':",
+            "  - '\\?\GLOBALROOT\Device\HarddiskVolume2\PoolPart.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' [Device 0]",
+            " + Pool ID 'pool-b':",
+            "  - '\\?\GLOBALROOT\Device\HarddiskVolume4\PoolPart.11111111-2222-3333-4444-555555555555' [Device 1]"
         )
         $parts = ConvertFrom-DpcmdPoolParts -Lines $lines
         $parts.Count | Should -Be 2
-        $parts[0].partId | Should -Be 'PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c'
-        $parts[0].driveLetter | Should -Be 'E'
-        $parts[0].name | Should -Be 'DRIVEPOOL27'
-        $parts[0].volumeLabel | Should -Be 'DRIVEPOOL27'
-        $parts[0].sizeBytes | Should -Be ([long][math]::Round(12.7 * [math]::Pow(1024, 4)))
-        $parts[1].driveLetter | Should -Be 'F'
+        $parts[0].poolId | Should -Be 'pool-a'
+        $parts[1].poolId | Should -Be 'pool-b'
     }
 
-    It 'marks a missing pool part' {
-        $lines = @(
-            '  Pool part: G:\PoolPart.8c63d5e2-3f40-4b6c-9d0e-2f3a4b5c6d7e',
-            '    Name: DRIVEPOOL29',
-            '    Status: missing'
-        )
-        (ConvertFrom-DpcmdPoolParts -Lines $lines)[0].missing | Should -BeTrue
-    }
-
-    It 'marks a read-only pool part' {
-        $lines = @('  Pool part: H:\PoolPart.9d74e6f3-4051-4c7d-8e1f-3a4b5c6d7e8f', '    Read-only: yes')
-        (ConvertFrom-DpcmdPoolParts -Lines $lines)[0].readOnly | Should -BeTrue
-    }
-
-    It 'returns nothing for output containing no pool parts' {
-        (ConvertFrom-DpcmdPoolParts -Lines @('dpcmd', 'No pools found.')).Count | Should -Be 0
+    It 'ignores the banner and version lines' {
+        (ConvertFrom-DpcmdPoolParts -Lines @('dpcmd - StableBit DrivePool command line interface', 'Version 2.3.13.1687')).Count | Should -Be 0
         (ConvertFrom-DpcmdPoolParts -Lines $null).Count | Should -Be 0
     }
+}
 
-    It 'ignores blank lines and a trailing banner' {
-        $lines = @('', '  Pool part: E:\PoolPart.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', '', 'Done.')
-        (ConvertFrom-DpcmdPoolParts -Lines $lines).Count | Should -Be 1
+Describe 'Array-returning functions' {
+    # These functions return with the `, $array` idiom so an empty result is still an
+    # array. That does not compose with an @() wrapper at the call site — @(f) then
+    # nests the array one level deeper and every element access silently returns an
+    # array instead of a record. Assert the contract so a future caller cannot
+    # reintroduce it unnoticed.
+    It 'returns records directly, not an array wrapped in another array' {
+        $lines = @(" + Pool ID 'p':", "  - '\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.aaa' [Device 4]")
+        $parts = ConvertFrom-DpcmdPoolParts -Lines $lines
+        $parts[0] | Should -BeOfType [System.Collections.Specialized.OrderedDictionary]
+        $parts[0].partId | Should -Be 'PoolPart.aaa'
+    }
+
+    It 'still yields a countable empty array when there is nothing to report' {
+        (ConvertFrom-DpcmdPoolParts -Lines @('nothing here')).Count | Should -Be 0
+        (ConvertFrom-RxpccStatus -Lines @('nothing here')).Count | Should -Be 0
+        (ConvertFrom-RxpccVolumeList -Lines @('nothing here')).Count | Should -Be 0
+    }
+
+    It 'lets a resolved part be updated in place' {
+        $lines = @(" + Pool ID 'p':", "  - '\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.bbb' [Device 4]")
+        $parts = ConvertFrom-DpcmdPoolParts -Lines $lines
+        $resolved = Resolve-PoolPartVolume -Parts $parts -Volumes @() -TestPath { param($p) $false }
+        $resolved[0].missing | Should -BeTrue
+    }
+}
+
+Describe 'Resolve-PoolPartVolume' {
+    BeforeAll {
+        $script:Volumes = @(
+            [pscustomobject]@{ driveLetter = 'E'; label = 'DRIVEPOOL4'; volumeId = 'vol-e'; fileSystem = 'NTFS'
+                sizeBytes = 8000; freeBytes = 2000; path = '\\?\Volume{e}\'; mountPoints = @()
+                physicalDiskIds = @('\\.\PHYSICALDRIVE4') },
+            [pscustomobject]@{ driveLetter = 'J'; label = 'DrivePool'; volumeId = 'vol-j'; fileSystem = 'Covefs'
+                sizeBytes = 90000; freeBytes = 3000; path = '\\?\Volume{j}\'; mountPoints = @()
+                physicalDiskIds = @() }
+        )
+    }
+
+    It 'finds the volume holding the PoolPart folder and fills in its details' {
+        $parts = @([ordered]@{
+                partId = 'PoolPart.abc'; poolId = 'p'; name = ''; volumeId = ''; volumeLabel = ''
+                driveLetter = $null; path = '\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.abc'
+                volumeDevice = ''; deviceIndex = 4; sizeBytes = $null; freeBytes = $null
+                usedBytes = $null; physicalDiskId = $null; missing = $false; readOnly = $false
+            })
+        $resolved = Resolve-PoolPartVolume -Parts $parts -Volumes $script:Volumes -TestPath {
+            param($path) $path -eq 'E:\PoolPart.abc'
+        }
+        $resolved[0].driveLetter | Should -Be 'E'
+        $resolved[0].volumeLabel | Should -Be 'DRIVEPOOL4'
+        $resolved[0].sizeBytes | Should -Be 8000
+        $resolved[0].usedBytes | Should -Be 6000
+        $resolved[0].physicalDiskId | Should -Be '\\.\PHYSICALDRIVE4'
+        $resolved[0].missing | Should -BeFalse
+    }
+
+    It 'marks a part missing when no volume on this host holds it' {
+        # This is exactly what a dropped pool disk looks like.
+        $parts = @([ordered]@{
+                partId = 'PoolPart.gone'; poolId = 'p'; name = ''; volumeId = ''; volumeLabel = ''
+                driveLetter = $null; path = ''; volumeDevice = ''; deviceIndex = 9
+                sizeBytes = $null; freeBytes = $null; usedBytes = $null; physicalDiskId = $null
+                missing = $false; readOnly = $false
+            })
+        $resolved = Resolve-PoolPartVolume -Parts $parts -Volumes $script:Volumes -TestPath { param($path) $false }
+        $resolved[0].missing | Should -BeTrue
+        $resolved[0].driveLetter | Should -BeNullOrEmpty
+    }
+
+    It 'finds a pool disk mounted into a folder rather than given a letter' {
+        # The usual arrangement once an array has more disks than there are letters.
+        $volumes = @(
+            [pscustomobject]@{ driveLetter = $null; label = 'DRIVEPOOL4'; volumeId = 'vol-x'
+                fileSystem = 'NTFS'; sizeBytes = 8000; freeBytes = 500
+                path = '\\?\Volume{aaaa}\'; mountPoints = @('C:\PoolDisks\DRIVEPOOL4\')
+                physicalDiskIds = @('\\.\PHYSICALDRIVE7') }
+        )
+        $parts = @([ordered]@{
+                partId = 'PoolPart.abc'; poolId = 'p'; name = ''; volumeId = ''; volumeLabel = ''
+                driveLetter = $null; path = ''; volumeDevice = ''; deviceIndex = 0
+                sizeBytes = $null; freeBytes = $null; usedBytes = $null; physicalDiskId = $null
+                missing = $false; readOnly = $false
+            })
+        $resolved = Resolve-PoolPartVolume -Parts $parts -Volumes $volumes -TestPath {
+            param($path) $path -eq 'C:\PoolDisks\DRIVEPOOL4\PoolPart.abc'
+        }
+        $resolved[0].missing | Should -BeFalse
+        $resolved[0].volumeLabel | Should -Be 'DRIVEPOOL4'
+        $resolved[0].path | Should -Be 'C:\PoolDisks\DRIVEPOOL4\PoolPart.abc'
+        $resolved[0].physicalDiskId | Should -Be '\\.\PHYSICALDRIVE7'
+    }
+
+    It 'falls back to the volume GUID path when there is neither letter nor mount point' {
+        $volumes = @(
+            [pscustomobject]@{ driveLetter = $null; label = 'DRIVEPOOL9'; volumeId = 'vol-y'
+                fileSystem = 'NTFS'; sizeBytes = 10; freeBytes = 1
+                path = '\\?\Volume{bbbb}\'; mountPoints = @(); physicalDiskIds = @() }
+        )
+        $parts = @([ordered]@{
+                partId = 'PoolPart.def'; poolId = 'p'; name = ''; volumeId = ''; volumeLabel = ''
+                driveLetter = $null; path = ''; volumeDevice = ''; deviceIndex = 0
+                sizeBytes = $null; freeBytes = $null; usedBytes = $null; physicalDiskId = $null
+                missing = $false; readOnly = $false
+            })
+        $resolved = Resolve-PoolPartVolume -Parts $parts -Volumes $volumes -TestPath {
+            param($path) $path -eq '\\?\Volume{bbbb}\PoolPart.def'
+        }
+        $resolved[0].missing | Should -BeFalse
+        $resolved[0].volumeLabel | Should -Be 'DRIVEPOOL9'
+    }
+
+    It 'never looks for PoolPart folders on the pool drive itself' {
+        $probed = New-Object System.Collections.Generic.List[string]
+        $parts = @([ordered]@{
+                partId = 'PoolPart.abc'; poolId = 'p'; name = ''; volumeId = ''; volumeLabel = ''
+                driveLetter = $null; path = ''; volumeDevice = ''; deviceIndex = 0
+                sizeBytes = $null; freeBytes = $null; usedBytes = $null; physicalDiskId = $null
+                missing = $false; readOnly = $false
+            })
+        Resolve-PoolPartVolume -Parts $parts -Volumes $script:Volumes -TestPath {
+            param($path) $probed.Add($path); $false
+        } | Out-Null
+        $probed | Should -Not -Contain 'J:\PoolPart.abc'
+        $probed | Should -Contain 'E:\PoolPart.abc'
     }
 }
 
 Describe 'ConvertFrom-DpcmdDuplication' {
-    It 'reads an explicit duplication count' {
-        ConvertFrom-DpcmdDuplication -Lines @('Duplication count: 3') | Should -Be 3
-        ConvertFrom-DpcmdDuplication -Lines @('File duplication level = 2') | Should -Be 2
+    BeforeAll {
+        # Verbatim `dpcmd get-duplication 'J:\Tier1'` on the target host.
+        $script:DuplicationOutput = @'
+dpcmd - StableBit DrivePool command line interface
+
+Version 2.3.13.1687
+
+Found '\\?\J:\Tier1\'
+
+  Expected number of copies: 2
+  Found number of copies: 14
+  Is directory: True
+  Has multiple sub-duplication counts: False
+
+  - \Device\HarddiskVolume10\PoolPart.e83fad5b-1e0d-4101-b337-b308443ca478\Tier1
+  - \Device\HarddiskVolume12\PoolPart.26162f04-dc22-4f09-8197-795630a24b8e\Tier1
+'@ -split "`r?`n"
     }
 
-    It 'reads the "2x" form' {
-        ConvertFrom-DpcmdDuplication -Lines @('dpcmd', 'P:\Media is 2x') | Should -Be 2
+    It 'reads the configured duplication level' {
+        ConvertFrom-DpcmdDuplication -Lines $script:DuplicationOutput | Should -Be 2
     }
 
-    It 'returns null when there is no duplication information' {
-        ConvertFrom-DpcmdDuplication -Lines @('Error: path not found') | Should -BeNullOrEmpty
+    It 'reads the whole detail block' {
+        $detail = ConvertFrom-DpcmdDuplicationDetail -Lines $script:DuplicationOutput
+        $detail.found | Should -BeTrue
+        $detail.path | Should -Be '\\?\J:\Tier1\'
+        $detail.expectedCopies | Should -Be 2
+        $detail.foundCopies | Should -Be 14
+        $detail.isDirectory | Should -BeTrue
+        $detail.hasMixedSubCounts | Should -BeFalse
+    }
+
+    It 'flags a folder whose descendants differ, so the probe knows to descend' {
+        $lines = @('Found ''\\?\J:\Tier3\''', '  Expected number of copies: 1',
+            '  Is directory: True', '  Has multiple sub-duplication counts: True')
+        (ConvertFrom-DpcmdDuplicationDetail -Lines $lines).hasMixedSubCounts | Should -BeTrue
+    }
+
+    It 'returns null when the path was not found' {
+        ConvertFrom-DpcmdDuplication -Lines @('dpcmd', 'Error: path not found') | Should -BeNullOrEmpty
         ConvertFrom-DpcmdDuplication -Lines $null | Should -BeNullOrEmpty
     }
 }
@@ -349,6 +506,196 @@ Describe 'Get-PoolRelativePath' {
 
     It 'ignores case differences in the drive letter' {
         Get-PoolRelativePath -Root 'p:\' -FullPath 'P:\Media' | Should -Be 'Media'
+    }
+}
+
+Describe 'PrimoCache' {
+    BeforeAll {
+        # Verbatim `rxpcc status` from the target host.
+        $script:RxpccStatus = @'
+Cache Task #1 {507EEFF9-B281-489B-914F-F402D497E55E}
+----------------------------------------------------
+  Status: Active
+  Level-1 Cache: 262144MB
+    MM: 262144MB, IM: 0MB
+    R/W Ratio: Shared
+    Options: -
+  Level-2 Cache: 953618MB
+    R/W Ratio: Shared
+    Storage: {D4CEAE5C-9802-4DB5-9510-6B6CCBEF8D2F}
+    Gather Interval: INSTANT
+    Options: -
+  Block Size: 32KB
+  Strategy: Read & Write
+  Defer-Write: Enabled
+    Latency: 300s
+    Mode: Intelligent
+    Options: L1ToL2
+  Prefetch: Enabled, Boot, FromL2
+  Overhead: 12.48GB
+
+Volume #8: Cache (Active)
+  Strategy: Read & Write
+  Level-2 Cache: Enabled
+  Defer-Write: Enabled
+  Prefetch: Enabled
+
+Volume #10: Cache (Active)
+  Strategy: Read & Write
+  Level-2 Cache: Enabled
+  Defer-Write: Enabled
+  Prefetch: Enabled
+'@ -split "`r?`n"
+
+        # Verbatim `rxpcc ls` from the target host.
+        $script:RxpccLs = @'
+Volume List
+===========
+
+Index      Name                   FileSys  Free/Capacity         Cluster  Cache
+-------------------------------------------------------------------------------
+Disk0      ATA     ST20000NM002C-3X        18627.00GB
+  Vol #2   DRIVEPOOL17            NTFS     288.37GB/18626.98GB   8KB
+  Vol #1   Local Volume                    16MB
+
+Disk1      ATA     SanDisk SSD PLUS        931.51GB
+  Vol #3   SSD-BAY1 (F:)          NTFS     134.43GB/931.51GB     4KB
+
+Disk4      ATA     ST8000VN004-3CP1        7452.04GB
+  Vol #7   Local Volume                    16MB
+  Vol #8   DRIVEPOOL4             NTFS     272.14GB/7452.02GB    4KB      1
+
+Disk5      ATA     ST8000VN004-3CP1        7452.04GB
+  Vol #10  DRIVEPOOL9             NTFS     272.29GB/7452.02GB    4KB      1
+  Vol #9   Local Volume                    16MB
+'@ -split "`r?`n"
+    }
+
+    Context 'status' {
+        It 'parses the cache task, its levels and its settings' {
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $caches.Count | Should -Be 1
+            $caches[0].name | Should -Be 'Cache Task #1'
+            $caches[0].status | Should -Be 'Active'
+            $caches[0].strategy | Should -Be 'Read & Write'
+            $caches[0].blockSize | Should -Be '32KB'
+            $caches[0].deferWrite | Should -BeTrue
+            $caches[0].level | Should -Be 'L1+L2'
+        }
+
+        It 'converts the level sizes to bytes and totals them' {
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $caches[0].level1SizeBytes | Should -Be (262144 * 1024 * 1024)
+            $caches[0].level2SizeBytes | Should -Be (953618 * 1024 * 1024)
+            $caches[0].cacheSizeBytes | Should -Be ((262144 + 953618) * 1024 * 1024)
+        }
+
+        It 'reads the overhead as the used figure' {
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $caches[0].usedBytes | Should -Be ([long][math]::Round(12.48 * [math]::Pow(1024, 3)))
+        }
+
+        It 'does not let a volume block overwrite the task settings' {
+            # Each `Volume #N` block repeats Strategy and Defer-Write; those belong to
+            # the volume, not the task, and must not clobber what the task reported.
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $caches[0].blockSize | Should -Be '32KB'
+            $caches[0].targetVolumes.Count | Should -Be 2
+        }
+
+        It 'returns nothing when there are no cache tasks' {
+            (ConvertFrom-RxpccStatus -Lines @('No cache task found.')).Count | Should -Be 0
+            (ConvertFrom-RxpccStatus -Lines $null).Count | Should -Be 0
+        }
+    }
+
+    Context 'volume list' {
+        It 'parses labelled volumes with their sizes' {
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            $pool17 = $volumes | Where-Object { $_.label -eq 'DRIVEPOOL17' }
+            $pool17.disk | Should -Be 'Disk0'
+            $pool17.index | Should -Be 2
+            $pool17.fileSystem | Should -Be 'NTFS'
+            $pool17.sizeBytes | Should -Be ([long][math]::Round(18626.98 * [math]::Pow(1024, 3)))
+            $pool17.cacheTask | Should -BeNullOrEmpty
+        }
+
+        It 'splits a drive letter out of the label' {
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            $bay1 = $volumes | Where-Object { $_.index -eq 3 }
+            $bay1.label | Should -Be 'SSD-BAY1'
+            $bay1.driveLetter | Should -Be 'F'
+        }
+
+        It 'reads the trailing cache-task column' {
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            ($volumes | Where-Object { $_.label -eq 'DRIVEPOOL4' }).cacheTask | Should -Be 1
+            ($volumes | Where-Object { $_.label -eq 'DRIVEPOOL9' }).cacheTask | Should -Be 1
+        }
+
+        It 'keeps volumes with no filesystem without inventing sizes' {
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            $local = $volumes | Where-Object { $_.index -eq 1 }
+            $local.label | Should -Be 'Local Volume'
+            $local.sizeBytes | Should -BeNullOrEmpty
+        }
+
+        It 'skips the header and rule lines' {
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            $volumes | Where-Object { $_.label -match 'Index|Volume List' } | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'perf' {
+        It 'reads hit rates however the version labels them' {
+            $perf = ConvertFrom-RxpccPerf -Lines @('  Read Hit Rate: 82.5 %', '  Write Hit Rate: 61.0 %')
+            $perf.recognised | Should -BeTrue
+            $perf.readHitRate | Should -Be 0.825
+            $perf.writeHitRate | Should -Be 0.61
+        }
+
+        It 'derives a rate from raw hit and miss counts' {
+            $perf = ConvertFrom-RxpccPerf -Lines @('Read Hits: 750', 'Read Misses: 250')
+            $perf.readHits | Should -Be 750
+            $perf.readMisses | Should -Be 250
+            $perf.readHitRate | Should -Be 0.75
+        }
+
+        It 'reports nothing rather than guessing when the wording is unrecognised' {
+            $perf = ConvertFrom-RxpccPerf -Lines @('Some Other Statistic: 42')
+            $perf.recognised | Should -BeFalse
+            $perf.readHitRate | Should -BeNullOrEmpty
+        }
+
+        It 'handles empty input' {
+            (ConvertFrom-RxpccPerf -Lines $null).recognised | Should -BeFalse
+        }
+    }
+
+    Context 'combined report' {
+        It 'names each cache after the volumes it fronts' {
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            $report = Join-PrimoCacheReport -Caches $caches -Volumes $volumes -Version '4.3.0'
+
+            $report.available | Should -BeTrue
+            $report.version | Should -Be '4.3.0'
+            $report.caches[0].targetVolumes | Should -Contain 'DRIVEPOOL4'
+            $report.caches[0].targetVolumes | Should -Contain 'DRIVEPOOL9'
+        }
+
+        It 'merges perf statistics in when they were readable' {
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $perf = ConvertFrom-RxpccPerf -Lines @('Read Hit Rate: 90 %')
+            $report = Join-PrimoCacheReport -Caches $caches -Volumes @() -Perf $perf
+            $report.caches[0].readHitRate | Should -Be 0.9
+        }
+
+        It 'reports unavailable when there are no cache tasks' {
+            $report = Join-PrimoCacheReport -Caches @() -Volumes @()
+            $report.available | Should -BeFalse
+            $report.reason | Should -Not -BeNullOrEmpty
+        }
     }
 }
 

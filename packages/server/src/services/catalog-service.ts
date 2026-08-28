@@ -319,6 +319,166 @@ export class CatalogService {
 
   /* ------------------------------------------------------------- directory stats */
 
+  /* --------------------------------------------------- virtual pool views */
+
+  /**
+   * The pool is a *view*, not a scanned root.
+   *
+   * Cataloguing the DrivePool virtual drive as well as its member disks would read
+   * every file twice and hash it twice, for a tree the member disks already describe
+   * completely. Instead the pool is derived: take the union of its pool-part roots and
+   * deduplicate by pool-relative path. That also makes the pool view strictly more
+   * informative, because the number of parts holding a path *is* its real duplication.
+   *
+   * Virtual pools are addressed by the synthetic root id `pool:<poolId>`, which flows
+   * through browse, search, the treemap and the storage totals like any other root.
+   */
+  static poolRootId(poolId: string): string {
+    return `pool:${poolId}`;
+  }
+
+  /** The pool id behind a synthetic root id, or null for a real root. */
+  static parsePoolRootId(rootId: string): string | null {
+    return rootId.startsWith('pool:') ? rootId.slice('pool:'.length) : null;
+  }
+
+  /** Ids of the pool-part roots that make up a pool. */
+  partRootIds(poolId: string): string[] {
+    return this.settings
+      .get()
+      .catalog.roots.filter((root) => root.kind === 'poolpart' && root.poolId === poolId && root.enabled)
+      .map((root) => root.id);
+  }
+
+  /** Every pool that has at least one catalogued member disk. */
+  virtualPools(): Array<{ poolId: string; rootId: string; name: string; partRootIds: string[] }> {
+    const roots = this.settings.get().catalog.roots;
+    const poolIds = [
+      ...new Set(
+        roots
+          .filter((root) => root.kind === 'poolpart' && root.enabled && root.poolId)
+          .map((root) => root.poolId as string),
+      ),
+    ];
+    return poolIds.map((poolId) => {
+      // Prefer a name the operator gave a `pool` root for the same pool.
+      const named = roots.find((root) => root.kind === 'pool' && root.poolId === poolId);
+      return {
+        poolId,
+        rootId: CatalogService.poolRootId(poolId),
+        name: named?.name ?? `Pool ${poolId}`,
+        partRootIds: this.partRootIds(poolId),
+      };
+    });
+  }
+
+  /**
+   * One row per distinct pool-relative path across a pool's member disks.
+   *
+   * `copies` is how many parts hold the path, which is the observed duplication —
+   * the number that matters, as opposed to the number DrivePool was told to keep.
+   */
+  private poolFileRows(poolId: string, extraWhere = '', params: unknown[] = []) {
+    const rootIds = this.partRootIds(poolId);
+    if (rootIds.length === 0) return null;
+    const placeholders = rootIds.map(() => '?').join(', ');
+    return {
+      sql: `SELECT path_key,
+                   MIN(rel_path)          AS rel_path,
+                   MAX(size_bytes)        AS size_bytes,
+                   MAX(mtime_ms)          AS mtime_ms,
+                   MAX(duplication_level) AS duplication_level,
+                   COUNT(*)               AS copies,
+                   MAX(hash)              AS hash
+              FROM files
+             WHERE root_id IN (${placeholders}) AND deleted_at IS NULL ${extraWhere}
+             GROUP BY path_key`,
+      params: [...rootIds, ...params],
+    };
+  }
+
+  /**
+   * Build the directory rollups for a virtual pool.
+   *
+   * Same shape as `rebuildDirStats`, but the source rows are the deduplicated union of
+   * the member disks and `effective` bytes are `size × copies present` — what the pool
+   * genuinely spends, rather than what the duplication rule asks for.
+   */
+  rebuildPoolDirStats(poolId: string): number {
+    const query = this.poolFileRows(poolId);
+    const rootId = CatalogService.poolRootId(poolId);
+    if (!query) {
+      this.db.prepare('DELETE FROM dir_stats WHERE root_id = ?').run(rootId);
+      return 0;
+    }
+
+    const rows = this.db
+      .prepare<unknown[], { rel_path: string; size_bytes: number; copies: number }>(
+        `SELECT rel_path, size_bytes, copies FROM (${query.sql})`,
+      )
+      .all(...query.params);
+
+    return this.writeDirStats(
+      rootId,
+      rows.map((row) => ({
+        relPath: row.rel_path,
+        sizeBytes: row.size_bytes,
+        effectiveBytes: row.size_bytes * Math.max(1, row.copies),
+      })),
+    );
+  }
+
+  /** Rebuild every virtual pool whose membership includes this root. */
+  rebuildPoolsContaining(rootId: string): void {
+    const root = this.settings.get().catalog.roots.find((candidate) => candidate.id === rootId);
+    if (!root || root.kind !== 'poolpart' || !root.poolId) return;
+    this.rebuildPoolDirStats(root.poolId);
+  }
+
+  /**
+   * Files that have vanished from every member disk of a pool.
+   *
+   * A file deleted from one disk but still present on another has not been lost — the
+   * pool still serves it. Only a path with no surviving copy is missing from the pool,
+   * and that is the list that matters after a disk dies.
+   */
+  poolMissingFiles(
+    poolId: string,
+    limit = 500,
+    offset = 0,
+  ): { files: Array<{ relPath: string; sizeBytes: number; deletedAt: string | null }>; total: number } {
+    const rootIds = this.partRootIds(poolId);
+    if (rootIds.length === 0) return { files: [], total: 0 };
+    const placeholders = rootIds.map(() => '?').join(', ');
+    const condition = `root_id IN (${placeholders})
+        GROUP BY path_key
+        HAVING SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END) = 0`;
+
+    const rows = this.db
+      .prepare<unknown[], { rel_path: string; size_bytes: number; deleted_at: string | null }>(
+        `SELECT MIN(rel_path) AS rel_path, MAX(size_bytes) AS size_bytes, MAX(deleted_at) AS deleted_at
+           FROM files WHERE ${condition}
+          ORDER BY size_bytes DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...rootIds, limit, offset);
+
+    const total =
+      this.db
+        .prepare<unknown[], { n: number }>(
+          `SELECT COUNT(*) AS n FROM (SELECT path_key FROM files WHERE ${condition})`,
+        )
+        .get(...rootIds)?.n ?? 0;
+
+    return {
+      total,
+      files: rows.map((row) => ({
+        relPath: row.rel_path,
+        sizeBytes: row.size_bytes,
+        deletedAt: row.deleted_at,
+      })),
+    };
+  }
+
   /**
    * Rebuild the directory rollups used by the storage view.
    *
@@ -327,25 +487,34 @@ export class CatalogService {
    * instant regardless of catalog size.
    */
   rebuildDirStats(rootId: string): number {
-    const grouped = this.db
-      .prepare<[string], {
-        dir_key: string;
-        sample_path: string;
-        files: number;
-        bytes: number;
-        effective_bytes: number;
-      }>(
-        `SELECT dir_key,
-                MIN(rel_path) AS sample_path,
-                COUNT(*) AS files,
-                COALESCE(SUM(size_bytes), 0) AS bytes,
-                COALESCE(SUM(size_bytes * duplication_level), 0) AS effective_bytes
-           FROM files
-          WHERE root_id = ? AND deleted_at IS NULL
-          GROUP BY dir_key`,
+    const rows = this.db
+      .prepare<[string], { rel_path: string; size_bytes: number; duplication_level: number }>(
+        `SELECT rel_path, size_bytes, duplication_level
+           FROM files WHERE root_id = ? AND deleted_at IS NULL`,
       )
       .all(rootId);
 
+    return this.writeDirStats(
+      rootId,
+      rows.map((row) => ({
+        relPath: row.rel_path,
+        sizeBytes: row.size_bytes,
+        effectiveBytes: row.size_bytes * Math.max(1, row.duplication_level),
+      })),
+    );
+  }
+
+  /**
+   * Aggregate file entries into directory rollups and store them.
+   *
+   * Rolls up from the deepest directory outward in memory rather than with recursive
+   * SQL: one pass, and the storage map then costs a single indexed read per level
+   * regardless of how many files the catalog holds.
+   */
+  private writeDirStats(
+    rootId: string,
+    entries: ReadonlyArray<{ relPath: string; sizeBytes: number; effectiveBytes: number }>,
+  ): number {
     interface Node {
       dirKey: string;
       relPath: string;
@@ -364,12 +533,11 @@ export class CatalogService {
       const existing = nodes.get(dirKey);
       if (existing) return existing;
       const depth = dirKey === '' ? 0 : dirKey.split('/').length;
-      const parentKey = dirKey === '' ? null : dirnameRel(dirKey);
       const node: Node = {
         dirKey,
         relPath,
         depth,
-        parentKey,
+        parentKey: dirKey === '' ? null : dirnameRel(dirKey),
         directFiles: 0,
         directBytes: 0,
         directEffective: 0,
@@ -382,32 +550,28 @@ export class CatalogService {
     };
 
     ensure('', '');
-    for (const row of grouped) {
-      // `sample_path` preserves the on-disk casing of the directory chain.
-      const displayDir = dirnameRel(row.sample_path);
-      const node = ensure(row.dir_key, displayDir);
+    for (const entry of entries) {
+      // `relPath` keeps the on-disk casing; `dirKey` is the lower-cased identity.
+      const displayDir = dirnameRel(entry.relPath);
+      const node = ensure(displayDir.toLowerCase(), displayDir);
       node.relPath = displayDir;
-      node.directFiles = row.files;
-      node.directBytes = row.bytes;
-      node.directEffective = row.effective_bytes;
-      node.totalFiles = row.files;
-      node.totalBytes = row.bytes;
-      node.totalEffective = row.effective_bytes;
+      node.directFiles += 1;
+      node.directBytes += entry.sizeBytes;
+      node.directEffective += entry.effectiveBytes;
+      node.totalFiles += 1;
+      node.totalBytes += entry.sizeBytes;
+      node.totalEffective += entry.effectiveBytes;
 
-      // Materialise every ancestor so directories holding only subdirectories appear.
-      let key = row.dir_key;
+      // Materialise ancestors so a directory holding only subdirectories still appears.
       let display = displayDir;
-      while (key !== '') {
-        const parentKey = dirnameRel(key);
+      while (display !== '') {
         const parentDisplay = dirnameRel(display);
-        ensure(parentKey, parentDisplay);
-        key = parentKey;
+        ensure(parentDisplay.toLowerCase(), parentDisplay);
         display = parentDisplay;
       }
     }
 
-    const ordered = [...nodes.values()].sort((a, b) => b.depth - a.depth);
-    for (const node of ordered) {
+    for (const node of [...nodes.values()].sort((a, b) => b.depth - a.depth)) {
       if (node.parentKey === null) continue;
       const parent = nodes.get(node.parentKey);
       if (!parent) continue;
@@ -455,6 +619,9 @@ export class CatalogService {
     deletedFiles: number;
     lastScanAt: string | null;
   } {
+    const poolId = CatalogService.parsePoolRootId(rootId);
+    if (poolId !== null) return this.poolStats(poolId);
+
     const row = this.db
       .prepare<[string], {
         files: number; bytes: number; effective_bytes: number; hashed: number; deleted: number;
@@ -502,6 +669,58 @@ export class CatalogService {
     };
   }
 
+  /** Totals for a virtual pool, read from the rollups its member disks produced. */
+  private poolStats(poolId: string) {
+    const rootId = CatalogService.poolRootId(poolId);
+    const row = this.db
+      .prepare<[string], { total_files: number; total_bytes: number; total_effective_bytes: number }>(
+        `SELECT total_files, total_bytes, total_effective_bytes
+           FROM dir_stats WHERE root_id = ? AND dir_key = ''`,
+      )
+      .get(rootId);
+
+    const partRoots = this.partRootIds(poolId);
+    let hashedFiles = 0;
+    let lastScanAt: string | null = null;
+    for (const partRoot of partRoots) {
+      const stats = this.rootStats(partRoot);
+      hashedFiles += stats.hashedFiles;
+      // The pool is only as current as its least recently scanned member disk.
+      if (stats.lastScanAt && (lastScanAt === null || stats.lastScanAt < lastScanAt)) {
+        lastScanAt = stats.lastScanAt;
+      }
+    }
+
+    return {
+      files: row?.total_files ?? 0,
+      bytes: row?.total_bytes ?? 0,
+      effectiveBytes: row?.total_effective_bytes ?? 0,
+      hashedFiles,
+      deletedFiles: this.poolMissingFiles(poolId, 0, 0).total,
+      lastScanAt: partRoots.length > 0 ? lastScanAt : null,
+    };
+  }
+
+  /** Files directly in one directory of a virtual pool, deduplicated across disks. */
+  private poolFilesInDirectory(poolId: string, dirKey: string) {
+    const query = this.poolFileRows(poolId, 'AND dir_key = ?', [dirKey]);
+    if (!query) return [];
+    return this.db
+      .prepare<unknown[], {
+        rel_path: string; size_bytes: number; mtime_ms: number; copies: number; hash: string | null;
+      }>(`SELECT rel_path, size_bytes, mtime_ms, copies, hash FROM (${query.sql})`)
+      .all(...query.params)
+      .map((row) => ({
+        rel_path: row.rel_path,
+        name: basename(row.rel_path),
+        size_bytes: row.size_bytes,
+        mtime_ms: row.mtime_ms,
+        // In a pool view the honest duplication is how many disks hold the file.
+        duplication_level: row.copies,
+        hash: row.hash,
+      }));
+  }
+
   /** One level of the tree: subdirectories (from the rollups) then files. */
   listDirectory(
     rootId: string,
@@ -522,15 +741,19 @@ export class CatalogService {
       )
       .all(rootId, dirKey);
 
-    const files = this.db
-      .prepare<[string, string], {
-        rel_path: string; name: string; size_bytes: number; mtime_ms: number;
-        duplication_level: number; hash: string | null;
-      }>(
-        `SELECT rel_path, name, size_bytes, mtime_ms, duplication_level, hash
-           FROM files WHERE root_id = ? AND dir_key = ? AND deleted_at IS NULL`,
-      )
-      .all(rootId, dirKey);
+    const poolId = CatalogService.parsePoolRootId(rootId);
+    const files =
+      poolId !== null
+        ? this.poolFilesInDirectory(poolId, dirKey)
+        : this.db
+            .prepare<[string, string], {
+              rel_path: string; name: string; size_bytes: number; mtime_ms: number;
+              duplication_level: number; hash: string | null;
+            }>(
+              `SELECT rel_path, name, size_bytes, mtime_ms, duplication_level, hash
+                 FROM files WHERE root_id = ? AND dir_key = ? AND deleted_at IS NULL`,
+            )
+            .all(rootId, dirKey);
 
     const entries: DirectoryEntry[] = [
       ...dirs.map((dir) => ({
@@ -576,7 +799,17 @@ export class CatalogService {
   }): { files: Array<DirectoryEntry & { rootId: string; deletedAt: string | null }>; total: number } {
     const where: string[] = [];
     const params: unknown[] = [];
-    if (query.rootId) {
+    // Searching a virtual pool searches its member disks and collapses duplicates,
+    // so a 2x-duplicated file is one result rather than two.
+    const poolId = query.rootId ? CatalogService.parsePoolRootId(query.rootId) : null;
+    let dedupeByPath = false;
+    if (poolId !== null) {
+      const rootIds = this.partRootIds(poolId);
+      if (rootIds.length === 0) return { files: [], total: 0 };
+      where.push(`root_id IN (${rootIds.map(() => '?').join(', ')})`);
+      params.push(...rootIds);
+      dedupeByPath = true;
+    } else if (query.rootId) {
       where.push('root_id = ?');
       params.push(query.rootId);
     }
@@ -594,16 +827,27 @@ export class CatalogService {
       params.push(query.minSizeBytes);
     }
     const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const group = dedupeByPath ? 'GROUP BY path_key' : '';
     const total =
-      this.db.prepare<unknown[], { n: number }>(`SELECT COUNT(*) AS n FROM files ${clause}`).get(...params)
-        ?.n ?? 0;
+      this.db
+        .prepare<unknown[], { n: number }>(
+          dedupeByPath
+            ? `SELECT COUNT(*) AS n FROM (SELECT path_key FROM files ${clause} ${group})`
+            : `SELECT COUNT(*) AS n FROM files ${clause}`,
+        )
+        .get(...params)?.n ?? 0;
     const rows = this.db
       .prepare<unknown[], {
         root_id: string; rel_path: string; name: string; size_bytes: number; mtime_ms: number;
         duplication_level: number; hash: string | null; deleted_at: string | null;
       }>(
-        `SELECT root_id, rel_path, name, size_bytes, mtime_ms, duplication_level, hash, deleted_at
-           FROM files ${clause} ORDER BY size_bytes DESC LIMIT ? OFFSET ?`,
+        dedupeByPath
+          ? `SELECT MIN(root_id) AS root_id, MIN(rel_path) AS rel_path, MIN(name) AS name,
+                    MAX(size_bytes) AS size_bytes, MAX(mtime_ms) AS mtime_ms,
+                    COUNT(*) AS duplication_level, MAX(hash) AS hash, MAX(deleted_at) AS deleted_at
+               FROM files ${clause} ${group} ORDER BY size_bytes DESC LIMIT ? OFFSET ?`
+          : `SELECT root_id, rel_path, name, size_bytes, mtime_ms, duplication_level, hash, deleted_at
+               FROM files ${clause} ORDER BY size_bytes DESC LIMIT ? OFFSET ?`,
       )
       .all(...params, Math.min(query.limit ?? 200, 2000), query.offset ?? 0);
 

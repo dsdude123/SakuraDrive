@@ -213,6 +213,110 @@ describe('disaster recovery', () => {
   });
 });
 
+describe('virtual pool view', () => {
+  // The pool is derived from its member disks rather than scanned itself, so a file
+  // duplicated across two disks must appear once, sized once, but counted as 2 copies.
+  beforeEach(() => {
+    configurePoolRoots();
+    addFile('part27', 'Media/Movies/dup.mkv', 100);
+    addFile('part28', 'Media/Movies/dup.mkv', 100);
+    addFile('part27', 'Media/Movies/only27.mkv', 500);
+    addFile('part28', 'Media/Music/only28.flac', 50);
+    catalog.rebuildPoolDirStats('hdd');
+  });
+
+  it('lists a pool for every set of catalogued member disks', () => {
+    const pools = catalog.virtualPools();
+    expect(pools).toHaveLength(1);
+    expect(pools[0]).toMatchObject({ poolId: 'hdd', rootId: 'pool:hdd', name: 'HDD Pool' });
+    expect(pools[0]!.partRootIds.sort()).toEqual(['part27', 'part28']);
+  });
+
+  it('counts a duplicated file once, at its real size', () => {
+    const stats = catalog.rootStats('pool:hdd');
+    expect(stats.files).toBe(3);
+    expect(stats.bytes).toBe(650);
+  });
+
+  it('reports what the pool actually spends, using copies present', () => {
+    // dup.mkv is on both disks (100 x 2), the other two are on one each.
+    expect(catalog.rootStats('pool:hdd').effectiveBytes).toBe(200 + 500 + 50);
+  });
+
+  it('browses the pool as one tree', () => {
+    const top = catalog.listDirectory('pool:hdd', '');
+    expect(top.entries.map((entry) => entry.name)).toEqual(['Media']);
+    expect(top.entries[0]!.fileCount).toBe(3);
+
+    const movies = catalog.listDirectory('pool:hdd', 'Media/Movies');
+    expect(movies.entries.map((entry) => entry.name).sort()).toEqual(['dup.mkv', 'only27.mkv']);
+  });
+
+  it('reports observed copies as the duplication level in the pool view', () => {
+    const movies = catalog.listDirectory('pool:hdd', 'Media/Movies');
+    const dup = movies.entries.find((entry) => entry.name === 'dup.mkv')!;
+    const single = movies.entries.find((entry) => entry.name === 'only27.mkv')!;
+    expect(dup.duplicationLevel).toBe(2);
+    expect(dup.effectiveBytes).toBe(200);
+    expect(single.duplicationLevel).toBe(1);
+  });
+
+  it('collapses duplicates when searching the pool', () => {
+    expect(catalog.searchFiles({ rootId: 'pool:hdd', text: 'dup.mkv' }).total).toBe(1);
+    // Searching one member disk still shows only that disk's copy.
+    expect(catalog.searchFiles({ rootId: 'part27', text: 'dup.mkv' }).total).toBe(1);
+    expect(catalog.searchFiles({ text: 'dup.mkv' }).total).toBe(2);
+  });
+
+  it('returns nothing for a pool with no catalogued members', () => {
+    expect(catalog.rootStats('pool:nope').files).toBe(0);
+    expect(catalog.searchFiles({ rootId: 'pool:nope' }).total).toBe(0);
+  });
+
+  it('rebuilds only the pool the changed disk belongs to', () => {
+    addFile('part27', 'Media/new.mkv', 7);
+    catalog.rebuildPoolsContaining('part27');
+    expect(catalog.rootStats('pool:hdd').files).toBe(4);
+  });
+
+  it('ignores a root that is not part of a pool', () => {
+    expect(() => catalog.rebuildPoolsContaining('pool')).not.toThrow();
+  });
+});
+
+describe('what the pool has lost', () => {
+  beforeEach(() => {
+    configurePoolRoots();
+    addFile('part27', 'Media/dup.mkv', 100);
+    addFile('part28', 'Media/dup.mkv', 100);
+    addFile('part27', 'Media/only27.mkv', 500);
+  });
+
+  it('does not count a file that survives on another disk', () => {
+    // DRIVEPOOL27 died: its copy of dup.mkv is gone, but DRIVEPOOL28 still has it.
+    db.prepare(`UPDATE files SET deleted_at = 'now' WHERE root_id = 'part27'`).run();
+    const missing = catalog.poolMissingFiles('hdd');
+    expect(missing.total).toBe(1);
+    expect(missing.files[0]!.relPath).toBe('Media/only27.mkv');
+    expect(missing.files[0]!.sizeBytes).toBe(500);
+  });
+
+  it('reports nothing while every path still has a copy', () => {
+    expect(catalog.poolMissingFiles('hdd').total).toBe(0);
+  });
+
+  it('counts a path only once when it is gone from every disk', () => {
+    db.prepare(`UPDATE files SET deleted_at = 'now' WHERE path_key = 'media/dup.mkv'`).run();
+    const missing = catalog.poolMissingFiles('hdd');
+    expect(missing.total).toBe(1);
+    expect(missing.files[0]!.relPath).toBe('Media/dup.mkv');
+  });
+
+  it('returns nothing for an unknown pool', () => {
+    expect(catalog.poolMissingFiles('nope').total).toBe(0);
+  });
+});
+
 describe('duplication refresh', () => {
   it('recomputes levels from the current rules', () => {
     addFile('pool', 'Media/a.mkv', 100, 1);

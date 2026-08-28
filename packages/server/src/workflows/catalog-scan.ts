@@ -142,6 +142,8 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
           restored: cursor.restored,
         });
         catalog.rebuildDirStats(root.id);
+        // A member disk changed, so the pool view built from it is now stale.
+        catalog.rebuildPoolsContaining(root.id);
         catalog.finishRun(runId, 'completed');
 
         ctx.log(

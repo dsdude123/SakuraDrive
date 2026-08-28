@@ -117,11 +117,31 @@ nothing for that disk. Clearing the whole category would mean an unreadable driv
 alerts silently resolving, which is the worst failure a monitor has: reporting a dying
 disk as healthy because it could not see it.
 
+## The pool is a view over its members
+
+Cataloguing both the pooled drive and its member disks would read every file twice and
+hash it twice, for a tree the members already describe completely. So only the members
+are scanned, and the pool is derived: the union of its pool-part roots, deduplicated by
+pool-relative path, addressed by the synthetic root id `pool:<poolId>`.
+
+That synthetic id flows through browse, search, the storage map and the totals exactly
+like a real root. Its directory rollups are built by the same code that builds a real
+root's, from deduplicated rows, and rebuilt whenever a member disk finishes scanning.
+
+The derived view is also strictly more informative than scanning the pooled drive would
+be, because the number of members holding a path *is* its observed duplication. The
+storage map therefore reports what the pool actually spends — `size × copies present` —
+rather than `size × the level the rule asks for`, and the gap between the two is itself
+the under-duplication report.
+
+It also changes what "missing" means, correctly: a file deleted from one member but
+still present on another has not been lost, and only a path with no surviving copy
+anywhere counts as missing from the pool.
+
 ## Disaster recovery, precisely
 
-The pool root (`P:\`) gives the logical view. Catalogue each disk's `PoolPart.*` folder
-as its own root with the same pool id and the question "what does this disk take with
-it?" becomes exact:
+Catalogue each disk's `PoolPart.*` folder as its own root with the same pool id and the
+question "what does this disk take with it?" becomes exact:
 
 ```sql
 SELECT COUNT(*), SUM(size_bytes) FROM files f
@@ -178,7 +198,7 @@ back and comparing the record count, and pruned to a retention count.
 
 ## Testing
 
-535 automated tests across the three packages, plus 53 Pester tests for the agent.
+552 automated tests across the three packages, plus 78 Pester tests for the agent.
 
 The one that ties the halves together is the contract test: `agent/tools/New-ContractFixture.ps1`
 runs the agent's own parsing functions over representative smartctl and dpcmd output and

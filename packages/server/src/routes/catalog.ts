@@ -16,7 +16,22 @@ export function registerCatalogRoutes(app: FastifyInstance, services: Services):
   app.get('/api/catalog/roots', async () => ({
     roots: settings.get().catalog.roots.map((root) => ({
       ...root,
+      virtual: false,
       stats: catalog.rootStats(root.id),
+    })),
+    /**
+     * Pools are views over their member disks rather than scanned roots, so they are
+     * listed separately — browse, search and the storage map accept their ids exactly
+     * like a real root's.
+     */
+    pools: catalog.virtualPools().map((pool) => ({
+      id: pool.rootId,
+      poolId: pool.poolId,
+      name: pool.name,
+      kind: 'pool' as const,
+      virtual: true,
+      partRootIds: pool.partRootIds,
+      stats: catalog.rootStats(pool.rootId),
     })),
   }));
 
@@ -302,6 +317,37 @@ export function registerCatalogRoutes(app: FastifyInstance, services: Services):
       toCsv(
         ['path', 'size_bytes', 'modified'],
         files.map((file) => [file.relPath, file.sizeBytes, new Date(file.mtimeMs).toISOString()]),
+      ),
+    );
+  });
+
+  /**
+   * Files with no surviving copy anywhere in the pool.
+   *
+   * A file deleted from one disk but still present on another has not been lost. This
+   * is the list that matters after a disk dies, and it is why the pool is a view over
+   * its members rather than a separately scanned tree.
+   */
+  app.get('/api/dr/pool-missing', async (request, reply) => {
+    const query = parseQuery(
+      z.object({ poolId: z.string().min(1), limit: intParam(500, 5000), offset: intParam(0) }),
+      request,
+      reply,
+    );
+    if (!query) return reply;
+    return catalog.poolMissingFiles(query.poolId, query.limit, query.offset);
+  });
+
+  app.get('/api/dr/pool-missing.csv', async (request, reply) => {
+    const query = parseQuery(z.object({ poolId: z.string().min(1) }), request, reply);
+    if (!query) return reply;
+    const { files } = catalog.poolMissingFiles(query.poolId, 100_000, 0);
+    sendCsv(
+      reply,
+      `sakuradrive-pool-missing-${query.poolId}.csv`,
+      toCsv(
+        ['path', 'size_bytes', 'deleted_at'],
+        files.map((file) => [file.relPath, file.sizeBytes, file.deletedAt ?? '']),
       ),
     );
   });

@@ -137,6 +137,7 @@ export const MIGRATIONS: Migration[] = [
       operational_status TEXT,
       dirty              INTEGER,
       device_keys        TEXT NOT NULL DEFAULT '[]',
+      mount_points       TEXT NOT NULL DEFAULT '[]',
       hostname           TEXT,
       first_seen_at      TEXT NOT NULL,
       last_seen_at       TEXT NOT NULL

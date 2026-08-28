@@ -87,31 +87,54 @@ $smart = @(
     (ConvertFrom-SmartctlJson -Smart ($nvmeJson | ConvertFrom-Json))
 )
 
-# --- Pool parts, as dpcmd prints them -----------------------------------------
-$poolPartLines = @(
-    'dpcmd - StableBit DrivePool command line interface',
-    'Version 2.3.8.1600',
-    '',
-    'Listing pool parts for P:\ ...',
-    '  Pool part: E:\PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c',
-    '    Name: DRIVEPOOL27',
-    '    Total: 12.7 TB',
-    '    Free: 3.6 TB',
-    '  Pool part: F:\PoolPart.7b52c4d1-2e3f-4a5b-8c9d-1e2f3a4b5c6d',
-    '    Name: DRIVEPOOL28',
-    '    Total: 12.7 TB',
-    '    Free: 900 GB'
-)
-$parts = ConvertFrom-DpcmdPoolParts -Lines $poolPartLines
-$parts[0].physicalDiskId = '\\.\PHYSICALDRIVE3'
-$parts[1].physicalDiskId = '\\.\PHYSICALDRIVE4'
+# --- Pool parts, exactly as DrivePool 2.3.13 prints them ----------------------
+$poolPartLines = @'
+dpcmd - StableBit DrivePool command line interface
 
-$duplication = Select-ChangedDuplicationRules -PoolId '{hdd-pool}' -Map @{
-    ''                = 1
-    'Media'           = 2
-    'Media/Movies'    = 2
-    'Media/Movies/4K' = 3
-    'Backups'         = 3
+Version 2.3.13.1687
+
+ + Pool ID 'd304fce8-5935-49cb-a280-e93bf43d12bd':
+  - '\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.a546b1c2-8af0-47a5-b2ee-d5eeadb98481' [Device 4]
+  - '\\?\GLOBALROOT\Device\HarddiskVolume10\PoolPart.e83fad5b-1e0d-4101-b337-b308443ca478' [Device 5]
+'@ -split "`r?`n"
+
+$parts = ConvertFrom-DpcmdPoolParts -Lines $poolPartLines
+
+# Resolve them against the volumes below, the way the agent does on the host.
+$partVolumes = @(
+    [pscustomobject]@{ driveLetter = $null; label = 'DRIVEPOOL4'; volumeId = 'vol-e'; fileSystem = 'NTFS'
+        sizeBytes = 8000000000000; freeBytes = 292000000000; path = '\\?\Volume{aaaa}\'
+        mountPoints = @('C:\PoolDisks\DRIVEPOOL4\'); physicalDiskIds = @('\\.\PHYSICALDRIVE3') },
+    [pscustomobject]@{ driveLetter = $null; label = 'DRIVEPOOL9'; volumeId = 'vol-f'; fileSystem = 'NTFS'
+        sizeBytes = 8000000000000; freeBytes = 292000000000; path = '\\?\Volume{bbbb}\'
+        mountPoints = @('C:\PoolDisks\DRIVEPOOL9\'); physicalDiskIds = @('\\.\PHYSICALDRIVE4') }
+)
+# Mounted into folders, not lettered — as on an array with more disks than letters.
+$partLetters = @{ 'PoolPart.a546b1c2-8af0-47a5-b2ee-d5eeadb98481' = 'C:\PoolDisks\DRIVEPOOL4'
+    'PoolPart.e83fad5b-1e0d-4101-b337-b308443ca478' = 'C:\PoolDisks\DRIVEPOOL9' }
+$parts = Resolve-PoolPartVolume -Parts $parts -Volumes $partVolumes -TestPath {
+        param($path)
+        foreach ($entry in $partLetters.GetEnumerator()) {
+            if ($path -eq "$($entry.Value)\$($entry.Key)") { return $true }
+        }
+        $false
+    }
+
+# --- Duplication, from real `get-duplication` output --------------------------
+$tier1 = ConvertFrom-DpcmdDuplication -Lines (@'
+Found '\\?\J:\Tier1\'
+
+  Expected number of copies: 2
+  Found number of copies: 14
+  Is directory: True
+  Has multiple sub-duplication counts: False
+'@ -split "`r?`n")
+
+$duplication = Select-ChangedDuplicationRules -PoolId 'd304fce8-5935-49cb-a280-e93bf43d12bd' -Map @{
+    ''      = 1
+    'Tier1' = $tier1
+    'Tier2' = 2
+    'Tier3' = 1
 }
 
 $performance = @(
@@ -174,24 +197,55 @@ $volumes = @(
 
 $pools = @(
     [ordered]@{
-        poolId = '{hdd-pool}'; name = 'HDD Pool'; driveLetter = 'P'
+        poolId = 'd304fce8-5935-49cb-a280-e93bf43d12bd'; name = 'DrivePool'; driveLetter = 'J'
         sizeBytes = 28000000000000; freeBytes = 3959207528857
         duplicatedBytes = $null; unduplicatedBytes = $null
         parts = @($parts)
     }
 )
 
-$primoCache = [ordered]@{
-    available = $false
-    version   = $null
-    reason    = 'PrimoCache is installed but exposes no command line interface this agent can read.'
-    caches    = @()
-}
+# --- PrimoCache, from real `rxpcc status` and `rxpcc ls` output ----------------
+$rxpccStatus = @'
+Cache Task #1 {507EEFF9-B281-489B-914F-F402D497E55E}
+----------------------------------------------------
+  Status: Active
+  Level-1 Cache: 262144MB
+    MM: 262144MB, IM: 0MB
+  Level-2 Cache: 953618MB
+    Storage: {D4CEAE5C-9802-4DB5-9510-6B6CCBEF8D2F}
+  Block Size: 32KB
+  Strategy: Read & Write
+  Defer-Write: Enabled
+    Latency: 300s
+  Overhead: 12.48GB
+
+Volume #8: Cache (Active)
+  Strategy: Read & Write
+'@ -split "`r?`n"
+
+$rxpccLs = @'
+Volume List
+===========
+
+Index      Name                   FileSys  Free/Capacity         Cluster  Cache
+-------------------------------------------------------------------------------
+Disk4      ATA     ST8000VN004-3CP1        7452.04GB
+  Vol #8   DRIVEPOOL4             NTFS     272.14GB/7452.02GB    4KB      1
+
+Disk5      ATA     ST8000VN004-3CP1        7452.04GB
+  Vol #10  DRIVEPOOL9             NTFS     272.29GB/7452.02GB    4KB      1
+'@ -split "`r?`n"
+
+$primoCache = Join-PrimoCacheReport `
+    -Caches (ConvertFrom-RxpccStatus -Lines $rxpccStatus) `
+    -Volumes (ConvertFrom-RxpccVolumeList -Lines $rxpccLs) `
+    -Perf (ConvertFrom-RxpccPerf -Lines @('Read Hit Rate: 82.5 %', 'Write Hit Rate: 61.0 %')) `
+    -Version '4.3.0'
 
 $report = New-AgentReport -Hostname 'NAS-01' -IntervalSeconds 900 `
     -PhysicalDisks $physicalDisks -Volumes $volumes -Smart $smart -Pools $pools `
     -Duplication $duplication -Performance $performance -PrimoCache $primoCache `
-    -Errors @(New-CollectorError -Collector 'primocache' -Message 'No command line interface found')
+    -Errors @()
 
 # The timestamp is fixed so the fixture does not churn on every regeneration.
 $report.collectedAt = '2024-03-05T03:15:00.000Z'

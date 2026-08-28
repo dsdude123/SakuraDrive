@@ -100,7 +100,19 @@ export function DrivesPage(): JSX.Element {
                     <td>
                       <strong>{volume.label ?? volume.volumeId}</strong>
                     </td>
-                    <td>{volume.driveLetter ? `${volume.driveLetter}:` : '—'}</td>
+                    <td>
+                      {volume.driveLetter ? (
+                        `${volume.driveLetter}:`
+                      ) : volume.mountPoints.length > 0 ? (
+                        <span className="mono" style={{ fontSize: 12 }} title={volume.mountPoints.join(', ')}>
+                          {volume.mountPoints[0]}
+                        </span>
+                      ) : (
+                        <span className="faint" title="No drive letter and no folder mount point — the container cannot reach this volume">
+                          not mounted
+                        </span>
+                      )}
+                    </td>
                     <td>{volume.fileSystem ?? '—'}</td>
                     <td className="num">{formatBytes(volume.sizeBytes)}</td>
                     <td className="num" style={lowSpace ? { color: 'var(--warning)' } : undefined}>

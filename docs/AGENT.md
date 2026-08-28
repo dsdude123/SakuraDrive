@@ -56,23 +56,78 @@ then note it: the agent currently passes through the type from `--scan-open`, so
 scan is wrong for your controller the drive is skipped and the reason appears under
 **Settings → Agents**.
 
+## Pool disks without drive letters
+
+An array with more disks than there are drive letters mounts its members without one.
+On tokyo-3 the fourteen HDD pool members are letterless, which has two consequences:
+
+- **The agent handles it already.** It finds each `PoolPart.*` folder by trying the
+  volume's drive letter, then its folder mount points, then its volume GUID path, and
+  reports the mount points it found so the interface can show them.
+- **The container cannot see them.** WSL2 only surfaces lettered drives under
+  `/mnt/<letter>`, so a letterless disk cannot be bind-mounted and therefore cannot be
+  catalogued or hashed.
+
+To catalogue them, give each disk a folder mount point on Windows — the standard way
+around the 26-letter limit:
+
+```powershell
+# One empty folder per pool disk, then mount the volume into it.
+New-Item -ItemType Directory -Path C:\PoolDisks\DRIVEPOOL4 -Force
+
+# Find the volume by its label, then add the folder as an access path.
+$volume = Get-Volume -FileSystemLabel DRIVEPOOL4
+$partition = Get-Partition -Volume $volume
+Add-PartitionAccessPath -DiskNumber $partition.DiskNumber `
+    -PartitionNumber $partition.PartitionNumber -AccessPath 'C:\PoolDisks\DRIVEPOOL4'
+```
+
+Mount points survive reboots. Once they exist, `/mnt/c/PoolDisks/DRIVEPOOL4` is visible
+inside WSL2 and can be bind-mounted read-only into the container as a pool-part root.
+
+The volumes page shows each volume's mount point, or "not mounted" when it has neither
+a letter nor a folder — which is exactly the set of disks that still need this.
+
 ## DrivePool
 
 `dpcmd.exe` ships with StableBit DrivePool and is found automatically. The agent uses it
-for two things:
+for two things.
 
-- `dpcmd list-poolparts <pool>` for pool membership;
-- `dpcmd get-duplication <folder>` to read duplication settings, probed breadth-first to
-  `DuplicationDepth` levels (default 3) below each pool root, keeping only folders whose
-  level differs from what they inherit.
+**Pool membership**, from `dpcmd list-poolparts <pool>`:
+
+```
+ + Pool ID 'd304fce8-5935-49cb-a280-e93bf43d12bd':
+  - '\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.a546b1c2-...' [Device 4]
+```
+
+That gives the real pool GUID, but identifies each part only by NT device path — no
+letter, no label, no capacity. The agent resolves each one by finding which volume
+actually holds that `PoolPart.<guid>` folder. A part no volume on the host holds is a
+disk that has dropped out, and is reported as missing.
+
+**Duplication settings**, from `dpcmd get-duplication <folder>`:
+
+```
+Found '\\?\J:\Tier1\'
+  Expected number of copies: 2
+  Found number of copies: 14
+  Is directory: True
+  Has multiple sub-duplication counts: False
+```
+
+`Expected number of copies` is the configured level. `Has multiple sub-duplication
+counts: False` means everything below the folder shares that level, so the probe stops
+there instead of walking further — which on a tier-based layout turns a full tree walk
+into a handful of calls. `Found number of copies` is only a real copy count for a file;
+for a directory it counts how many pool parts have that folder, which on a 14-disk pool
+reads as 14 whatever the duplication setting is, so it is not treated as one.
 
 Without `dpcmd`, pool parts are still discovered from the `PoolPart.*` folders DrivePool
 creates at the root of each member disk, and duplication levels can be entered by hand
 under **Settings → Duplication**.
 
-Raise `DuplicationDepth` if your duplication rules live deeper than three folders down.
-It costs one `dpcmd` call per folder at each level, so keep it as low as covers your
-layout.
+`DuplicationDepth` (default 3) bounds how far the probe descends when a folder *does*
+report mixed sub-counts. With duplication set per tier, the default is more than enough.
 
 ## Configuration
 
@@ -111,14 +166,30 @@ To run it in the foreground instead of via the scheduled task:
 
 ## PrimoCache
 
-RomexSoftware does not publish a command-line interface or performance counters for
-PrimoCache, so there is no supported way to read its statistics programmatically. The
-agent looks for a CLI beside the installed product and reports clearly when it finds
-none, rather than pretending the cache is absent.
+PrimoCache ships `rxpcc.exe`, and the agent uses it. It is found automatically at
+`C:\Program Files\PrimoCache\rxpcc.exe`, or set `RxpccPath`.
 
-If a future PrimoCache release adds one, the hook is `Get-PrimoCacheInventory` in
-`SakuraDriveAgent.ps1` — it expects JSON with a `caches` array, and the shape the server
-accepts is in `packages/shared/src/agent-protocol.ts`.
+Three commands are read:
+
+| Command | What it gives |
+| --- | --- |
+| `rxpcc status` | Cache tasks: L1 and L2 sizes, block size, strategy, defer-write, overhead |
+| `rxpcc ls` | Which labelled volumes each cache task fronts |
+| `rxpcc perf` | Hit rates |
+
+**The CLI and the GUI cannot run at the same time.** With the PrimoCache window open,
+`rxpcc` exits with a "Multiple Instances" error. The agent recognises that specific
+condition and reports it as *"The PrimoCache GUI is open"* rather than as a broken
+collector — so an open window looks like an open window, not a fault. Statistics resume
+on the next report after the GUI is closed. It also needs administrative rights, which
+the agent has because the scheduled task runs as SYSTEM.
+
+`status` and `ls` are parsed against known output. `perf` is not publicly documented and
+its wording varies by version, so it is read defensively: any label mentioning hits,
+misses or a rate is picked up, and a version whose wording is unrecognised yields *no*
+hit rate and a note in the collector errors — rather than a confidently wrong number. If
+your version reports nothing, send the output of `rxpcc perf` and the parser can be
+matched to it exactly.
 
 ## Protocol
 

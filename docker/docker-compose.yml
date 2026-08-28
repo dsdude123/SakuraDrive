@@ -1,11 +1,11 @@
-# SakuraDrive on Docker inside WSL2.
+# SakuraDrive on Docker inside WSL2, for tokyo-3.
 #
-# Everything else — pools, schedule, notifications, backups, thresholds — is
-# configured from the web interface, so this file only has to cover the things Docker
-# itself owns: the port, the data volume and which host paths the container can see.
+# Everything else — schedule, notifications, thresholds, backup expectations — is
+# configured from the web interface. This file only covers what Docker owns: the port,
+# the data volume, and which host paths the container can see.
 #
-# Windows drives appear inside WSL2 under /mnt/<letter>. The pool mounts below are
-# read-only on purpose: SakuraDrive never writes to your data.
+# Windows drives appear inside WSL2 under /mnt/<letter>. Every pool mount is read-only
+# on purpose: SakuraDrive never writes to your data.
 
 services:
   sakuradrive:
@@ -17,39 +17,60 @@ services:
     restart: unless-stopped
 
     ports:
-      - "${SAKURADRIVE_PORT:-8080}:8080"
+      # 8099 continues the 8096 scrutiny / 8097 youtrack / 8098 sakurafinancial block.
+      # Confirm with `sudo ss -ltnp` before assuming it is free.
+      - "${SAKURADRIVE_PORT:-8099}:8080"
 
     environment:
       # Only affects log timestamps; the schedule uses the timezone set in the UI.
-      TZ: ${TZ:-UTC}
+      TZ: ${TZ:-America/Los_Angeles}
       SAKURADRIVE_LOG_LEVEL: ${SAKURADRIVE_LOG_LEVEL:-info}
       # Set to true only on a trusted network, or behind an authenticating proxy.
       SAKURADRIVE_DISABLE_AUTH: ${SAKURADRIVE_DISABLE_AUTH:-false}
 
     volumes:
-      # Database, generated export bundles and the Kopia cache.
-      - sakuradrive-data:/data
+      # Database, generated export bundles and the Kopia cache. Follows the same
+      # Tier2/Docker convention as the other stacks.
+      - /mnt/m/Tier2/Docker/sakuradrive_data:/data
 
-      # --- The pools, as seen from WSL2 -----------------------------------
-      # P: is the HDD pool's DrivePool virtual drive.
-      - /mnt/p:/mnt/pools/hdd:ro
-      # S: is the SSD pool.
-      - /mnt/s:/mnt/pools/ssd:ro
+      # ------------------------------------------------------------------
+      # SSD pool (M:) and its three member disks.
+      #
+      # M: is a DrivePool pool over D:, E: and F: — the used figures add up exactly
+      # (878.94 + 849.01 + 797.08 = 2525.02 GB). The members have drive letters, so
+      # they can be catalogued individually with no extra work on the host.
+      #
+      # Catalogue the *members*, not M: itself. SakuraDrive builds the pool view from
+      # them, which costs one read instead of two and additionally tells you how many
+      # disks hold each file.
+      # ------------------------------------------------------------------
+      - /mnt/d:/mnt/parts/ssd-bay3:ro
+      - /mnt/e:/mnt/parts/ssd-bay2:ro
+      - /mnt/f:/mnt/parts/ssd-bay1:ro
 
-      # --- Individual pool parts (optional but strongly recommended) -------
-      # Cataloguing each disk's PoolPart folder separately is what lets the
-      # disaster-recovery report say exactly which files a specific dead disk
-      # took with it. Add one line per pool disk.
-      - /mnt/e:/mnt/parts/drivepool27:ro
-      - /mnt/f:/mnt/parts/drivepool28:ro
+      # ------------------------------------------------------------------
+      # HDD pool (J:) member disks.
+      #
+      # These 14 disks have no drive letters, so WSL2 cannot see them at /mnt/<letter>
+      # and neither can this container. Mount each one into an empty NTFS folder on
+      # Windows first — see docs/AGENT.md, "Pool disks without drive letters" — then
+      # add one line here per disk. Until then the HDD pool cannot be catalogued.
+      #
+      # - /mnt/c/PoolDisks/DRIVEPOOL4:/mnt/parts/drivepool4:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL9:/mnt/parts/drivepool9:ro
+      # ...one per pool disk
+      # ------------------------------------------------------------------
 
-      # --- The standalone PrimoCache SSD ----------------------------------
-      - /mnt/g:/mnt/disks/ssdcache:ro
+      # The pooled views themselves. Not catalogued — mounted only so the interface can
+      # report pool capacity and so "Check mount" can confirm the pool is online.
+      - /mnt/j:/mnt/pools/drivepool:ro
+      - /mnt/m:/mnt/pools/ssdpool:ro
 
-      # --- Where automatic export bundles are written ---------------------
-      # Point this at a folder the host already backs up to Backblaze: the catalog
-      # is most valuable exactly when this container's own storage is gone.
+      # ------------------------------------------------------------------
+      # Where automatic export bundles are written.
+      #
+      # D:\ is already in the Kopia repository (`Administrator@tokyo-3:D:\`), so a
+      # bundle written here reaches Backblaze with the next snapshot — which is the
+      # whole point: the catalog has to survive the machine that holds it.
+      # ------------------------------------------------------------------
       - /mnt/d/SakuraDriveExports:/backup/sakuradrive
-
-volumes:
-  sakuradrive-data:

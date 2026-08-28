@@ -53,17 +53,18 @@ describe('agent report contract', () => {
     const drive = ctx.agents.listDrives().find((candidate) => candidate.serialNumber === 'WD-ABC123')!;
     expect(drive.labels).toEqual(['DRIVEPOOL27']);
     expect(drive.driveLetters).toEqual(['E']);
-    expect(drive.poolNames).toEqual(['HDD Pool']);
+    expect(drive.poolNames).toEqual(['DrivePool']);
   });
 
   it('records the pool and both of its parts', () => {
     ctx.agents.ingest(agentReportSchema.parse(fixture));
     const pools = ctx.agents.listPools();
     expect(pools).toHaveLength(1);
-    expect(pools[0]!.name).toBe('HDD Pool');
+    expect(pools[0]!.name).toBe('DrivePool');
+    // dpcmd names parts only by NT device path; the agent resolved them to disks.
     expect(pools[0]!.parts.map((part) => part.volumeLabel).sort()).toEqual([
-      'DRIVEPOOL27',
-      'DRIVEPOOL28',
+      'DRIVEPOOL4',
+      'DRIVEPOOL9',
     ]);
     expect(pools[0]!.parts[0]!.deviceKey).toMatch(/^sn:/);
   });
@@ -71,8 +72,9 @@ describe('agent report contract', () => {
   it('imports the duplication rules dpcmd reported, minus redundant ones', () => {
     ctx.agents.ingest(agentReportSchema.parse(fixture));
     const rules = ctx.settings.get().duplication.rules;
-    expect(rules.map((rule) => rule.path).sort()).toEqual(['', 'Backups', 'Media', 'Media/Movies/4K']);
-    expect(rules.find((rule) => rule.path === 'Media/Movies/4K')!.level).toBe(3);
+    // Tier3 matches the pool default, so it carries no information and is dropped.
+    expect(rules.map((rule) => rule.path).sort()).toEqual(['', 'Tier1', 'Tier2']);
+    expect(rules.find((rule) => rule.path === 'Tier1')!.level).toBe(2);
     expect(rules.every((rule) => rule.source === 'drivepool')).toBe(true);
   });
 
@@ -118,12 +120,29 @@ describe('agent report contract', () => {
     expect(perfAlerts.every((alert) => alert.severity === 'critical')).toBe(true);
   });
 
-  it('records why PrimoCache statistics are missing rather than staying silent', () => {
-    const result = ctx.agents.ingest(agentReportSchema.parse(fixture));
-    expect(result.warnings).toContain('primocache: No command line interface found');
+  it('records PrimoCache statistics read from rxpcc', () => {
+    ctx.agents.ingest(agentReportSchema.parse(fixture));
     const latest = ctx.agents.latestPrimoCache()!;
-    expect(latest.available).toBe(false);
-    expect((latest.data as { reason: string }).reason).toContain('no command line interface');
+    expect(latest.available).toBe(true);
+
+    const data = latest.data as {
+      caches: Array<{
+        level: string;
+        targetVolumes: string[];
+        readHitRate: number;
+        deferWrite: boolean;
+        level1SizeBytes: number;
+        level2SizeBytes: number;
+      }>;
+    };
+    const cache = data.caches[0]!;
+    // Named after the volumes it fronts, not "Cache Task #1".
+    expect(cache.targetVolumes).toEqual(['DRIVEPOOL4', 'DRIVEPOOL9']);
+    expect(cache.level).toBe('L1+L2');
+    expect(cache.readHitRate).toBeCloseTo(0.825, 3);
+    expect(cache.deferWrite).toBe(true);
+    expect(cache.level1SizeBytes).toBe(262144 * 1024 * 1024);
+    expect(cache.level2SizeBytes).toBe(953618 * 1024 * 1024);
   });
 
   it('is idempotent: re-posting the same report changes nothing', () => {

@@ -136,6 +136,9 @@ function Get-VolumeInventory {
                     operationalStatus = [string]$volume.OperationalStatus
                     dirty             = Get-VolumeDirtyBit -DriveLetter $volume.DriveLetter
                     physicalDiskIds   = @($diskIds | Select-Object -Unique)
+                    # A disk mounted into a folder rather than given a letter — the
+                    # usual arrangement once an array outgrows 26 letters.
+                    mountPoints       = @(Get-VolumeMountPoints -Volume $volume)
                 })
         }
     }
@@ -143,6 +146,30 @@ function Get-VolumeInventory {
         $Errors.Add((New-CollectorError -Collector 'volumes' -Message $_.Exception.Message))
     }
     , $volumes.ToArray()
+}
+
+function Get-VolumeMountPoints {
+    <#
+    .SYNOPSIS
+        Folder mount points for a volume, e.g. C:\PoolDisks\DRIVEPOOL4.
+    .DESCRIPTION
+        A pool with more disks than there are drive letters is normally mounted into
+        empty folders instead. Those paths are how the agent finds the PoolPart folder
+        and how the operator bind-mounts the disk into the container, so they are worth
+        reporting even though Get-Volume does not surface them directly.
+    #>
+    param($Volume)
+
+    try {
+        $partition = Get-Partition -Volume $Volume -ErrorAction Stop
+        return @(
+            $partition.AccessPaths |
+                Where-Object { $_ -and $_ -notmatch '^\\\\\?\\Volume\{' -and $_ -notmatch '^[A-Za-z]:\\$' }
+        )
+    }
+    catch {
+        return @()
+    }
 }
 
 function Get-VolumeDirtyBit {
@@ -270,10 +297,14 @@ function Get-PoolInventory {
     .SYNOPSIS
         Discover DrivePool pools, their parts and their duplication settings.
     .DESCRIPTION
-        Pool drives are found by their filesystem type (Covefs). Pool parts come from
-        dpcmd when it is available and, failing that, from the PoolPart.* folders that
-        DrivePool creates at the root of each member disk — which is enough to see the
-        parts even without the command line tool.
+        Pool drives are found by their filesystem type (Covefs). `dpcmd list-poolparts`
+        then gives the real pool GUID and the parts belonging to it — but identifies
+        those parts only by NT device path, so each is matched back to a drive letter by
+        finding which volume holds its PoolPart folder.
+
+        Without dpcmd, parts are still discovered from the PoolPart folders themselves;
+        the pool they belong to then has to come from the UI, which is why the pool id
+        is a field the operator can set.
     #>
     param($Config, [array] $Volumes, [System.Collections.Generic.List[object]] $Errors)
 
@@ -287,41 +318,42 @@ function Get-PoolInventory {
     }
 
     $dpcmd = Resolve-DpcmdPath -Config $Config
+    if (-not $dpcmd) {
+        $Errors.Add((New-CollectorError -Collector 'dpcmd' -Message 'dpcmd.exe not found. Pool parts will be discovered from PoolPart folders, but pool membership and duplication settings need to be set in the web interface.'))
+    }
+
     $pools = New-Object System.Collections.Generic.List[object]
     $duplication = New-Object System.Collections.Generic.List[object]
 
     foreach ($poolVolume in $poolVolumes) {
         $root = "$($poolVolume.driveLetter):\"
-        $poolId = if ($poolVolume.volumeId) { $poolVolume.volumeId } else { $root }
+        $poolId = ''
         $parts = @()
 
         if ($dpcmd) {
             try {
                 $lines = & $dpcmd list-poolparts $root 2>&1 | ForEach-Object { [string]$_ }
                 $parts = ConvertFrom-DpcmdPoolParts -Lines $lines
+                if ($parts.Count -gt 0 -and $parts[0].poolId) { $poolId = $parts[0].poolId }
+                $parts = Resolve-PoolPartVolume -Parts $parts -Volumes $Volumes -TestPath {
+                        param($path) Test-Path -LiteralPath $path -PathType Container
+                    }
             }
             catch {
                 $Errors.Add((New-CollectorError -Collector 'dpcmd' -Message "list-poolparts failed for $root" -Detail $_.Exception.Message))
             }
         }
 
+        if (-not $poolId) { $poolId = if ($poolVolume.volumeId) { $poolVolume.volumeId } else { $root } }
+
         if ($parts.Count -eq 0) {
             $parts = Find-PoolPartFolders -Volumes $Volumes -Errors $Errors
+            foreach ($part in $parts) { $part.poolId = $poolId }
         }
 
-        # Attach the physical disk behind each part so the server can join a failing
-        # SMART report to the pool it affects.
-        foreach ($part in $parts) {
-            $match = $Volumes | Where-Object { $_.driveLetter -eq $part.driveLetter } | Select-Object -First 1
-            if ($match) {
-                $part.volumeId = $match.volumeId
-                if (-not $part.volumeLabel) { $part.volumeLabel = $match.label }
-                if ($null -eq $part.sizeBytes) { $part.sizeBytes = $match.sizeBytes }
-                if ($null -eq $part.freeBytes) { $part.freeBytes = $match.freeBytes }
-                if ($match.physicalDiskIds -and $match.physicalDiskIds.Count -gt 0) {
-                    $part.physicalDiskId = $match.physicalDiskIds[0]
-                }
-            }
+        $missing = @($parts | Where-Object { $_.missing })
+        if ($missing.Count -gt 0) {
+            $Errors.Add((New-CollectorError -Collector 'drivepool' -Message "$($missing.Count) pool part(s) listed by DrivePool are not present on this host"))
         }
 
         $pools.Add([ordered]@{
@@ -355,19 +387,28 @@ function Find-PoolPartFolders {
 
     $parts = New-Object System.Collections.Generic.List[object]
     foreach ($volume in $Volumes) {
-        if (-not $volume.driveLetter) { continue }
         if ($volume.fileSystem -match 'covefs') { continue }
+        # Prefer a letter, then a folder mount point, then the volume GUID path: a pool
+        # disk on a large array often has no letter at all.
+        $root = if ($volume.driveLetter) { "$($volume.driveLetter):\" }
+        elseif (@($volume.mountPoints).Count -gt 0) { @($volume.mountPoints)[0] }
+        elseif ($volume.path) { $volume.path }
+        else { $null }
+        if (-not $root) { continue }
         try {
-            $folders = Get-ChildItem -LiteralPath "$($volume.driveLetter):\" -Directory -Force -ErrorAction Stop |
+            $folders = Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction Stop |
                 Where-Object { $_.Name -match '^PoolPart\.' }
             foreach ($folder in $folders) {
                 $parts.Add([ordered]@{
                         partId         = $folder.Name
+                        poolId         = ''
                         name           = $volume.label
                         volumeId       = $volume.volumeId
                         volumeLabel    = $volume.label
                         driveLetter    = $volume.driveLetter
                         path           = $folder.FullName
+                        volumeDevice   = ''
+                        deviceIndex    = $null
                         sizeBytes      = $volume.sizeBytes
                         freeBytes      = $volume.freeBytes
                         usedBytes      = $null
@@ -378,7 +419,7 @@ function Find-PoolPartFolders {
             }
         }
         catch {
-            $Errors.Add((New-CollectorError -Collector 'poolparts' -Message "Could not list $($volume.driveLetter):\" -Detail $_.Exception.Message))
+            $Errors.Add((New-CollectorError -Collector 'poolparts' -Message "Could not list $root" -Detail $_.Exception.Message))
         }
     }
     , $parts.ToArray()
@@ -387,12 +428,13 @@ function Find-PoolPartFolders {
 function Get-DuplicationRules {
     <#
     .SYNOPSIS
-        Probe duplication levels down to `Depth` folders below the pool root.
+        Probe duplication levels below the pool root, pruning wherever DrivePool says
+        the whole subtree agrees.
     .DESCRIPTION
-        DrivePool inherits duplication downward, so only folders whose level differs
-        from what they inherit are reported. Probing is breadth-first and bounded, so
-        the cost stays proportional to the top few levels of the tree rather than to
-        the number of files.
+        `dpcmd get-duplication` reports `Has multiple sub-duplication counts`. When that
+        is False, every file below the folder shares one level and there is nothing to
+        learn by descending — so the walk stops there. On a pool whose duplication is
+        set per tier, that turns a full tree walk into a handful of calls.
     #>
     param(
         [string] $Dpcmd,
@@ -409,17 +451,20 @@ function Get-DuplicationRules {
     while ($queue.Count -gt 0) {
         $item = $queue.Dequeue()
         $relative = Get-PoolRelativePath -Root $Root -FullPath $item.Path
+        $descend = $true
 
         try {
             $lines = & $Dpcmd get-duplication $item.Path 2>&1 | ForEach-Object { [string]$_ }
-            $level = ConvertFrom-DpcmdDuplication -Lines $lines
-            if ($null -ne $level) { $map[$relative] = $level }
+            $detail = ConvertFrom-DpcmdDuplicationDetail -Lines $lines
+            if ($null -ne $detail.expectedCopies) { $map[$relative] = $detail.expectedCopies }
+            # False means the subtree is uniform: nothing below differs, so stop here.
+            if ($detail.hasMixedSubCounts -eq $false) { $descend = $false }
         }
         catch {
             $Errors.Add((New-CollectorError -Collector 'dpcmd' -Message "get-duplication failed for $($item.Path)" -Detail $_.Exception.Message))
         }
 
-        if ($item.Level -ge $Depth) { continue }
+        if (-not $descend -or $item.Level -ge $Depth) { continue }
         try {
             foreach ($child in Get-ChildItem -LiteralPath $item.Path -Directory -Force -ErrorAction Stop) {
                 if ($child.Name -match '^\$RECYCLE\.BIN$|^System Volume Information$') { continue }
@@ -492,61 +537,106 @@ function Get-PerformanceInventory {
     , $samples.ToArray()
 }
 
+function Resolve-RxpccPath {
+    param($Config)
+
+    if ($Config.RxpccPath -and (Test-Path -LiteralPath $Config.RxpccPath)) { return $Config.RxpccPath }
+    $candidates = @(
+        'C:\Program Files\PrimoCache\rxpcc.exe'
+        'C:\Program Files (x86)\PrimoCache\rxpcc.exe'
+        'C:\Program Files\Romex Software\PrimoCache\rxpcc.exe'
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $command = Get-Command 'rxpcc.exe' -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    $null
+}
+
 function Get-PrimoCacheInventory {
     <#
     .SYNOPSIS
-        Best-effort PrimoCache statistics.
+        PrimoCache statistics via its command line tool, rxpcc.
     .DESCRIPTION
-        RomexSoftware does not publish a command line interface or performance counters
-        for PrimoCache, so there is no supported way to read its statistics
-        programmatically. The agent looks for a CLI next to the installed product and
-        reports clearly when it cannot find one, rather than pretending the cache is
-        absent.
+        rxpcc refuses to run while the PrimoCache GUI is open — it exits with a
+        "Multiple Instances" error. That is a normal, recoverable condition, not a
+        fault, so it is reported as such rather than as a broken collector: the
+        interface says the GUI is open instead of showing an empty panel.
+
+        Requires administrative rights, which the agent has because the scheduled task
+        runs as SYSTEM.
     #>
     param($Config, [System.Collections.Generic.List[object]] $Errors)
 
     if (-not $Config.CollectPrimoCache) { return $null }
 
-    $installRoots = @(
-        'C:\Program Files\Romex Software\PrimoCache'
-        'C:\Program Files (x86)\Romex Software\PrimoCache'
-    )
-    $installed = $installRoots | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-
-    if (-not $installed) {
+    $rxpcc = Resolve-RxpccPath -Config $Config
+    if (-not $rxpcc) {
         return [ordered]@{
             available = $false
             version   = $null
-            reason    = 'PrimoCache does not appear to be installed on this host.'
+            reason    = 'PrimoCache does not appear to be installed on this host (rxpcc.exe not found).'
             caches    = @()
         }
     }
 
-    foreach ($candidate in @('PrimoCache.exe', 'pcache.exe', 'PrimoCacheCli.exe')) {
-        $cli = Join-Path $installed $candidate
-        if (-not (Test-Path -LiteralPath $cli)) { continue }
-        try {
-            $output = & $cli --status 2>&1 | Out-String
-            if ($output -match '^\s*\{') {
-                $parsed = $output | ConvertFrom-Json
-                return [ordered]@{
-                    available = $true
-                    version   = [string](Get-JsonValue $parsed 'version')
-                    reason    = $null
-                    caches    = @(Get-JsonValue $parsed 'caches')
-                }
-            }
-        }
-        catch {
-            $Errors.Add((New-CollectorError -Collector 'primocache' -Message "Could not query $candidate" -Detail $_.Exception.Message))
-        }
+    $run = {
+        param($arguments)
+        $output = & $rxpcc @arguments 2>&1 | ForEach-Object { [string]$_ }
+        [pscustomobject]@{ ExitCode = $LASTEXITCODE; Lines = @($output) }
     }
 
-    [ordered]@{
-        available = $false
-        version   = $null
-        reason    = "PrimoCache is installed at $installed but exposes no command line interface this agent can read. Its statistics are only available in its own interface."
-        caches    = @()
+    try {
+        $status = & $run @('status')
+
+        # Exit code 3 with this wording is the GUI holding the single-instance lock.
+        $text = ($status.Lines -join "`n")
+        if ($text -match 'Multiple Instances|another instance|GUI is running') {
+            return [ordered]@{
+                available = $false
+                version   = $null
+                reason    = 'The PrimoCache GUI is open. rxpcc cannot run at the same time, so statistics are unavailable until the GUI is closed.'
+                caches    = @()
+            }
+        }
+        if ($status.ExitCode -ne 0 -and $status.Lines.Count -eq 0) {
+            throw "rxpcc status exited with code $($status.ExitCode)"
+        }
+
+        $caches = ConvertFrom-RxpccStatus -Lines $status.Lines
+        $volumes = @()
+        $perf = $null
+        $version = ''
+
+        try { $volumes = ConvertFrom-RxpccVolumeList -Lines (& $run @('ls')).Lines }
+        catch { $Errors.Add((New-CollectorError -Collector 'primocache' -Message 'rxpcc ls failed' -Detail $_.Exception.Message)) }
+
+        try {
+            $perfResult = & $run @('perf')
+            $perf = ConvertFrom-RxpccPerf -Lines $perfResult.Lines
+            if (-not $perf.recognised) {
+                $Errors.Add((New-CollectorError -Collector 'primocache' -Message 'rxpcc perf output was not recognised, so hit rates are not reported. Send the output to have the parser matched to this version.'))
+            }
+        }
+        catch { $Errors.Add((New-CollectorError -Collector 'primocache' -Message 'rxpcc perf failed' -Detail $_.Exception.Message)) }
+
+        try {
+            $versionLines = (& $run @('ver')).Lines
+            if ($versionLines -and ($versionLines -join ' ') -match '(?<v>\d+\.\d+(\.\d+)*)') { $version = $Matches['v'] }
+        }
+        catch { }
+
+        return Join-PrimoCacheReport -Caches $caches -Volumes $volumes -Perf $perf -Version $version
+    }
+    catch {
+        $Errors.Add((New-CollectorError -Collector 'primocache' -Message $_.Exception.Message))
+        return [ordered]@{
+            available = $false
+            version   = $null
+            reason    = "rxpcc could not be queried: $($_.Exception.Message)"
+            caches    = @()
+        }
     }
 }
 

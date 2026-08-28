@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { openTestDatabase } from '../db/index.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { openTestDatabase, type Db } from '../db/index.js';
+import { createSilentLogger } from '../logger.js';
+import { AgentService } from '../services/agent-service.js';
+import { AlertService } from '../services/alert-service.js';
+import { AuthService } from '../services/auth-service.js';
+import { CatalogService } from '../services/catalog-service.js';
+import { SettingsService } from '../services/settings-service.js';
+import { WorkflowManager } from './engine.js';
+import { createMaintenanceWorkflow } from './maintenance-prune.js';
+import { createTempDir } from '../test/helpers.js';
 import { hoursSince, isDailyJobDue, lastCompletedAt } from './support.js';
 
 describe('lastCompletedAt', () => {
@@ -73,5 +82,90 @@ describe('isDailyJobDue', () => {
   it('rejects an unparseable time of day', () => {
     const now = new Date('2024-01-16T12:00:00Z');
     expect(isDailyJobDue(now, 'UTC', 'lunchtime', everyDay, null)).toBe(false);
+  });
+});
+
+describe('maintenance: configured roots stay reachable', () => {
+  let db: Db;
+  let alerts: AlertService;
+  let settings: SettingsService;
+  let temp: ReturnType<typeof createTempDir>;
+  let workflow: ReturnType<typeof createMaintenanceWorkflow>;
+
+  beforeEach(() => {
+    db = openTestDatabase();
+    temp = createTempDir('sakuradrive-mount-');
+    settings = new SettingsService(db);
+    alerts = new AlertService(db);
+    const logger = createSilentLogger();
+    const catalog = new CatalogService(db, settings);
+    const agents = new AgentService({ db, settings, alerts, logger });
+    const auth = new AuthService(db);
+    const manager = new WorkflowManager({ db, settings, logger });
+    workflow = createMaintenanceWorkflow({ db, settings, catalog, agents, alerts, auth, manager: () => manager });
+  });
+
+  afterEach(() => {
+    temp.dispose();
+    db.close();
+  });
+
+  const run = async () => {
+    const context = {
+      runId: 1,
+      params: {},
+      logger: createSilentLogger(),
+      signal: new AbortController().signal,
+      shouldContinue: () => true,
+      stopReason: () => 'none' as const,
+      setProgress: () => {},
+      setCursor: () => {},
+      getCursor: <T,>() => null as T | null,
+      setStats: () => {},
+      addStat: () => {},
+      log: () => {},
+    };
+    return workflow.run(context);
+  };
+
+  it('is quiet while every root is readable', async () => {
+    settings.update({
+      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', containerPath: temp.path }] },
+    });
+    const result = await run();
+    expect(result.stats!.unreadableRoots).toBe(0);
+    expect(alerts.list().alerts.filter((alert) => alert.category === 'catalog')).toHaveLength(0);
+  });
+
+  it('raises a critical alert for a root that has gone, without waiting for a scan', async () => {
+    settings.update({
+      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', containerPath: `${temp.path}/gone` }] },
+    });
+    const result = await run();
+    expect(result.stats!.unreadableRoots).toBe(1);
+
+    const alert = alerts.list().alerts.find((entry) => entry.category === 'catalog')!;
+    expect(alert.severity).toBe('critical');
+    expect(alert.title).toContain('HDD Pool');
+    expect(alert.detail).toContain('disk is offline');
+  });
+
+  it('clears the alert once the mount comes back', async () => {
+    settings.update({
+      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', containerPath: `${temp.path}/later` }] },
+    });
+    await run();
+    expect(alerts.list().alerts.some((alert) => alert.category === 'catalog')).toBe(true);
+
+    (await import('node:fs')).mkdirSync(`${temp.path}/later`, { recursive: true });
+    await run();
+    expect(alerts.list().alerts.some((alert) => alert.category === 'catalog')).toBe(false);
+  });
+
+  it('ignores roots the operator disabled', async () => {
+    settings.update({
+      catalog: { roots: [{ id: 'r1', name: 'Off', containerPath: '/nope', enabled: false }] },
+    });
+    expect((await run()).stats!.unreadableRoots).toBe(0);
   });
 });

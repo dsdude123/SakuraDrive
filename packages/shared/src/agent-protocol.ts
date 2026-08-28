@@ -111,6 +111,12 @@ export const volumeSchema = z.object({
   dirty: z.boolean().nullish(),
   /** Device ids of the physical disks backing this volume. */
   physicalDiskIds: z.array(z.string()).default([]),
+  /**
+   * Folder mount points, e.g. `C:\PoolDisks\DRIVEPOOL4`. An array with more disks
+   * than there are drive letters mounts its members into folders instead, and those
+   * paths are what the container needs bind-mounted.
+   */
+  mountPoints: z.array(z.string()).default([]),
 });
 export type Volume = z.infer<typeof volumeSchema>;
 
@@ -177,10 +183,20 @@ export const primoCacheSchema = z.object({
     .array(
       z.object({
         name: nonEmpty,
+        /** `L1`, or `L1+L2` when a level-2 SSD cache is attached. */
         level: z.string().nullish(),
+        /** Labels of the volumes this cache task fronts, e.g. `DRIVEPOOL4`. */
         targetVolumes: z.array(z.string()).default([]),
         cacheSizeBytes: optionalNumber,
         usedBytes: optionalNumber,
+        /** PrimoCache's own task GUID, and the settings it reports for the task. */
+        taskId: z.string().nullish(),
+        status: z.string().nullish(),
+        blockSize: z.string().nullish(),
+        strategy: z.string().nullish(),
+        deferWrite: z.boolean().nullish(),
+        level1SizeBytes: optionalNumber,
+        level2SizeBytes: optionalNumber,
         readHitRate: optionalNumber,
         writeHitRate: optionalNumber,
         readHits: optionalNumber,

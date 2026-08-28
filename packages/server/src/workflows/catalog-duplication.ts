@@ -59,6 +59,7 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
           config.duplication.defaultLevel,
         );
         catalog.rebuildDirStats(root.id);
+        catalog.rebuildPoolsContaining(root.id);
       }
 
       let underDuplicated = 0;

@@ -215,38 +215,44 @@
   ],
   "pools": [
     {
-      "poolId": "{hdd-pool}",
-      "name": "HDD Pool",
-      "driveLetter": "P",
+      "poolId": "d304fce8-5935-49cb-a280-e93bf43d12bd",
+      "name": "DrivePool",
+      "driveLetter": "J",
       "sizeBytes": 28000000000000,
       "freeBytes": 3959207528857,
       "duplicatedBytes": null,
       "unduplicatedBytes": null,
       "parts": [
         {
-          "partId": "PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c",
-          "name": "DRIVEPOOL27",
-          "volumeId": "",
-          "volumeLabel": "DRIVEPOOL27",
-          "driveLetter": "E",
-          "path": "E:\\PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c",
-          "sizeBytes": 13963797672755,
-          "freeBytes": 3958241859994,
-          "usedBytes": null,
+          "partId": "PoolPart.a546b1c2-8af0-47a5-b2ee-d5eeadb98481",
+          "poolId": "d304fce8-5935-49cb-a280-e93bf43d12bd",
+          "name": "DRIVEPOOL4",
+          "volumeId": "vol-e",
+          "volumeLabel": "DRIVEPOOL4",
+          "driveLetter": null,
+          "path": "C:\\PoolDisks\\DRIVEPOOL4\\PoolPart.a546b1c2-8af0-47a5-b2ee-d5eeadb98481",
+          "volumeDevice": "\\Device\\HarddiskVolume8",
+          "deviceIndex": 4,
+          "sizeBytes": 8000000000000,
+          "freeBytes": 292000000000,
+          "usedBytes": 7708000000000,
           "physicalDiskId": "\\\\.\\PHYSICALDRIVE3",
           "missing": false,
           "readOnly": false
         },
         {
-          "partId": "PoolPart.7b52c4d1-2e3f-4a5b-8c9d-1e2f3a4b5c6d",
-          "name": "DRIVEPOOL28",
-          "volumeId": "",
-          "volumeLabel": "DRIVEPOOL28",
-          "driveLetter": "F",
-          "path": "F:\\PoolPart.7b52c4d1-2e3f-4a5b-8c9d-1e2f3a4b5c6d",
-          "sizeBytes": 13963797672755,
-          "freeBytes": 966367641600,
-          "usedBytes": null,
+          "partId": "PoolPart.e83fad5b-1e0d-4101-b337-b308443ca478",
+          "poolId": "d304fce8-5935-49cb-a280-e93bf43d12bd",
+          "name": "DRIVEPOOL9",
+          "volumeId": "vol-f",
+          "volumeLabel": "DRIVEPOOL9",
+          "driveLetter": null,
+          "path": "C:\\PoolDisks\\DRIVEPOOL9\\PoolPart.e83fad5b-1e0d-4101-b337-b308443ca478",
+          "volumeDevice": "\\Device\\HarddiskVolume10",
+          "deviceIndex": 5,
+          "sizeBytes": 8000000000000,
+          "freeBytes": 292000000000,
+          "usedBytes": 7708000000000,
           "physicalDiskId": "\\\\.\\PHYSICALDRIVE4",
           "missing": false,
           "readOnly": false
@@ -256,24 +262,19 @@
   ],
   "duplication": [
     {
-      "poolId": "{hdd-pool}",
+      "poolId": "d304fce8-5935-49cb-a280-e93bf43d12bd",
       "path": "",
       "level": 1
     },
     {
-      "poolId": "{hdd-pool}",
-      "path": "Backups",
-      "level": 3
-    },
-    {
-      "poolId": "{hdd-pool}",
-      "path": "Media",
+      "poolId": "d304fce8-5935-49cb-a280-e93bf43d12bd",
+      "path": "Tier1",
       "level": 2
     },
     {
-      "poolId": "{hdd-pool}",
-      "path": "Media/Movies/4K",
-      "level": 3
+      "poolId": "d304fce8-5935-49cb-a280-e93bf43d12bd",
+      "path": "Tier2",
+      "level": 2
     }
   ],
   "performance": [
@@ -307,16 +308,37 @@
     }
   ],
   "primoCache": {
-    "available": false,
-    "version": null,
-    "reason": "PrimoCache is installed but exposes no command line interface this agent can read.",
-    "caches": []
+    "available": true,
+    "version": "4.3.0",
+    "reason": null,
+    "caches": [
+      {
+        "name": "Cache Task #1",
+        "level": "L1+L2",
+        "targetVolumes": [
+          "DRIVEPOOL4",
+          "DRIVEPOOL9"
+        ],
+        "cacheSizeBytes": 1274818854912,
+        "usedBytes": 13400297964,
+        "readHitRate": 0.825,
+        "writeHitRate": 0.61,
+        "readHits": null,
+        "readMisses": null,
+        "writeHits": null,
+        "writeMisses": null,
+        "deferredWriteBytes": null,
+        "pendingWriteBlocks": null,
+        "freeDeferredBlocks": null,
+        "status": "Active",
+        "blockSize": "32KB",
+        "strategy": "Read & Write",
+        "deferWrite": true,
+        "taskId": "{507EEFF9-B281-489B-914F-F402D497E55E}",
+        "level1SizeBytes": 274877906944,
+        "level2SizeBytes": 999940947968
+      }
+    ]
   },
-  "errors": [
-    {
-      "collector": "primocache",
-      "message": "No command line interface found",
-      "detail": ""
-    }
-  ]
+  "errors": []
 }

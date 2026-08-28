@@ -254,8 +254,8 @@ export class AgentService {
     const upsert = this.db.prepare(
       `INSERT INTO volumes
          (volume_id, label, drive_letter, path, file_system, size_bytes, free_bytes,
-          health_status, operational_status, dirty, device_keys, hostname, first_seen_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          health_status, operational_status, dirty, device_keys, mount_points, hostname, first_seen_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(volume_id) DO UPDATE SET
          label = excluded.label,
          drive_letter = excluded.drive_letter,
@@ -267,6 +267,7 @@ export class AgentService {
          operational_status = excluded.operational_status,
          dirty = excluded.dirty,
          device_keys = excluded.device_keys,
+         mount_points = excluded.mount_points,
          hostname = excluded.hostname,
          last_seen_at = excluded.last_seen_at`,
     );
@@ -288,6 +289,7 @@ export class AgentService {
           volume.operationalStatus ?? null,
           toDbBool(volume.dirty ?? null),
           toJson(keys),
+          toJson(volume.mountPoints),
           report.hostname,
           receivedAt,
           receivedAt,
@@ -798,7 +800,7 @@ export class AgentService {
         id: number; volume_id: string; label: string | null; drive_letter: string | null;
         file_system: string | null; size_bytes: number | null; free_bytes: number | null;
         health_status: string | null; operational_status: string | null; dirty: number | null;
-        device_keys: string; last_seen_at: string;
+        device_keys: string; mount_points: string; last_seen_at: string;
       }>('SELECT * FROM volumes ORDER BY drive_letter, label')
       .all()
       .map((row) => ({
@@ -813,6 +815,7 @@ export class AgentService {
         operationalStatus: row.operational_status,
         dirty: fromDbBool(row.dirty),
         deviceKeys: fromJson<string[]>(row.device_keys, []),
+        mountPoints: fromJson<string[]>(row.mount_points, []),
         lastSeenAt: row.last_seen_at,
       }));
   }

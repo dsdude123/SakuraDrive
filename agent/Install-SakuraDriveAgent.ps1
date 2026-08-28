@@ -139,6 +139,10 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
 
     # Two triggers: one at boot so monitoring resumes after a restart without waiting
     # for the first interval, and a repeating one for the steady state.
+    # Two triggers, because one is not enough: AtStartup means monitoring resumes after
+    # a reboot without waiting out the interval, and the repeating trigger covers the
+    # steady state. The task runs as SYSTEM, so neither depends on anyone being logged
+    # in — it survives a reboot and a sign-out alike.
     $atStartup = New-ScheduledTaskTrigger -AtStartup
     $atStartup.Delay = 'PT2M'
     $repeating = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
@@ -146,10 +150,14 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
 
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
+    # StartWhenAvailable catches up a run the machine slept through; RestartCount
+    # retries a run that failed outright rather than leaving monitoring dark until the
+    # next interval; IgnoreNew stops a slow run from stacking on top of itself.
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable `
         -MultipleInstances IgnoreNew `
+        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) `
         -ExecutionTimeLimit (New-TimeSpan -Minutes ([Math]::Max(10, $IntervalMinutes * 2)))
 
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
@@ -171,7 +179,11 @@ Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Seconds 5
 
 $task = Get-ScheduledTaskInfo -TaskName $TaskName
+$registered = Get-ScheduledTask -TaskName $TaskName
 Write-Host "Last result: $($task.LastTaskResult) (0 means success)"
+Write-Host "Runs as: $($registered.Principal.UserId) ($($registered.Principal.RunLevel))"
+Write-Host "Triggers: $($registered.Triggers.Count) (one at boot, one repeating every $IntervalMinutes minutes)"
+Write-Host "Survives reboot and sign-out: yes - the task runs as SYSTEM and starts at boot."
 Write-Host ''
 Write-Host 'Next steps:'
 Write-Host '  1. Open the SakuraDrive web interface and check Settings then Agents for this host.'
