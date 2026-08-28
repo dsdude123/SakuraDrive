@@ -156,6 +156,15 @@ export const settingsSchema = z.object({
       followSymlinks: z.boolean().default(false),
       /** Keep this many catalog scan runs' change records. */
       changeHistoryRuns: z.number().int().min(2).default(50),
+      /**
+       * Raise a critical alert when a single scan marks more than this share of a
+       * root's files as deleted. Catalog rows are only ever soft-deleted, so nothing
+       * is lost either way — but a missing bind mount and a dead disk look identical
+       * from inside the container and the operator should be told which one it was.
+       */
+      massDeletionAlertPercent: z.number().min(0).max(100).default(10),
+      /** Files written to the catalog per transaction while walking. */
+      batchSize: z.number().int().min(50).max(10_000).default(500),
     })
     .default({}),
 
