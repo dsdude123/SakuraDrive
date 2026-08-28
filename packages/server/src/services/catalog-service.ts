@@ -5,6 +5,7 @@ import {
   effectiveSize,
   extname,
   normalizeRelPath,
+  stripPoolPartPrefix,
   type CatalogChange,
   type CatalogChangeKind,
   type CatalogDiffSummary,
@@ -178,7 +179,15 @@ export class CatalogService {
 
     this.db.transaction(() => {
       for (const file of files) {
-        const relPath = normalizeRelPath(file.relPath);
+        // A pool-part root is normally mounted at the disk root, so its paths start
+        // with DrivePool's `PoolPart.<guid>` folder. Strip it: the catalog stores
+        // pool-relative paths so the same file on two different disks compares equal,
+        // which is what makes the disaster-recovery query work.
+        const relPath =
+          root.kind === 'poolpart'
+            ? stripPoolPartPrefix(file.relPath)
+            : normalizeRelPath(file.relPath);
+        if (relPath === '') continue;
         const pathKey = relPath.toLowerCase();
         const dirKey = dirnameRel(pathKey);
         const level = duplicationFor(relPath);

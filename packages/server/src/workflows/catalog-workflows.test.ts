@@ -285,6 +285,63 @@ describe('catalog scan', () => {
     expect(catalog.rootStats(ROOT_ID).deletedFiles).toBe(0);
   });
 
+  it('strips the PoolPart prefix so the same file on two disks compares equal', async () => {
+    // A pool-part root is mounted at the disk root, so its paths begin with the
+    // PoolPart folder DrivePool created. Two disks in the same pool must produce the
+    // same catalog path for the same file, or the recovery query cannot match them.
+    const second = createTempDir();
+    try {
+      writeFile(temp.path, 'PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c/Media/dup.mkv', 'x'.repeat(10));
+      writeFile(temp.path, 'PoolPart.6a41b3c0-1f2e-4d5a-9b8c-0d1e2f3a4b5c/Media/only-here.mkv', 'y'.repeat(20));
+      // A different guid on the second disk must not prevent the match.
+      writeFile(second.path, 'PoolPart.7b52c4d1-2e3f-4a5b-8c9d-1e2f3a4b5c6d/Media/dup.mkv', 'x'.repeat(10));
+
+      settings.update({
+        schedule: { heavyIo: fullSchedule() },
+        catalog: {
+          roots: [
+            {
+              id: 'part27',
+              name: 'DRIVEPOOL27',
+              kind: 'poolpart',
+              poolId: 'hdd',
+              containerPath: temp.path,
+              driveLabel: 'DRIVEPOOL27',
+            },
+            {
+              id: 'part28',
+              name: 'DRIVEPOOL28',
+              kind: 'poolpart',
+              poolId: 'hdd',
+              containerPath: second.path,
+              driveLabel: 'DRIVEPOOL28',
+            },
+          ],
+        },
+      });
+      await runWorkflow('catalog.scan');
+
+      const paths = catalog.searchFiles({ rootId: 'part27' }).files.map((file) => file.relPath).sort();
+      expect(paths).toEqual(['Media/dup.mkv', 'Media/only-here.mkv']);
+
+      const impact = catalog.diskLossImpact('part27');
+      expect(impact.label).toBe('DRIVEPOOL27');
+      expect(impact.unrecoverableFiles).toBe(1);
+      expect(impact.unrecoverableBytes).toBe(20);
+      expect(impact.duplicatedFiles).toBe(1);
+      expect(catalog.listUnrecoverableFiles('part27').files[0]!.relPath).toBe('Media/only-here.mkv');
+    } finally {
+      second.dispose();
+    }
+  });
+
+  it('leaves paths alone for a pool root', async () => {
+    writeFile(temp.path, 'Media/a.mkv', 'x');
+    configureRoot({ kind: 'pool' });
+    await runWorkflow('catalog.scan');
+    expect(catalog.searchFiles({}).files[0]!.relPath).toBe('Media/a.mkv');
+  });
+
   it('scans several roots in one run', async () => {
     const second = createTempDir();
     try {
