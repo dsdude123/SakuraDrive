@@ -1,8 +1,8 @@
 # Morning notes
 
-*Updated after your comments on the handover.* Everything you flagged is either done or
-answered below. Two things are still open, and one of them is new — it came out of your
-own `rxpcc ls` output rather than anything I guessed.
+*Updated after your comments on the handover.* Everything you flagged is done or
+answered below. **One thing is left for you**: giving the fourteen letterless HDD pool
+disks folder mount points, which now has a script (§5a). Everything else is closed.
 
 ---
 
@@ -18,6 +18,10 @@ own `rxpcc ls` output rather than anything I guessed.
 | Drive letters: `/mnt/j`, `/mnt/m` | **Done**, and it surfaced a real blocker — see §2. |
 | Pool size figures | **Answered** — see §3. The 90-day default holds. |
 | Individual disks outside the pool | Supported; they just need adding as roots. See §5. |
+| "Script to enumerate volumes and choose which to mount" | **Done.** `agent/tools/Set-PoolDiskMountPoints.ps1` — see §5a. |
+| Kopia snapshot sources listed | **Done.** Mapped, and it surfaced two gaps in the app — see §5b. |
+| `rxpcc perf -a` output pasted | **Done.** The parser was looking for the wrong thing entirely; rewritten against it — see §5c. |
+| "Use multiple agents" — deadline passed | Closed, nothing to do. |
 | "Duplication puts the copies across different *physical disks*" | **Fixed.** Copies were counted per pool part, which is only the same number while every part is on its own drive. Now counted per physical disk — see §6. |
 
 ---
@@ -107,36 +111,96 @@ count — and runs it once so you can confirm before walking away.
 
 Until then the HDD pool cannot be catalogued. Everything else works.
 
-### 5b. Say what belongs in Backblaze
+There is now a script for it: `agent/tools/Set-PoolDiskMountPoints.ps1`. Run it with
+`-ListOnly` first — no elevation, changes nothing — and it prints every fixed volume with
+its label, letter, size and whether WSL can currently reach it:
 
-Your Kopia sources are visible (`Administrator@tokyo-3:C:\Users`,
-`Administrator@tokyo-3:D:\`, and so on), but which pool paths you *expect* to be
-protected is a policy decision only you can make. Nothing is reported as unprotected
-until at least one expectation rule exists.
+```
+  #  Label            Ltr  FS     Size     Status    Reachable from WSL as
+  1  DRIVEPOOL4       -    NTFS   7.3 TB   unmounted NOT VISIBLE
+  2  SSDPOOl1         M:   NTFS   2.5 TB   letter    /mnt/m
+```
 
-Given your tiering, the natural shape is one rule per tier — for example Tier1 and Tier2
-expected in the repository, Tier3 and Tier4 deliberately not. Tell me the split and I
-will write the rules.
+Then run it elevated with no arguments and pick from the list — numbers, ranges like
+`4-9`, or `all`; the invisible ones are suggested for you. It refuses to touch the system
+volume, insists on an empty target folder, verifies each mount actually took, and prints
+the docker-compose lines for what it mounted. `-WhatIf` shows the whole plan without
+writing anything and `-Remove` undoes it.
+
+One thing to check rather than trust: a folder mount point is a reparse point, and
+whether WSL2's drvfs follows it into another volume is a WSL question, not a Windows one.
+The script prints the `ls` command to confirm. If it comes back empty, give the volumes
+drive letters instead — you have enough spare for the pool as it stands, and letters
+always work.
+
+### 5b. What belongs in Backblaze — **answered**
+
+You said Kopia holds `C:\Users`, `D:`, `E:`, `F:`, `J:\AmpDatastore`, `J:\Tier0`,
+`J:\Tier1` and `M:\Tier1`. Two things fall out of that, and both needed code:
+
+- **The SSD pool is fully covered.** D, E and F are snapshotted whole, so everything in
+  the pool is in the repository. `M:\Tier1` is the pooled view of the same data, so it
+  is redundant with them — harmless, but not extra protection.
+- **`J:\Tier2`, `Tier3` and `Tier4` are not backed up at all.** If one of the fourteen
+  HDD disks dies, whatever it held in those tiers that was not duplicated is gone.
+
+That second point was invisible in the app: a root with no expectation was simply never
+verified. It raises no alert — leaving a tier out is a cost decision, not a fault — but
+the Backup health page now has a **"What the rules cover"** panel listing, per root, what
+the rules reach into and what they do not, largest gap first. The list you want the
+morning a disk dies is the one you should be able to see the week before.
+
+Snapshotting `D:` whole also broke the path mapping: the snapshot holds
+`PoolPart.<guid>\Tier1\...` while the catalog strips that folder from a pool part's
+paths, so every file in a perfectly good backup read as missing. Expectations gained a
+**snapshot path prefix** for it. Write `PoolPart.*` and the wildcard resolves against the
+snapshot itself, so the pool GUID never enters the settings and the rule survives
+DrivePool being removed and re-added to a disk.
+
+The full mapping for your layout is written out in
+[docs/BACKUP-EXPECTATIONS.md](docs/BACKUP-EXPECTATIONS.md) as a table you can work
+straight down. The HDD pool needs one rule per *pool part* rather than one for the pool,
+since verification works from catalogued roots; the rules are otherwise identical.
 
 You also mentioned individual disks outside the pool needing cataloguing and hashing.
 `D:`, `E:`, `F:` are already in `docker-compose.yml` as SSD-pool members; add `G:` (and
 anything else) as a `disk` root if you want it catalogued too.
 
-### 5c. Paste `rxpcc perf` output
+### 5c. `rxpcc perf` output — **answered**
 
-`status` and `ls` are parsed exactly against your output. `perf` is the one command
-RomexSoftware does not document, so its parser reads defensively: it picks up any label
-mentioning hits, misses or a rate, and if your version's wording does not match it
-reports **no** hit rate plus a note, rather than a confidently wrong number.
+Your output showed the defensive parser was looking for the wrong thing entirely. There
+is no hit rate, no hits and no misses anywhere in it. It is a block per cached volume,
+keyed the way `rxpcc ls` numbers them, counting bytes moved:
 
-Run `rxpcc perf` with the GUI closed and send the output, and I will match it exactly.
+```
+Volume #8:
+  Total Read            : 657.49MB
+  Cached Read           : 142.91MB (21.7%)
+  Total Write (Req)     : 69.88MB
+  Total Write (L1/L2)   : 39.25MB / 30.63MB
+  Total Write (Disk)    : 54.48MB (78.0%)
+```
 
-### 5d. Still open from the original brief
+So the read hit rate is the share beside **Cached Read**. The write figure is the trap:
+`Total Write (Disk) 78.0%` is how much still *reached* the disk, which is the inverse of
+what the cache absorbed — reporting it as a write hit rate would have said the cache was
+helping most exactly when it was helping least. It is carried as "writes absorbed" (22%
+for volume #8, 72% for #14, which is taking the write load).
 
-**"Use workflows to implement different features."** I read this as an internal workflow
-engine — start on demand, stop on demand, progress, pause at the window edge and resume
-from a cursor. If you meant something else, say so; the engine is one file and the six
-workflows around it are ~150 lines each.
+`perf` is per volume, `status` is per cache task, and only `ls` knows which volume
+belongs to which task, so the three are joined. Task rates are recomputed from the summed
+byte counts rather than averaged from the percentages — otherwise an idle volume's 0.0%
+would drag down a busy one's 90%. The drives page shows both levels: per cache task, and
+per volume with prefetch progress.
+
+Two details worth knowing: every figure is cumulative since **Stat Start Time**, not a
+rate, so the page says since when; and the agent now runs `perf -a`, because without it
+only one volume comes back. Your unused cache is 121 GB of L1 and 74 GB of L2.
+
+### 5d. Multiple agents — **closed**
+
+You clarified this meant multiple agents working in parallel, and that the deadline for
+it has passed. Nothing to do.
 
 ---
 
@@ -212,7 +276,7 @@ nothing today. It changes what happens the day someone adds a second partition.
 
 ## 8. State
 
-644 tests green: 566 Node (163 shared, 366 server, 37 UI) and 78 Pester for the agent.
+707 tests green: 577 Node (163 shared, 377 server, 37 UI) and 130 Pester for the agent.
 The `dpcmd` and `rxpcc` parsers are tested against your pasted output verbatim, and the
 contract fixture the server test consumes is generated by the agent's own parsers from
 that same output — so a change on either side that breaks the protocol fails CI.
@@ -222,9 +286,13 @@ catalog scan with duplication-aware sizes, hashing, treemap, export bundle, bit-
 detection raising and clearing its alert, and the whole pool-view and disk-loss flow
 described in §6.
 
+The Pester suite now runs here too, not just in CI: 130 tests against the real `dpcmd`,
+`rxpcc status`, `rxpcc ls` and `rxpcc perf -a` output you pasted.
+
 Not verified, because I have no access: real Windows cmdlets and smartctl against your
-controllers, a live Kopia repository, and WSL2 `drvfs` throughput — the first scan will
-tell you that last one.
+controllers, a live Kopia repository, whether WSL2's drvfs follows a folder mount point
+into another volume (§5a says how to check in one command), and `drvfs` throughput — the
+first scan will tell you that last one.
 
 ---
 
