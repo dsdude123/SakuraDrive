@@ -52,13 +52,31 @@ services:
       # HDD pool (J:) member disks.
       #
       # These 14 disks have no drive letters, so WSL2 cannot see them at /mnt/<letter>
-      # and neither can this container. Mount each one into an empty NTFS folder on
-      # Windows first — see docs/AGENT.md, "Pool disks without drive letters" — then
-      # add one line here per disk. Until then the HDD pool cannot be catalogued.
+      # and neither can this container. Give each one a folder mount point on Windows
+      # first — agent/tools/Set-PoolDiskMountPoints.ps1 does it — then uncomment these.
+      # Until then the HDD pool cannot be catalogued.
+      #
+      # Do NOT uncomment before the volumes are actually mounted: Docker creates a
+      # missing bind source as an empty directory, which would catalogue as an empty
+      # disk rather than failing loudly.
+      #
+      # The list below is this host's, from `Set-PoolDiskMountPoints.ps1 -ListOnly`:
+      # the 14 members of J:, whose capacities sum to the 95.5 TB the pool reports.
       #
       # - /mnt/c/PoolDisks/DRIVEPOOL4:/mnt/parts/drivepool4:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL5:/mnt/parts/drivepool5:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL6:/mnt/parts/drivepool6:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL7:/mnt/parts/drivepool7:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL8:/mnt/parts/drivepool8:ro
       # - /mnt/c/PoolDisks/DRIVEPOOL9:/mnt/parts/drivepool9:ro
-      # ...one per pool disk
+      # - /mnt/c/PoolDisks/DRIVEPOOL10:/mnt/parts/drivepool10:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL11:/mnt/parts/drivepool11:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL12:/mnt/parts/drivepool12:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL13:/mnt/parts/drivepool13:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL14:/mnt/parts/drivepool14:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL15:/mnt/parts/drivepool15:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL16:/mnt/parts/drivepool16:ro
+      # - /mnt/c/PoolDisks/DRIVEPOOL17:/mnt/parts/drivepool17:ro
       # ------------------------------------------------------------------
 
       # The pooled views themselves. Not catalogued — mounted only so the interface can

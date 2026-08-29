@@ -249,8 +249,29 @@ function ConvertTo-MountCandidate {
         if ($Partition -and $Partition.PSObject.Properties[$flag] -and $Partition.$flag) { $isSystem = $true }
     }
 
+    # Partitions Windows put there for itself. They look exactly like an unmounted data
+    # disk -- small, letterless, sometimes unlabelled -- so without this the recovery and
+    # reserved partitions are offered alongside the pool disks, and -All would mount them.
+    # Nothing good comes of giving WinRE a path into a container.
+    $isReserved = $false
+    if ($Partition) {
+        if ($Partition.PSObject.Properties['IsHidden'] -and $Partition.IsHidden) { $isReserved = $true }
+        if ($Partition.PSObject.Properties['Type'] -and
+            @('System', 'Reserved', 'Recovery') -contains [string]$Partition.Type) { $isReserved = $true }
+        if ($Partition.PSObject.Properties['GptType'] -and $Partition.GptType) {
+            $gpt = ([string]$Partition.GptType).Trim('{', '}').ToLowerInvariant()
+            $reservedTypes = @(
+                'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'  # EFI system partition
+                'e3c9e316-0b5c-4db8-817d-f92df00215ae'  # Microsoft reserved
+                'de94bba4-06d1-4d40-a16a-bfd50179d6ac'  # Windows recovery (WinRE)
+            )
+            if ($reservedTypes -contains $gpt) { $isReserved = $true }
+        }
+    }
+
     $status =
     if ($isSystem) { 'system' }
+    elseif ($isReserved) { 'reserved' }
     elseif ($letter) { 'letter' }
     elseif ($folders.Count -gt 0) { 'folder' }
     else { 'unmounted' }
@@ -392,6 +413,9 @@ function Add-VolumeMountPoint {
     if ($Candidate.Status -eq 'system') {
         throw "$($Candidate.Label) is the system or boot volume. Refusing to touch it."
     }
+    if ($Candidate.Status -eq 'reserved') {
+        throw "$($Candidate.Label) is a Windows recovery or reserved partition, not a data disk. Refusing to touch it."
+    }
     if ($null -eq $Candidate.DiskNumber -or $null -eq $Candidate.PartitionNumber) {
         throw "No partition found for $($Candidate.Label) ($($Candidate.VolumePath)). Mount it from Disk Management instead."
     }
@@ -469,8 +493,16 @@ function Invoke-Main {
     Format-CandidateTable -Candidates $candidates | ForEach-Object { Write-Host $_ }
     Write-Host ''
 
-    $invisible = @($candidates | Where-Object { -not $_.Reachable -and $_.Status -ne 'system' })
+    # Candidates: unreachable from WSL, and something a person would actually catalogue.
+    $invisible = @(
+        $candidates | Where-Object { -not $_.Reachable -and $_.Status -ne 'system' -and $_.Status -ne 'reserved' }
+    )
+    $skipped = @($candidates | Where-Object { $_.Status -eq 'reserved' })
     Write-Host ("{0} of {1} volumes are invisible to WSL2 and cannot be catalogued." -f $invisible.Count, $candidates.Count)
+    if ($skipped.Count -gt 0) {
+        Write-Host ("{0} Windows recovery or reserved partition(s) are listed but excluded: {1}" -f
+            $skipped.Count, (($skipped | ForEach-Object { "#$($_.Index)" }) -join ', ')) -ForegroundColor DarkGray
+    }
     if ($ListOnly) { return }
 
     # ---- choose ----

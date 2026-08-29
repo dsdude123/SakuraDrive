@@ -183,6 +183,54 @@ Describe 'Classifying a volume' {
         $row.Status | Should -Be 'system'
     }
 
+    # From tokyo-3: an 825 MB unlabelled NTFS partition and a 450 MB one called
+    # "Recovery" sat in the listing looking exactly like small unmounted data disks.
+    # Neither IsSystem nor IsBoot is set on them, so without this they would have been
+    # in the suggested selection and in -All.
+    It 'recognises a recovery partition by its GPT type' {
+        $row = ConvertTo-MountCandidate `
+            -Volume (New-Volume -Label '' -Letter $null -Size 865075200) `
+            -Partition (New-Partition2 -Disk 0 -Number 4)
+        $row.Status | Should -Be 'unmounted'
+
+        $recovery = New-Partition2 -Disk 0 -Number 4
+        $recovery | Add-Member -NotePropertyName GptType -NotePropertyValue '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}'
+        $row = ConvertTo-MountCandidate -Volume (New-Volume -Label '' -Letter $null) -Partition $recovery
+        $row.Status | Should -Be 'reserved'
+    }
+
+    It 'recognises the EFI system partition and the Microsoft reserved partition' {
+        foreach ($guid in 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b', 'e3c9e316-0b5c-4db8-817d-f92df00215ae') {
+            $partition = New-Partition2 -Disk 0 -Number 1
+            $partition | Add-Member -NotePropertyName GptType -NotePropertyValue "{$guid}"
+            (ConvertTo-MountCandidate -Volume (New-Volume -Label '' -Letter $null) -Partition $partition).Status |
+                Should -Be 'reserved'
+        }
+    }
+
+    It 'recognises one by its friendly partition type, for the unlabelled case' {
+        $partition = New-Partition2 -Disk 0 -Number 4
+        $partition | Add-Member -NotePropertyName Type -NotePropertyValue 'Recovery'
+        (ConvertTo-MountCandidate -Volume (New-Volume -Label '' -Letter $null) -Partition $partition).Status |
+            Should -Be 'reserved'
+    }
+
+    It 'recognises a hidden partition' {
+        $partition = New-Partition2 -Disk 0 -Number 4
+        $partition | Add-Member -NotePropertyName IsHidden -NotePropertyValue $true
+        (ConvertTo-MountCandidate -Volume (New-Volume -Label 'Recovery' -Letter $null) -Partition $partition).Status |
+            Should -Be 'reserved'
+    }
+
+    # A pool disk can be small -- DRIVEPOOL16 is 931 GB where its neighbours are 18 TB --
+    # so size must never be part of this decision.
+    It 'leaves a small but ordinary data disk alone' {
+        $row = ConvertTo-MountCandidate `
+            -Volume (New-Volume -Label 'DRIVEPOOL16' -Letter $null -Size 1000203804160) `
+            -Partition (New-Partition2 -Disk 9 -Number 2)
+        $row.Status | Should -Be 'unmounted'
+    }
+
     It 'names an unlabelled volume after its disk and partition' {
         $row = ConvertTo-MountCandidate `
             -Volume (New-Volume -Label '' -Letter $null) `
@@ -201,6 +249,19 @@ Describe 'Classifying a volume' {
             -Volume (New-Volume -Label 'DRIVEPOOL4' -Letter $null) `
             -Partition (New-Partition2) -MountRoot 'D:\Disks'
         $row.ProposedPath | Should -Be 'D:\Disks\DRIVEPOOL4'
+    }
+}
+
+Describe 'What it refuses to touch' {
+    It 'refuses the system volume and a reserved partition alike' {
+        foreach ($status in 'system', 'reserved') {
+            $candidate = [pscustomobject]@{
+                Label = 'X'; Status = $status; DiskNumber = 0; PartitionNumber = 1
+                MountFolders = @(); VolumePath = '\\?\Volume{a}\'
+            }
+            { Add-VolumeMountPoint -Candidate $candidate -Path 'C:\PoolDisks\X' } |
+                Should -Throw '*Refusing to touch it*'
+        }
     }
 }
 

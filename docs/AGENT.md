@@ -101,9 +101,11 @@ around the 26-letter limit. `agent/tools/Set-PoolDiskMountPoints.ps1` does the w
 .\Set-PoolDiskMountPoints.ps1
 ```
 
-It refuses to touch the system volume, requires an empty target directory, verifies each
-mount took rather than assuming it, and prints the docker-compose lines for what it
-mounted. `-WhatIf` shows the plan without writing anything, `-Label` and `-All` script
+It refuses to touch the system volume *and* Windows' own recovery and reserved
+partitions -- which look exactly like small unmounted data disks in the listing, and
+would otherwise be offered alongside the pool members. It requires an empty target
+directory, verifies each mount took rather than assuming it, and prints the
+docker-compose lines for what it mounted. `-WhatIf` shows the plan without writing anything, `-Label` and `-All` script
 it, `-MountRoot` puts the folders somewhere other than `C:\PoolDisks`, and `-Remove`
 undoes it — the volume and its contents are untouched, only the path you reach it by
 goes away.
