@@ -498,7 +498,11 @@ function Invoke-Main {
         $candidates | Where-Object { -not $_.Reachable -and $_.Status -ne 'system' -and $_.Status -ne 'reserved' }
     )
     $skipped = @($candidates | Where-Object { $_.Status -eq 'reserved' })
-    Write-Host ("{0} of {1} volumes are invisible to WSL2 and cannot be catalogued." -f $invisible.Count, $candidates.Count)
+    # Say what the number counts. Rows marked NOT VISIBLE include the system and reserved
+    # partitions, which are not candidates, so "N are invisible" would not add up.
+    $unreachable = @($candidates | Where-Object { -not $_.Reachable })
+    Write-Host ("{0} data disk(s) here cannot be catalogued: WSL2 does not see them." -f $invisible.Count)
+    Write-Host ("{0} of {1} volumes are not reachable from WSL2 at all." -f $unreachable.Count, $candidates.Count) -ForegroundColor DarkGray
     if ($skipped.Count -gt 0) {
         Write-Host ("{0} Windows recovery or reserved partition(s) are listed but excluded: {1}" -f
             $skipped.Count, (($skipped | ForEach-Object { "#$($_.Index)" }) -join ', ')) -ForegroundColor DarkGray
