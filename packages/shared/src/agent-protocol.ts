@@ -197,18 +197,61 @@ export const primoCacheSchema = z.object({
         deferWrite: z.boolean().nullish(),
         level1SizeBytes: optionalNumber,
         level2SizeBytes: optionalNumber,
+        /**
+         * PrimoCache counts bytes moved, not hits and misses, so the read hit rate is
+         * the share of read bytes the cache served: `cachedReadBytes / readBytes`.
+         */
         readHitRate: optionalNumber,
-        writeHitRate: optionalNumber,
-        readHits: optionalNumber,
-        readMisses: optionalNumber,
-        writeHits: optionalNumber,
-        writeMisses: optionalNumber,
+        readBytes: optionalNumber,
+        cachedReadBytes: optionalNumber,
+        writeBytes: optionalNumber,
+        /**
+         * How much of the requested write still reached the disk. Its complement,
+         * `writeAbsorbedRate`, is what deferred write kept off the disk — the number
+         * worth showing. There is deliberately no `writeHitRate`: PrimoCache reports
+         * the disk share, and calling that a hit rate would invert its meaning.
+         */
+        writeToDiskBytes: optionalNumber,
+        writeToDiskRate: optionalNumber,
+        writeAbsorbedRate: optionalNumber,
+        /** Every figure is cumulative since this moment, not a rate. */
+        statsSince: z.string().nullish(),
+        /** Per-volume detail, named by the label `rxpcc ls` gives each volume. */
+        volumeStats: z
+          .array(
+            z.object({
+              volume: z.number(),
+              label: z.string().nullish(),
+              readBytes: optionalNumber,
+              cachedReadBytes: optionalNumber,
+              readHitRate: optionalNumber,
+              level2ReadBytes: optionalNumber,
+              level2ReadRate: optionalNumber,
+              level2WriteBytes: optionalNumber,
+              writeBytes: optionalNumber,
+              writeLevel1Bytes: optionalNumber,
+              writeLevel2Bytes: optionalNumber,
+              writeToDiskBytes: optionalNumber,
+              writeToDiskRate: optionalNumber,
+              writeAbsorbedRate: optionalNumber,
+              deferredBlocks: optionalNumber,
+              trimmedBlocks: optionalNumber,
+              prefetchState: z.string().nullish(),
+              prefetchLoadedBytes: optionalNumber,
+              prefetchTotalBytes: optionalNumber,
+              statsSince: z.string().nullish(),
+            }),
+          )
+          .default([]),
         deferredWriteBytes: optionalNumber,
         pendingWriteBlocks: optionalNumber,
         freeDeferredBlocks: optionalNumber,
       }),
     )
     .default([]),
+  /** Cache capacity not currently holding anything, for the whole cache. */
+  unusedLevel1Bytes: optionalNumber,
+  unusedLevel2Bytes: optionalNumber,
 });
 export type PrimoCacheReport = z.infer<typeof primoCacheSchema>;
 

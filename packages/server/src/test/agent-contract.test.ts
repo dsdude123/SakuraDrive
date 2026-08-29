@@ -126,10 +126,14 @@ describe('agent report contract', () => {
     expect(latest.available).toBe(true);
 
     const data = latest.data as {
+      unusedLevel1Bytes: number;
       caches: Array<{
         level: string;
         targetVolumes: string[];
         readHitRate: number;
+        writeAbsorbedRate: number;
+        statsSince: string;
+        volumeStats: Array<{ volume: number; label: string; readHitRate: number }>;
         deferWrite: boolean;
         level1SizeBytes: number;
         level2SizeBytes: number;
@@ -139,10 +143,19 @@ describe('agent report contract', () => {
     // Named after the volumes it fronts, not "Cache Task #1".
     expect(cache.targetVolumes).toEqual(['DRIVEPOOL4', 'DRIVEPOOL9']);
     expect(cache.level).toBe('L1+L2');
-    expect(cache.readHitRate).toBeCloseTo(0.825, 3);
     expect(cache.deferWrite).toBe(true);
     expect(cache.level1SizeBytes).toBe(262144 * 1024 * 1024);
     expect(cache.level2SizeBytes).toBe(953618 * 1024 * 1024);
+
+    // rxpcc reports per volume and in bytes moved, so the task's rates are the summed
+    // byte counts of the two volumes it fronts, not an average of their percentages.
+    expect(cache.volumeStats.map((volume) => volume.label)).toEqual(['DRIVEPOOL4', 'DRIVEPOOL9']);
+    expect(cache.volumeStats[0]!.readHitRate).toBeCloseTo(0.217, 3);
+    expect(cache.readHitRate).toBeCloseTo(0.1279, 4);
+    // The complement of "Total Write (Disk) 75.73%": what deferred write kept off disk.
+    expect(cache.writeAbsorbedRate).toBeCloseTo(0.2427, 4);
+    expect(cache.statsSince).toMatch(/^2026-08-28T12:41:15/);
+    expect(data.unusedLevel1Bytes).toBe(130051609723);
   });
 
   it('is idempotent: re-posting the same report changes nothing', () => {

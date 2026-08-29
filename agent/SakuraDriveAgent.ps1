@@ -613,10 +613,11 @@ function Get-PrimoCacheInventory {
         catch { $Errors.Add((New-CollectorError -Collector 'primocache' -Message 'rxpcc ls failed' -Detail $_.Exception.Message)) }
 
         try {
-            $perfResult = & $run @('perf')
+            # -a covers every cached volume; without it only one block comes back.
+            $perfResult = & $run @('perf', '-a')
             $perf = ConvertFrom-RxpccPerf -Lines $perfResult.Lines
             if (-not $perf.recognised) {
-                $Errors.Add((New-CollectorError -Collector 'primocache' -Message 'rxpcc perf output was not recognised, so hit rates are not reported. Send the output to have the parser matched to this version.'))
+                $Errors.Add((New-CollectorError -Collector 'primocache' -Message 'rxpcc perf output was not recognised, so cache statistics are not reported. Send the output to have the parser matched to this version.'))
             }
         }
         catch { $Errors.Add((New-CollectorError -Collector 'primocache' -Message 'rxpcc perf failed' -Detail $_.Exception.Message)) }

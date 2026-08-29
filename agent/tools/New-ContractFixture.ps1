@@ -236,10 +236,46 @@ Disk5      ATA     ST8000VN004-3CP1        7452.04GB
   Vol #10  DRIVEPOOL9             NTFS     272.29GB/7452.02GB    4KB      1
 '@ -split "`r?`n"
 
+# Real `rxpcc perf -a` output. It is per volume and speaks in bytes moved, so the cache
+# task's rates are the summed byte counts of the volumes it fronts.
+$rxpccPerf = @'
+Volume #8:
+  Total Read            : 657.49MB
+  Cached Read           : 142.91MB (21.7%)
+  L2Storage Read        : 47.74MB (7.3%)
+  L2Storage Write       : 51.17GB
+  Total Write (Req)     : 69.88MB
+  Total Write (L1/L2)   : 39.25MB / 30.63MB
+  Total Write (Disk)    : 54.48MB (78.0%)
+    Urgent/Normal       : 0 / 54.48MB
+  Deferred Blocks       : 15 (0.0%)
+  Trimmed Blocks        : 139
+  Prefetch              : Done (16.96GB / 19.40GB)
+  Unused Cache (L1)     : 121.12GB
+  Unused Cache (L2)     : 74.02GB
+  Stat Start Time       : 2026-08-28 12:41:15
+
+Volume #10:
+  Total Read            : 584.55MB
+  Cached Read           : 15.92MB (2.7%)
+  L2Storage Read        : 0 (0.0%)
+  L2Storage Write       : 0
+  Total Write (Req)     : 6.84MB
+  Total Write (L1/L2)   : 2.11MB / 4.73MB
+  Total Write (Disk)    : 3.62MB (52.9%)
+    Urgent/Normal       : 0 / 3.62MB
+  Deferred Blocks       : 9 (0.0%)
+  Trimmed Blocks        : 0
+  Prefetch              : Done (11.78GB / 27.82GB)
+  Unused Cache (L1)     : 121.12GB
+  Unused Cache (L2)     : 74.02GB
+  Stat Start Time       : 2026-08-28 12:41:16
+'@ -split "`r?`n"
+
 $primoCache = Join-PrimoCacheReport `
     -Caches (ConvertFrom-RxpccStatus -Lines $rxpccStatus) `
     -Volumes (ConvertFrom-RxpccVolumeList -Lines $rxpccLs) `
-    -Perf (ConvertFrom-RxpccPerf -Lines @('Read Hit Rate: 82.5 %', 'Write Hit Rate: 61.0 %')) `
+    -Perf (ConvertFrom-RxpccPerf -Lines $rxpccPerf) `
     -Version '4.3.0'
 
 $report = New-AgentReport -Hostname 'NAS-01' -IntervalSeconds 900 `

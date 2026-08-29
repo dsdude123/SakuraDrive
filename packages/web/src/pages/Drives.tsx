@@ -143,19 +143,43 @@ export function DrivesPage(): JSX.Element {
   );
 }
 
+interface PrimoCacheVolumeStats {
+  volume: number;
+  label?: string | null;
+  readBytes?: number | null;
+  cachedReadBytes?: number | null;
+  readHitRate?: number | null;
+  level2ReadRate?: number | null;
+  writeBytes?: number | null;
+  writeAbsorbedRate?: number | null;
+  deferredBlocks?: number | null;
+  prefetchState?: string | null;
+  prefetchLoadedBytes?: number | null;
+  prefetchTotalBytes?: number | null;
+}
+
 interface PrimoCacheData {
   available: boolean;
   version?: string | null;
   reason?: string | null;
+  unusedLevel1Bytes?: number | null;
+  unusedLevel2Bytes?: number | null;
   caches: Array<{
     name: string;
     level?: string | null;
     cacheSizeBytes?: number | null;
     usedBytes?: number | null;
     readHitRate?: number | null;
-    writeHitRate?: number | null;
+    writeAbsorbedRate?: number | null;
+    statsSince?: string | null;
+    volumeStats?: PrimoCacheVolumeStats[];
     deferredWriteBytes?: number | null;
   }>;
+}
+
+function percent(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  return `${Math.round(value * 100)}%`;
 }
 
 function PrimoCacheCard({
@@ -163,6 +187,11 @@ function PrimoCacheCard({
 }: {
   latest: { collectedAt: string; available: boolean; data: PrimoCacheData | null } | null;
 }): JSX.Element {
+  const data = latest?.data ?? null;
+  // Every figure rxpcc reports is cumulative since the cache last started counting, so
+  // saying since when is the difference between a hit rate and a number.
+  const since = data?.caches.find((cache) => cache.statsSince)?.statsSince ?? null;
+
   return (
     <Card
       title="PrimoCache"
@@ -171,33 +200,63 @@ function PrimoCacheCard({
     >
       {!latest || !latest.available ? (
         <EmptyState title="No PrimoCache statistics">
-          {latest?.data?.reason ??
-            'RomexSoftware PrimoCache does not expose a documented command-line interface, so the agent reports statistics only when it can find one. Everything else on this page works without it.'}
+          {data?.reason ??
+            'The agent reports cache statistics when it can run rxpcc. It cannot while the PrimoCache window is open — the two share a single instance. Everything else on this page works without it.'}
         </EmptyState>
       ) : (
-        <Table headers={['Cache', 'Level', '#Size', '#Used', '#Read hits', '#Write hits', '#Deferred']}>
-          {(latest.data?.caches ?? []).map((cache) => (
-            <tr key={cache.name}>
-              <td>
-                <strong>{cache.name}</strong>
-              </td>
-              <td>{cache.level ?? '—'}</td>
-              <td className="num">{formatBytes(cache.cacheSizeBytes)}</td>
-              <td className="num">{formatBytes(cache.usedBytes)}</td>
-              <td className="num">
-                {cache.readHitRate !== null && cache.readHitRate !== undefined
-                  ? `${Math.round(cache.readHitRate * 100)}%`
-                  : '—'}
-              </td>
-              <td className="num">
-                {cache.writeHitRate !== null && cache.writeHitRate !== undefined
-                  ? `${Math.round(cache.writeHitRate * 100)}%`
-                  : '—'}
-              </td>
-              <td className="num">{formatBytes(cache.deferredWriteBytes)}</td>
-            </tr>
-          ))}
-        </Table>
+        <>
+          <Table headers={['Cache', 'Level', '#Size', '#Used', '#Reads served', '#Writes absorbed']}>
+            {(data?.caches ?? []).map((cache) => (
+              <tr key={cache.name}>
+                <td>
+                  <strong>{cache.name}</strong>
+                  {cache.volumeStats && cache.volumeStats.length > 0 && (
+                    <div className="hint">
+                      {cache.volumeStats.map((volume) => volume.label ?? `#${volume.volume}`).join(', ')}
+                    </div>
+                  )}
+                </td>
+                <td>{cache.level ?? '—'}</td>
+                <td className="num">{formatBytes(cache.cacheSizeBytes)}</td>
+                <td className="num">{formatBytes(cache.usedBytes)}</td>
+                <td className="num">{percent(cache.readHitRate)}</td>
+                <td className="num">{percent(cache.writeAbsorbedRate)}</td>
+              </tr>
+            ))}
+          </Table>
+
+          {(data?.caches ?? []).some((cache) => (cache.volumeStats ?? []).length > 0) && (
+            <Table
+              headers={['Volume', '#Read', '#Served', '#Written', '#Absorbed', 'Prefetch']}
+            >
+              {(data?.caches ?? []).flatMap((cache) =>
+                (cache.volumeStats ?? []).map((volume) => (
+                  <tr key={`${cache.name}-${volume.volume}`}>
+                    <td>{volume.label ?? `Volume #${volume.volume}`}</td>
+                    <td className="num">{formatBytes(volume.readBytes)}</td>
+                    <td className="num">{percent(volume.readHitRate)}</td>
+                    <td className="num">{formatBytes(volume.writeBytes)}</td>
+                    <td className="num">{percent(volume.writeAbsorbedRate)}</td>
+                    <td>
+                      {volume.prefetchState === 'Done' && volume.prefetchTotalBytes
+                        ? `${formatBytes(volume.prefetchLoadedBytes)} of ${formatBytes(volume.prefetchTotalBytes)}`
+                        : (volume.prefetchState ?? '—')}
+                    </td>
+                  </tr>
+                )),
+              )}
+            </Table>
+          )}
+
+          <p className="hint" style={{ padding: '8px 16px' }}>
+            {'"Reads served" is the share of read bytes the cache answered; "writes absorbed" is the '}
+            {'share of written bytes deferred write kept off the disk. Both are cumulative'}
+            {since ? ` since ${new Date(since).toLocaleString()}` : ' since the cache last started counting'}
+            {data?.unusedLevel1Bytes !== null && data?.unusedLevel1Bytes !== undefined
+              ? `. ${formatBytes(data.unusedLevel1Bytes)} of level-1 and ${formatBytes(data.unusedLevel2Bytes)} of level-2 cache are still unused.`
+              : '.'}
+          </p>
+        </>
       )}
     </Card>
   );

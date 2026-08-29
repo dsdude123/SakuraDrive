@@ -647,24 +647,152 @@ Disk5      ATA     ST8000VN004-3CP1        7452.04GB
     }
 
     Context 'perf' {
-        It 'reads hit rates however the version labels them' {
-            $perf = ConvertFrom-RxpccPerf -Lines @('  Read Hit Rate: 82.5 %', '  Write Hit Rate: 61.0 %')
-            $perf.recognised | Should -BeTrue
-            $perf.readHitRate | Should -Be 0.825
-            $perf.writeHitRate | Should -Be 0.61
+        BeforeAll {
+            # Verbatim `rxpcc perf -a` output from tokyo-3, including the volume that is
+            # taking the write load (#14) and a block truncated mid-line, which is how it
+            # arrives when the console buffer runs out.
+            $script:RxpccPerf = @'
+Volume #8:
+  Total Read            : 657.49MB
+  Cached Read           : 142.91MB (21.7%)
+  L2Storage Read        : 47.74MB (7.3%)
+  L2Storage Write       : 51.17GB
+  Total Write (Req)     : 69.88MB
+  Total Write (L1/L2)   : 39.25MB / 30.63MB
+  Total Write (Disk)    : 54.48MB (78.0%)
+    Urgent/Normal       : 0 / 54.48MB
+  Deferred Blocks       : 15 (0.0%)
+  Trimmed Blocks        : 139
+  Prefetch              : Done (16.96GB / 19.40GB)
+  Unused Cache (L1)     : 121.12GB
+  Unused Cache (L2)     : 74.02GB
+  Stat Start Time       : 2026-08-28 12:41:15
+
+Volume #10:
+  Total Read            : 584.55MB
+  Cached Read           : 15.92MB (2.7%)
+  L2Storage Read        : 0 (0.0%)
+  L2Storage Write       : 0
+  Total Write (Req)     : 6.84MB
+  Total Write (L1/L2)   : 2.11MB / 4.73MB
+  Total Write (Disk)    : 3.62MB (52.9%)
+    Urgent/Normal       : 0 / 3.62MB
+  Deferred Blocks       : 9 (0.0%)
+  Trimmed Blocks        : 0
+  Prefetch              : Done (11.78GB / 27.82GB)
+  Unused Cache (L1)     : 121.12GB
+  Unused Cache (L2)     : 74.02GB
+  Stat Start Time       : 2026-08-28 12:41:16
+
+Volume #14:
+  Total Read            : 593.67MB
+  Cached Read           : 144.0KB (0.0%)
+  L2Storage Read        : 0 (0.0%)
+  L2Storage Write       : 0
+  Total Write (Req)     : 11.27GB
+  Total Write (L1/L2)   : 11.26GB / 6.96MB
+  Total Write (Disk)    : 3.18GB (28.2%)
+    Urgent/Normal       : 0 / 3.18GB
+  Deferred Blocks       : 20604 (0.1%)
+  Trimmed Blocks        : 119532
+  Prefetch              : Inactive
+  Unused Cache (L1)     : 121.12GB
+  Unused Cache (L2)     : 74.02GB
+  Stat Start Time       : 2026-08-28 12:41:16
+
+Volume #22:
+  Total Read            : 542.06MB
+  Cached Read           : 2.31MB (0.4%)
+  Total Write (Req)     : 31.43MB
+  Total Write (Disk)    : 25.46MB (81.0%)
+    Urgent/Normal       :
+'@ -split "`r?`n"
         }
 
-        It 'derives a rate from raw hit and miss counts' {
-            $perf = ConvertFrom-RxpccPerf -Lines @('Read Hits: 750', 'Read Misses: 250')
-            $perf.readHits | Should -Be 750
-            $perf.readMisses | Should -Be 250
-            $perf.readHitRate | Should -Be 0.75
+        It 'reads one block per cached volume, keyed the way `ls` numbers them' {
+            $perf = ConvertFrom-RxpccPerf -Lines $script:RxpccPerf
+            $perf.recognised | Should -BeTrue
+            $perf.volumes.Count | Should -Be 4
+            $perf.volumes[0].volume | Should -Be 8
+            $perf.volumes[1].volume | Should -Be 10
+            $perf.volumes[2].volume | Should -Be 14
+        }
+
+        # The read hit rate is the percentage beside "Cached Read": the share of read
+        # bytes the cache served. There is no line called a hit rate anywhere.
+        It 'takes the read hit rate from the cached read share' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[0]
+            $volume.readHitRate | Should -Be 0.217
+            $volume.readBytes | Should -Be 689428234
+            $volume.cachedReadBytes | Should -Be 149851996
+        }
+
+        It 'reads the level-2 contribution separately from level 1' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[0]
+            $volume.level2ReadRate | Should -Be 0.073
+            $volume.level2WriteBytes | Should -Be 54943369134
+        }
+
+        It 'splits the L1/L2 write pair' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[0]
+            $volume.writeLevel1Bytes | Should -Be 41156608
+            $volume.writeLevel2Bytes | Should -Be 32117883
+        }
+
+        # "Total Write (Disk) 78.0%" is the share that still reached the disk, so it is
+        # the inverse of what the cache absorbed. Reporting it as a hit rate would say
+        # the cache was doing well when it was barely helping.
+        It 'keeps the disk-write share the right way round' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[0]
+            $volume.writeToDiskRate | Should -Be 0.78
+            $volume.writeAbsorbedRate | Should -Be 0.22
+        }
+
+        It 'shows the write-heavy volume absorbing most of its writes' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[2]
+            $volume.writeAbsorbedRate | Should -Be 0.718
+            $volume.deferredBlocks | Should -Be 20604
+            $volume.trimmedBlocks | Should -Be 119532
+        }
+
+        It 'parses prefetch progress, and its absence' {
+            $volumes = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes
+            $volumes[0].prefetchState | Should -Be 'Done'
+            $volumes[0].prefetchLoadedBytes | Should -Be 18210661335
+            $volumes[0].prefetchTotalBytes | Should -Be 20830591386
+            $volumes[2].prefetchState | Should -Be 'Inactive'
+            $volumes[2].prefetchLoadedBytes | Should -BeNullOrEmpty
+        }
+
+        # Every figure is cumulative since this moment, so a rate without it is meaningless.
+        It 'keeps the window the statistics cover' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[0]
+            $volume.statsSince | Should -Match '^2026-08-28T12:41:15'
+        }
+
+        It 'lifts unused cache to the report, since it is the same in every block' {
+            $perf = ConvertFrom-RxpccPerf -Lines $script:RxpccPerf
+            $perf.unusedLevel1Bytes | Should -Be 130051609723
+            $perf.unusedLevel2Bytes | Should -Be 79478369812
+        }
+
+        It 'keeps a block that was cut off mid-line rather than dropping it' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[3]
+            $volume.volume | Should -Be 22
+            $volume.readHitRate | Should -Be 0.004
+            $volume.trimmedBlocks | Should -BeNullOrEmpty
+        }
+
+        It 'reads a zero without turning it into nothing' {
+            $volume = (ConvertFrom-RxpccPerf -Lines $script:RxpccPerf).volumes[1]
+            $volume.level2ReadBytes | Should -Be 0
+            $volume.level2ReadRate | Should -Be 0
         }
 
         It 'reports nothing rather than guessing when the wording is unrecognised' {
             $perf = ConvertFrom-RxpccPerf -Lines @('Some Other Statistic: 42')
             $perf.recognised | Should -BeFalse
-            $perf.readHitRate | Should -BeNullOrEmpty
+            $perf.volumes.Count | Should -Be 0
         }
 
         It 'handles empty input' {
@@ -684,11 +812,41 @@ Disk5      ATA     ST8000VN004-3CP1        7452.04GB
             $report.caches[0].targetVolumes | Should -Contain 'DRIVEPOOL9'
         }
 
-        It 'merges perf statistics in when they were readable' {
+        # perf is per volume, status is per cache task, and only `ls` knows which volume
+        # belongs to which task. Vol #8 is DRIVEPOOL4 and Vol #10 is DRIVEPOOL9, both on
+        # cache task 1, so the task's rate is the two of them summed.
+        It 'joins per-volume statistics onto the cache task that fronts them' {
             $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
-            $perf = ConvertFrom-RxpccPerf -Lines @('Read Hit Rate: 90 %')
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            $perf = ConvertFrom-RxpccPerf -Lines $script:RxpccPerf
+            $report = Join-PrimoCacheReport -Caches $caches -Volumes $volumes -Perf $perf
+
+            $cache = $report.caches[0]
+            $cache.volumeStats.Count | Should -Be 2
+            $cache.volumeStats[0].label | Should -Be 'DRIVEPOOL4'
+            $cache.volumeStats[1].label | Should -Be 'DRIVEPOOL9'
+            # (142.91 + 15.92) / (657.49 + 584.55)
+            $cache.readHitRate | Should -Be 0.1279
+            # (54.48 + 3.62) / (69.88 + 6.84)
+            $cache.writeAbsorbedRate | Should -Be 0.2427
+            $cache.statsSince | Should -Match '^2026-08-28T12:41:15'
+        }
+
+        # Volume #14 is not on this cache task and its 11 GB of writes must not be
+        # counted into it, or the task would look far busier than it is.
+        It 'ignores perf blocks for volumes the task does not front' {
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $volumes = ConvertFrom-RxpccVolumeList -Lines $script:RxpccLs
+            $perf = ConvertFrom-RxpccPerf -Lines $script:RxpccPerf
+            $report = Join-PrimoCacheReport -Caches $caches -Volumes $volumes -Perf $perf
+            @($report.caches[0].volumeStats | ForEach-Object { $_.volume }) | Should -Be @(8, 10)
+        }
+
+        It 'carries unused cache through to the report' {
+            $caches = ConvertFrom-RxpccStatus -Lines $script:RxpccStatus
+            $perf = ConvertFrom-RxpccPerf -Lines $script:RxpccPerf
             $report = Join-PrimoCacheReport -Caches $caches -Volumes @() -Perf $perf
-            $report.caches[0].readHitRate | Should -Be 0.9
+            $report.unusedLevel1Bytes | Should -Be 130051609723
         }
 
         It 'reports unavailable when there are no cache tasks' {

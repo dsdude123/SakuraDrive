@@ -731,11 +731,14 @@ function ConvertFrom-RxpccStatus {
                 cacheSizeBytes     = $null
                 usedBytes          = $null
                 readHitRate        = $null
-                writeHitRate       = $null
-                readHits           = $null
-                readMisses         = $null
-                writeHits          = $null
-                writeMisses        = $null
+                readBytes          = $null
+                cachedReadBytes    = $null
+                writeBytes         = $null
+                writeToDiskBytes   = $null
+                writeToDiskRate    = $null
+                writeAbsorbedRate  = $null
+                statsSince         = $null
+                volumeStats        = @()
                 deferredWriteBytes = $null
                 pendingWriteBlocks = $null
                 freeDeferredBlocks = $null
@@ -884,14 +887,37 @@ function ConvertFrom-RxpccVolumeList {
 function ConvertFrom-RxpccPerf {
     <#
     .SYNOPSIS
-        Parse `rxpcc perf` into hit-rate statistics, keyed by whatever the tool labels.
+        Parse `rxpcc perf -a` into per-volume cache statistics.
     .DESCRIPTION
-        The exact layout of `perf` is not documented publicly and varies by version, so
-        this reads defensively: any `Label: value` pair whose label mentions hits,
-        misses or a rate is captured, and percentages and counts are normalised. A
-        version whose wording is not recognised yields an empty result rather than a
-        wrong one — the caller then reports statistics as unavailable, which is honest,
-        instead of inventing a hit rate.
+        The output is a block per cached volume, keyed by the same volume number
+        `rxpcc ls` uses, and it speaks in bytes moved rather than in hits and misses:
+
+            Volume #8:
+              Total Read            : 657.49MB
+              Cached Read           : 142.91MB (21.7%)
+              L2Storage Read        : 47.74MB (7.3%)
+              L2Storage Write       : 51.17GB
+              Total Write (Req)     : 69.88MB
+              Total Write (L1/L2)   : 39.25MB / 30.63MB
+              Total Write (Disk)    : 54.48MB (78.0%)
+                Urgent/Normal       : 0 / 54.48MB
+              Deferred Blocks       : 15 (0.0%)
+              Trimmed Blocks        : 139
+              Prefetch              : Done (16.96GB / 19.40GB)
+              Unused Cache (L1)     : 121.12GB
+              Unused Cache (L2)     : 74.02GB
+              Stat Start Time       : 2026-08-28 12:41:15
+
+        So the read hit rate is the percentage beside `Cached Read`, and there is no
+        write hit rate at all: `Total Write (Disk)` is the share of requested writes
+        that still reached the disk, which is the *inverse* of what the write cache
+        absorbed. Reporting that percentage as a hit rate would invert its meaning, so
+        it is carried as `writeToDiskRate` with the absorbed share derived from it.
+
+        Every figure is cumulative since `Stat Start Time`, not a rate, which is why
+        that timestamp is kept: without it a hit rate has no window and means nothing.
+
+        Unrecognised wording yields `recognised = $false` rather than a wrong number.
     #>
     [CmdletBinding()]
     param(
@@ -899,70 +925,151 @@ function ConvertFrom-RxpccPerf {
     )
 
     $result = [ordered]@{
-        readHitRate  = $null
-        writeHitRate = $null
-        readHits     = $null
-        readMisses   = $null
-        writeHits    = $null
-        writeMisses  = $null
-        recognised   = $false
+        recognised        = $false
+        volumes           = @()
+        unusedLevel1Bytes = $null
+        unusedLevel2Bytes = $null
     }
     if ($null -eq $Lines) { return $result }
+
+    $volumes = [System.Collections.Generic.List[object]]::new()
+    $current = $null
+
+    # `142.91MB (21.7%)` -> the size and the percentage as a fraction.
+    function Split-SizeAndPercent([string] $Value) {
+        $percent = $null
+        # Round: 2.7 / 100 is 0.027000000000000003 in binary floating point, and that
+        # number ends up in JSON and then on screen.
+        if ($Value -match '\(\s*(?<n>[\d.]+)\s*%\s*\)') { $percent = [math]::Round([double]$Matches['n'] / 100, 5) }
+        $size = ConvertFrom-SizeString (($Value -replace '\(.*?\)', '').Trim())
+        return @{ size = $size; percent = $percent }
+    }
+
+    # `39.25MB / 30.63MB` -> both sides.
+    function Split-SizePair([string] $Value) {
+        $parts = ($Value -replace '\(.*?\)', '') -split '/'
+        if ($parts.Count -lt 2) { return @{ first = (ConvertFrom-SizeString $Value); second = $null } }
+        return @{
+            first  = ConvertFrom-SizeString $parts[0].Trim()
+            second = ConvertFrom-SizeString $parts[1].Trim()
+        }
+    }
 
     foreach ($rawLine in $Lines) {
         if ($null -eq $rawLine) { continue }
         $line = $rawLine.Trim()
         if (-not $line) { continue }
-        if ($line -notmatch '^(?<key>[^:]+?)\s*:\s*(?<value>.+)$') { continue }
 
+        if ($line -match '^Volume\s*#\s*(?<n>\d+)\s*:?\s*$') {
+            if ($null -ne $current) { $volumes.Add($current) }
+            $current = [ordered]@{
+                volume              = [int]$Matches['n']
+                readBytes           = $null
+                cachedReadBytes     = $null
+                readHitRate         = $null
+                level2ReadBytes     = $null
+                level2ReadRate      = $null
+                level2WriteBytes    = $null
+                writeBytes          = $null
+                writeLevel1Bytes    = $null
+                writeLevel2Bytes    = $null
+                writeToDiskBytes    = $null
+                writeToDiskRate     = $null
+                writeAbsorbedRate   = $null
+                deferredBlocks      = $null
+                trimmedBlocks       = $null
+                prefetchState       = $null
+                prefetchLoadedBytes = $null
+                prefetchTotalBytes  = $null
+                statsSince          = $null
+            }
+            $result.recognised = $true
+            continue
+        }
+
+        if ($line -notmatch '^(?<key>[^:]+?)\s*:\s*(?<value>.*)$') { continue }
         $key = $Matches['key'].Trim().ToLowerInvariant()
         $value = $Matches['value'].Trim()
 
-        $percent = $null
-        if ($value -match '(?<n>[\d.]+)\s*%') { $percent = [double]$Matches['n'] / 100 }
-        $count = $null
-        if ($value -match '^(?<n>[\d,]+)\s*$') { $count = [double]($Matches['n'] -replace ',', '') }
+        # Unused cache is reported identically in every block: it is a property of the
+        # cache as a whole, so it belongs to the report rather than to one volume.
+        if ($key -eq 'unused cache (l1)') { $result.unusedLevel1Bytes = ConvertFrom-SizeString $value; continue }
+        if ($key -eq 'unused cache (l2)') { $result.unusedLevel2Bytes = ConvertFrom-SizeString $value; continue }
 
-        if ($key -match 'read' -and $key -match 'hit' -and $key -match 'rate|ratio') {
-            $result.readHitRate = $percent; $result.recognised = $true; continue
-        }
-        if ($key -match 'write' -and $key -match 'hit' -and $key -match 'rate|ratio') {
-            $result.writeHitRate = $percent; $result.recognised = $true; continue
-        }
-        if ($key -match 'read' -and $key -match 'hit') {
-            $result.readHits = $count; $result.recognised = $true; continue
-        }
-        if ($key -match 'read' -and $key -match 'miss') {
-            $result.readMisses = $count; $result.recognised = $true; continue
-        }
-        if ($key -match 'write' -and $key -match 'hit') {
-            $result.writeHits = $count; $result.recognised = $true; continue
-        }
-        if ($key -match 'write' -and $key -match 'miss') {
-            $result.writeMisses = $count; $result.recognised = $true; continue
+        if ($null -eq $current) { continue }
+
+        switch ($key) {
+            'total read' { $current.readBytes = ConvertFrom-SizeString $value }
+            'cached read' {
+                $parsed = Split-SizeAndPercent $value
+                $current.cachedReadBytes = $parsed.size
+                $current.readHitRate = $parsed.percent
+            }
+            'l2storage read' {
+                $parsed = Split-SizeAndPercent $value
+                $current.level2ReadBytes = $parsed.size
+                $current.level2ReadRate = $parsed.percent
+            }
+            'l2storage write' { $current.level2WriteBytes = ConvertFrom-SizeString $value }
+            'total write (req)' { $current.writeBytes = ConvertFrom-SizeString $value }
+            'total write (l1/l2)' {
+                $pair = Split-SizePair $value
+                $current.writeLevel1Bytes = $pair.first
+                $current.writeLevel2Bytes = $pair.second
+            }
+            'total write (disk)' {
+                $parsed = Split-SizeAndPercent $value
+                $current.writeToDiskBytes = $parsed.size
+                $current.writeToDiskRate = $parsed.percent
+                if ($null -ne $parsed.percent) {
+                    # What the write cache kept off the disk. The number worth showing:
+                    # it is the reason deferred write exists.
+                    $current.writeAbsorbedRate = [math]::Round(1 - $parsed.percent, 4)
+                }
+            }
+            'deferred blocks' {
+                if ($value -match '^(?<n>[\d,]+)') { $current.deferredBlocks = [long](($Matches['n']) -replace ',', '') }
+            }
+            'trimmed blocks' {
+                if ($value -match '^(?<n>[\d,]+)') { $current.trimmedBlocks = [long](($Matches['n']) -replace ',', '') }
+            }
+            'prefetch' {
+                # "Done (16.96GB / 19.40GB)", or just "Inactive".
+                if ($value -match '^(?<state>[^(]+)') { $current.prefetchState = $Matches['state'].Trim() }
+                if ($value -match '\((?<inner>[^)]*)\)') {
+                    $pair = Split-SizePair $Matches['inner']
+                    $current.prefetchLoadedBytes = $pair.first
+                    $current.prefetchTotalBytes = $pair.second
+                }
+            }
+            'stat start time' {
+                $parsedTime = [datetime]::MinValue
+                if ([datetime]::TryParse($value, [ref]$parsedTime)) {
+                    $current.statsSince = $parsedTime.ToString('o')
+                }
+            }
+            default { }
         }
     }
 
-    # Derive a rate when only raw counts were reported.
-    if ($null -eq $result.readHitRate -and $null -ne $result.readHits -and $null -ne $result.readMisses) {
-        $total = $result.readHits + $result.readMisses
-        if ($total -gt 0) { $result.readHitRate = $result.readHits / $total }
-    }
-    if ($null -eq $result.writeHitRate -and $null -ne $result.writeHits -and $null -ne $result.writeMisses) {
-        $total = $result.writeHits + $result.writeMisses
-        if ($total -gt 0) { $result.writeHitRate = $result.writeHits / $total }
-    }
-
+    if ($null -ne $current) { $volumes.Add($current) }
+    $result.volumes = @($volumes)
     $result
 }
 
 function Join-PrimoCacheReport {
     <#
     .SYNOPSIS
-        Combine `status`, `ls` and `perf` output into the report section the server takes.
+        Combine `status`, `ls` and `perf -a` output into the report section the server takes.
     .DESCRIPTION
         Names each cache task after the labelled volumes it fronts, so the interface can
         say "L1+L2 in front of DRIVEPOOL4, DRIVEPOOL9" rather than "Cache Task #1".
+
+        `perf` reports per volume while `status` reports per cache task, and only `ls`
+        knows which volume belongs to which task — so the three have to be joined here.
+        Rates are recomputed from the summed byte counts rather than averaged from the
+        per-volume percentages: a volume that served 8 bytes must not weigh as much as
+        one that served 8 GB.
     #>
     [CmdletBinding()]
     param(
@@ -972,33 +1079,71 @@ function Join-PrimoCacheReport {
         [string] $Version = ''
     )
 
+    $perfVolumes = @()
+    if ($null -ne $Perf -and $Perf.recognised) { $perfVolumes = @($Perf.volumes) }
+
     foreach ($cache in $Caches) {
         $index = 0
         if ($cache.name -match '#(?<n>\d+)') { $index = [int]$Matches['n'] }
 
+        $members = @($Volumes | Where-Object { $null -ne $_.cacheTask -and $_.cacheTask -eq $index })
         $labels = @(
-            $Volumes |
-                Where-Object { $null -ne $_.cacheTask -and $_.cacheTask -eq $index -and $_.label } |
+            $members |
+                Where-Object { $_.label } |
                 ForEach-Object { if ($_.driveLetter) { "$($_.label) ($($_.driveLetter):)" } else { $_.label } }
         )
         if ($labels.Count -gt 0) { $cache.targetVolumes = $labels }
 
-        if ($null -ne $Perf -and $Perf.recognised) {
-            $cache.readHitRate = $Perf.readHitRate
-            $cache.writeHitRate = $Perf.writeHitRate
-            $cache.readHits = $Perf.readHits
-            $cache.readMisses = $Perf.readMisses
-            $cache.writeHits = $Perf.writeHits
-            $cache.writeMisses = $Perf.writeMisses
+        # The perf blocks belonging to this task, named by the label from `ls`.
+        $memberIndexes = @($members | ForEach-Object { $_.index })
+        $stats = @(
+            foreach ($volume in $perfVolumes) {
+                if ($memberIndexes -notcontains $volume.volume) { continue }
+                $named = [ordered]@{}
+                foreach ($key in $volume.Keys) { $named[$key] = $volume[$key] }
+                $match = $members | Where-Object { $_.index -eq $volume.volume } | Select-Object -First 1
+                $named['label'] = if ($match -and $match.label) { $match.label } else { "Volume #$($volume.volume)" }
+                $named
+            }
+        )
+        $cache.volumeStats = $stats
+        if ($stats.Count -eq 0) { continue }
+
+        # Sum the bytes, then divide. Averaging the percentages would let an idle
+        # volume's 0.0% drag down a busy one's 90%.
+        $sum = { param($Key) ($stats | ForEach-Object {
+                    if ($null -eq $_[$Key]) { [double]0 } else { [double]$_[$Key] }
+                } | Measure-Object -Sum).Sum }
+        $readBytes = & $sum 'readBytes'
+        $cachedBytes = & $sum 'cachedReadBytes'
+        $writeBytes = & $sum 'writeBytes'
+        $diskBytes = & $sum 'writeToDiskBytes'
+
+        $cache.readBytes = [long]$readBytes
+        $cache.cachedReadBytes = [long]$cachedBytes
+        $cache.writeBytes = [long]$writeBytes
+        $cache.writeToDiskBytes = [long]$diskBytes
+        if ($readBytes -gt 0) { $cache.readHitRate = [math]::Round($cachedBytes / $readBytes, 4) }
+        if ($writeBytes -gt 0) {
+            $cache.writeToDiskRate = [math]::Round($diskBytes / $writeBytes, 4)
+            $cache.writeAbsorbedRate = [math]::Round(1 - ($diskBytes / $writeBytes), 4)
         }
+
+        $since = @($stats | ForEach-Object { $_.statsSince } | Where-Object { $_ }) | Sort-Object | Select-Object -First 1
+        if ($since) { $cache.statsSince = $since }
     }
 
-    [ordered]@{
+    $report = [ordered]@{
         available = ($Caches.Count -gt 0)
         version   = $Version
         reason    = if ($Caches.Count -gt 0) { $null } else { 'rxpcc reported no cache tasks.' }
         caches    = @($Caches)
     }
+    if ($null -ne $Perf -and $Perf.recognised) {
+        $report.unusedLevel1Bytes = $Perf.unusedLevel1Bytes
+        $report.unusedLevel2Bytes = $Perf.unusedLevel2Bytes
+    }
+    $report
 }
 
 #endregion
