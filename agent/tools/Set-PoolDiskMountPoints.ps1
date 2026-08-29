@@ -479,7 +479,13 @@ function Remove-VolumeMountPoint {
 
 function Invoke-Main {
     [CmdletBinding(SupportsShouldProcess)]
-    param()
+    param(
+        [string]   $MountRoot = 'C:\PoolDisks',
+        [string[]] $Label,
+        [switch]   $All,
+        [switch]   $ListOnly,
+        [switch]   $Remove
+    )
 
     if (-not $ListOnly) { Assert-Administrator }
 
@@ -525,7 +531,9 @@ function Invoke-Main {
         $verb = if ($Remove) { 'unmount' } else { 'mount' }
         $suggestion = ($invisible | ForEach-Object { $_.Index }) -join ','
         Write-Host ''
-        Write-Host "Which volumes should I $verb? Numbers, ranges (4-9), 'all', or blank to cancel."
+        # ${verb} braced on purpose: PowerShell allows '?' in a variable name, so "$verb?"
+        # looks up a variable called "verb?" and fails under StrictMode.
+        Write-Host "Which volumes should I ${verb}? Numbers, ranges (4-9), 'all', or blank to cancel."
         if (-not $Remove -and $suggestion) { Write-Host "The ones WSL cannot see are: $suggestion" -ForegroundColor Cyan }
         $answer = Read-Host 'Selection'
         $indices = @(Expand-Selection -Selection $answer -Count $candidates.Count)
@@ -611,5 +619,5 @@ function Invoke-Main {
 
 # Dot-sourcing (the tests do this) leaves the functions defined and runs nothing.
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-Main
+    Invoke-Main -MountRoot $MountRoot -Label $Label -All:$All -ListOnly:$ListOnly -Remove:$Remove
 }

@@ -330,8 +330,8 @@ Describe 'Enumerating the host' {
     # being tested is the join between them: a letterless volume can only be matched to
     # its partition through the volume GUID path, which is the whole difficulty.
     BeforeAll {
-        function Get-Volume { }
-        function Get-Partition { }
+        function Get-Volume { param($FileSystemLabel) }
+        function Get-Partition { param($DiskNumber, $PartitionNumber, $Volume) }
 
         Mock Get-Volume {
             @(
@@ -449,5 +449,154 @@ Describe 'Every PowerShell file is safe for Windows PowerShell 5.1' {
             ($errors | ForEach-Object { "$($file.Name):$($_.Extent.StartLineNumber) $($_.Message)" }) -join "`n" |
                 Should -BeNullOrEmpty
         }
+    }
+}
+
+<#
+    Running the thing, not just its parts.
+
+    The pure functions were well covered and the script still failed on the host, at
+    "Which volumes should I $verb?" -- PowerShell allows '?' in a variable name, so it
+    looked up a variable called "verb?" and threw under StrictMode. It parses cleanly;
+    only executing that branch finds it. These tests execute every branch.
+#>
+Describe 'Running the picker end to end' {
+    BeforeAll {
+        # Stubs for the Windows-only Storage cmdlets. They need the real parameters:
+        # without them nothing binds, so -ParameterFilter { $DiskNumber ... } can never
+        # match and the mock that reads the access paths back never fires.
+        function Get-Volume { param($FileSystemLabel) }
+        function Get-Partition { param($DiskNumber, $PartitionNumber, $Volume) }
+        function Add-PartitionAccessPath { param($DiskNumber, $PartitionNumber, $AccessPath) }
+        function Remove-PartitionAccessPath { param($DiskNumber, $PartitionNumber, $AccessPath) }
+
+        # tokyo-3's real layout, trimmed: two pool disks, a recovery partition, the
+        # system volume, and one volume that already has a letter.
+        function Set-Layout {
+            Mock Get-Volume {
+                @(
+                    [pscustomobject]@{ FileSystemLabel = 'DRIVEPOOL4'; DriveLetter = $null; FileSystem = 'NTFS'
+                        Size = 8001563222016; SizeRemaining = 1; Path = '\\?\Volume{a}\'; DriveType = 'Fixed' },
+                    [pscustomobject]@{ FileSystemLabel = 'DRIVEPOOL9'; DriveLetter = $null; FileSystem = 'NTFS'
+                        Size = 8001563222016; SizeRemaining = 1; Path = '\\?\Volume{b}\'; DriveType = 'Fixed' },
+                    [pscustomobject]@{ FileSystemLabel = 'Recovery'; DriveLetter = $null; FileSystem = 'NTFS'
+                        Size = 471859200; SizeRemaining = 1; Path = '\\?\Volume{c}\'; DriveType = 'Fixed' },
+                    [pscustomobject]@{ FileSystemLabel = 'SSDPool'; DriveLetter = 'M'; FileSystem = 'NTFS'
+                        Size = 2967184834560; SizeRemaining = 1; Path = '\\?\Volume{d}\'; DriveType = 'Fixed' }
+                )
+            }
+            Mock Get-Partition {
+                $recovery = [pscustomobject]@{ DiskNumber = 0; PartitionNumber = 4
+                    AccessPaths = @('\\?\Volume{c}\'); IsSystem = $false; IsBoot = $false }
+                $recovery | Add-Member -NotePropertyName GptType -NotePropertyValue '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}'
+                @(
+                    [pscustomobject]@{ DiskNumber = 4; PartitionNumber = 2
+                        AccessPaths = @('\\?\Volume{a}\'); IsSystem = $false; IsBoot = $false },
+                    [pscustomobject]@{ DiskNumber = 9; PartitionNumber = 2
+                        AccessPaths = @('\\?\Volume{b}\'); IsSystem = $false; IsBoot = $false },
+                    $recovery,
+                    [pscustomobject]@{ DiskNumber = 1; PartitionNumber = 1
+                        AccessPaths = @('M:\', '\\?\Volume{d}\'); IsSystem = $false; IsBoot = $false }
+                )
+            }
+            Mock Assert-Administrator { }
+            Mock Add-PartitionAccessPath { }
+            Mock New-Item { }
+            Mock Test-Path { $false }
+            # Verification after mounting reads the access paths back.
+            Mock Get-Partition -ParameterFilter { $null -ne $DiskNumber } {
+                [pscustomobject]@{ DiskNumber = $DiskNumber; PartitionNumber = $PartitionNumber
+                    AccessPaths = @("C:\PoolDisks\DRIVEPOOL$DiskNumber") }
+            }
+        }
+    }
+
+    BeforeEach { Set-Layout }
+
+    It 'lists without asking anything and changes nothing' {
+        Mock Read-Host { throw 'must not prompt in -ListOnly' }
+        { Invoke-Main -ListOnly } | Should -Not -Throw
+        Should -Invoke Add-PartitionAccessPath -Times 0
+    }
+
+    # The regression: this branch interpolates the verb into the prompt.
+    It 'prompts, and mounts exactly what was selected' {
+        Mock Read-Host { '1' }
+        { Invoke-Main } | Should -Not -Throw
+        Should -Invoke Add-PartitionAccessPath -Times 1
+        Should -Invoke Add-PartitionAccessPath -Times 1 -ParameterFilter {
+            $AccessPath -eq 'C:\PoolDisks\DRIVEPOOL4'
+        }
+    }
+
+    It 'prompts with the unmount wording too, which is the other half of that branch' {
+        Mock Read-Host { '' }
+        { Invoke-Main -Remove } | Should -Not -Throw
+    }
+
+    It 'takes a range' {
+        Mock Read-Host { '1-2' }
+        Invoke-Main
+        Should -Invoke Add-PartitionAccessPath -Times 2
+    }
+
+    It 'treats a blank answer as cancel' {
+        Mock Read-Host { '' }
+        Invoke-Main
+        Should -Invoke Add-PartitionAccessPath -Times 0
+    }
+
+    It 'mounts every candidate with -All, and no recovery partition among them' {
+        Mock Read-Host { throw 'must not prompt with -All' }
+        Invoke-Main -All
+        Should -Invoke Add-PartitionAccessPath -Times 2
+        Should -Invoke Add-PartitionAccessPath -Times 0 -ParameterFilter { $DiskNumber -eq 0 }
+    }
+
+    It 'mounts by label without prompting' {
+        Mock Read-Host { throw 'must not prompt with -Label' }
+        Invoke-Main -Label 'DRIVEPOOL9'
+        Should -Invoke Add-PartitionAccessPath -Times 1 -ParameterFilter { $DiskNumber -eq 9 }
+    }
+
+    It 'stops on a label that is not there rather than mounting something else' {
+        { Invoke-Main -Label 'NOPE' } | Should -Throw '*No volume labelled*'
+        Should -Invoke Add-PartitionAccessPath -Times 0
+    }
+
+    It 'writes nothing under -WhatIf' {
+        Mock Read-Host { 'all' }
+        Invoke-Main -WhatIf
+        Should -Invoke Add-PartitionAccessPath -Times 0
+        Should -Invoke New-Item -Times 0
+    }
+
+    It 'honours a different mount root' {
+        Mock Read-Host { '1' }
+        Invoke-Main -MountRoot 'D:\Disks'
+        Should -Invoke Add-PartitionAccessPath -Times 1 -ParameterFilter {
+            $AccessPath -eq 'D:\Disks\DRIVEPOOL4'
+        }
+    }
+
+    # One disk failing must not abandon the other thirteen.
+    It 'carries on after one volume fails' {
+        Mock Read-Host { '1-2' }
+        Mock Add-PartitionAccessPath -ParameterFilter { $DiskNumber -eq 4 } { throw 'device is busy' }
+        { Invoke-Main } | Should -Not -Throw
+        Should -Invoke Add-PartitionAccessPath -Times 1 -ParameterFilter { $DiskNumber -eq 9 }
+    }
+
+    It 'refuses a target directory that is not empty' {
+        Mock Read-Host { '1' }
+        Mock Test-Path { $true }
+        Mock Get-ChildItem { @([pscustomobject]@{ Name = 'something.txt' }) }
+        { Invoke-Main } | Should -Not -Throw
+        Should -Invoke Add-PartitionAccessPath -Times 0
+    }
+
+    It 'says so and stops when there are no volumes at all' {
+        Mock Get-Volume { @() }
+        { Invoke-Main -ListOnly } | Should -Not -Throw
     }
 }
