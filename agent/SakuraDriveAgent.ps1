@@ -136,7 +136,7 @@ function Get-VolumeInventory {
                     operationalStatus = [string]$volume.OperationalStatus
                     dirty             = Get-VolumeDirtyBit -DriveLetter $volume.DriveLetter
                     physicalDiskIds   = @($diskIds | Select-Object -Unique)
-                    # A disk mounted into a folder rather than given a letter — the
+                    # A disk mounted into a folder rather than given a letter - the
                     # usual arrangement once an array outgrows 26 letters.
                     mountPoints       = @(Get-VolumeMountPoints -Volume $volume)
                 })
@@ -256,14 +256,24 @@ function Get-SmartInventory {
         $covered[(Get-DeviceKey -SerialNumber $report.serialNumber -DeviceId $report.deviceId)] = $true
     }
 
+    # Fetched once and matched by DeviceId rather than passing -DeviceNumber: that
+    # parameter is missing from the Storage module on Windows Server 2019 with Windows
+    # PowerShell 5.1, which is what this actually runs on.
+    $allPhysical = @()
+    try { $allPhysical = @(Get-PhysicalDisk -ErrorAction Stop) }
+    catch {
+        $Errors.Add((New-CollectorError -Collector 'storage-reliability' -Message 'Get-PhysicalDisk failed, so reliability counters are unavailable' -Detail $_.Exception.Message))
+    }
+
     foreach ($disk in $PhysicalDisks) {
         $key = Get-DeviceKey -SerialNumber $disk.serialNumber -DeviceId $disk.deviceId
         if ($covered.ContainsKey($key)) { continue }
         try {
             $number = if ($disk.deviceId -match '(\d+)$') { [int]$Matches[1] } else { $null }
             if ($null -eq $number) { continue }
-            $counter = Get-PhysicalDisk -DeviceNumber $number -ErrorAction Stop |
-                Get-StorageReliabilityCounter -ErrorAction Stop
+            $physical = $allPhysical | Where-Object { [string]$_.DeviceId -eq [string]$number } | Select-Object -First 1
+            if (-not $physical) { continue }
+            $counter = $physical | Get-StorageReliabilityCounter -ErrorAction Stop
             $fallback = ConvertFrom-StorageReliabilityCounter -Counter $counter -DeviceId $disk.deviceId `
                 -SerialNumber $disk.serialNumber -Model $disk.model
             if ($fallback) { $reports.Add($fallback) }
@@ -298,7 +308,7 @@ function Get-PoolInventory {
         Discover DrivePool pools, their parts and their duplication settings.
     .DESCRIPTION
         Pool drives are found by their filesystem type (Covefs). `dpcmd list-poolparts`
-        then gives the real pool GUID and the parts belonging to it — but identifies
+        then gives the real pool GUID and the parts belonging to it - but identifies
         those parts only by NT device path, so each is matched back to a drive letter by
         finding which volume holds its PoolPart folder.
 
@@ -433,7 +443,7 @@ function Get-DuplicationRules {
     .DESCRIPTION
         `dpcmd get-duplication` reports `Has multiple sub-duplication counts`. When that
         is False, every file below the folder shares one level and there is nothing to
-        learn by descending — so the walk stops there. On a pool whose duplication is
+        learn by descending - so the walk stops there. On a pool whose duplication is
         set per tier, that turns a full tree walk into a handful of calls.
     #>
     param(
@@ -559,7 +569,7 @@ function Get-PrimoCacheInventory {
     .SYNOPSIS
         PrimoCache statistics via its command line tool, rxpcc.
     .DESCRIPTION
-        rxpcc refuses to run while the PrimoCache GUI is open — it exits with a
+        rxpcc refuses to run while the PrimoCache GUI is open - it exits with a
         "Multiple Instances" error. That is a normal, recoverable condition, not a
         fault, so it is reported as such rather than as a broken collector: the
         interface says the GUI is open instead of showing an empty panel.
@@ -680,8 +690,24 @@ function Send-AgentReport {
         Headers     = @{ Authorization = "Bearer $($Config.Token)" }
         TimeoutSec  = [int]$Config.TimeoutSeconds
     }
-    if ($Config.SkipCertificateCheck) { $parameters['SkipCertificateCheck'] = $true }
-    Invoke-RestMethod @parameters
+    if (-not $Config.SkipCertificateCheck) { return Invoke-RestMethod @parameters }
+
+    # -SkipCertificateCheck does not exist in Windows PowerShell 5.1, which is what ships
+    # with Windows Server. There the only way is the global validation callback, so it is
+    # set for this one call and put back afterwards rather than left off for the process.
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        $parameters['SkipCertificateCheck'] = $true
+        return Invoke-RestMethod @parameters
+    }
+
+    $previous = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+    try {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        return Invoke-RestMethod @parameters
+    }
+    finally {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previous
+    }
 }
 
 # ---------------------------------------------------------------------------

@@ -293,8 +293,8 @@ function ConvertFrom-StorageReliabilityCounter {
         Fallback SMART-ish data from Windows itself.
     .DESCRIPTION
         `Get-StorageReliabilityCounter` exposes a handful of counters without needing
-        smartmontools installed. It is far less informative than smartctl — no
-        per-attribute table — but it is better than reporting nothing, and it still
+        smartmontools installed. It is far less informative than smartctl - no
+        per-attribute table - but it is better than reporting nothing, and it still
         catches wear, temperature and read/write error counts.
     #>
     [CmdletBinding()]
@@ -459,7 +459,7 @@ function ConvertFrom-DpcmdDuplicationDetail {
 
         `Has multiple sub-duplication counts` is False when everything below this folder
         shares one duplication level, which means there is nothing to learn by
-        descending — the probe can prune the whole subtree instead of walking it.
+        descending - the probe can prune the whole subtree instead of walking it.
 
         `Found number of copies` is only a real copy count for a *file*. For a directory
         it counts how many pool parts have that folder, which on a 14-disk pool reads as
@@ -532,7 +532,7 @@ function Resolve-PoolPartVolume {
         NT device path.
     .DESCRIPTION
         `dpcmd list-poolparts` identifies a part as
-        `\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.<guid>` — no letter, no label.
+        `\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.<guid>` - no letter, no label.
         Rather than translating NT device names (which needs QueryDosDevice and still
         misses volumes with no letter), each part is matched by looking for its
         PoolPart folder at the root of every known volume. The folder name contains a
@@ -542,7 +542,7 @@ function Resolve-PoolPartVolume {
         in production it is `Test-Path`.
     .OUTPUTS
         The parts, with volume details filled in and `missing` set where no volume on
-        this host holds the folder — which is precisely a pool disk that has dropped out.
+        this host holds the folder - which is precisely a pool disk that has dropped out.
     #>
     [CmdletBinding()]
     param(
@@ -558,7 +558,7 @@ function Resolve-PoolPartVolume {
             if ($volume.fileSystem -match 'covefs') { continue }
 
             # On an array with more disks than there are drive letters, pool members
-            # are normally mounted without one — so try the volume's own GUID path and
+            # are normally mounted without one - so try the volume's own GUID path and
             # any folder mount point as well, not just `X:\`.
             $roots = New-Object System.Collections.Generic.List[string]
             if ($volume.driveLetter) { $roots.Add("$($volume.driveLetter):\") }
@@ -710,7 +710,7 @@ function ConvertFrom-RxpccStatus {
     if ($null -eq $Lines) { return , $caches.ToArray() }
 
     $current = $null
-    $section = ''   # 'l1' or 'l2' — which cache level the indented keys belong to
+    $section = ''   # 'l1' or 'l2' - which cache level the indented keys belong to
 
     $flush = {
         if ($null -ne $current) { $caches.Add($current) }
@@ -872,7 +872,7 @@ function ConvertFrom-RxpccVolumeList {
                 if ($Matches['task']) { $entry.cacheTask = [int]$Matches['task'] }
             }
             else {
-                # `Local Volume  16MB` — a recovery partition with no filesystem shown.
+                # `Local Volume  16MB` - a recovery partition with no filesystem shown.
                 $entry.label = ($rest -replace '\s{2,}.*$', '').Trim()
             }
 
@@ -1066,7 +1066,7 @@ function Join-PrimoCacheReport {
         say "L1+L2 in front of DRIVEPOOL4, DRIVEPOOL9" rather than "Cache Task #1".
 
         `perf` reports per volume while `status` reports per cache task, and only `ls`
-        knows which volume belongs to which task — so the three have to be joined here.
+        knows which volume belongs to which task - so the three have to be joined here.
         Rates are recomputed from the summed byte counts rather than averaged from the
         per-volume percentages: a volume that served 8 bytes must not weigh as much as
         one that served 8 GB.
@@ -1193,7 +1193,7 @@ function ConvertTo-DeviceIdFromInstance {
     .SYNOPSIS
         Extract the physical drive number from a counter instance name.
     .DESCRIPTION
-        Instances look like "3 E: F:" — the leading number is the PhysicalDrive index.
+        Instances look like "3 E: F:" - the leading number is the PhysicalDrive index.
     #>
     [CmdletBinding()]
     param(

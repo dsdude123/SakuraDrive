@@ -44,6 +44,42 @@ jobs:
           $result = Invoke-Pester -Path ./agent/tests -Output Detailed -PassThru
           if ($result.FailedCount -gt 0) { exit 1 }
 
+      - name: Check compatibility with Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          # The host is Windows Server, which ships Windows PowerShell 5.1 and nothing
+          # else. PSScriptAnalyzer checks the syntax and the cmdlet surface against a
+          # real 5.1 profile, which is the only way to catch this without a Windows box.
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          $settings = @{
+            Rules = @{
+              PSUseCompatibleSyntax = @{ Enable = $true; TargetVersions = @('5.1', '7.0') }
+              PSUseCompatibleCommands = @{
+                Enable = $true
+                TargetProfiles = @('win-8_x64_10.0.17763.0_5.1.17763.316_x64_4.0.30319.42000_framework')
+              }
+            }
+          }
+          # The files the Windows host actually runs. The Pester tests run under Pester 5
+          # here and on a developer machine, never on the server.
+          $runtime = @(
+            './agent/SakuraDriveAgent.ps1'
+            './agent/SakuraDrive.Agent.psm1'
+            './agent/Install-SakuraDriveAgent.ps1'
+            './agent/tools/Set-PoolDiskMountPoints.ps1'
+            './agent/tools/New-ContractFixture.ps1'
+          )
+          $found = @()
+          foreach ($path in $runtime) {
+            $found += Invoke-ScriptAnalyzer -Path $path -Settings $settings |
+              Where-Object { $_.RuleName -like 'PSUseCompatible*' }
+          }
+          if ($found) {
+            $found | Format-Table ScriptName, Line, RuleName, Message -AutoSize -Wrap
+            exit 1
+          }
+          Write-Host 'No Windows PowerShell 5.1 compatibility problems.'
+
       - name: Check the contract fixture is up to date
         shell: pwsh
         run: |

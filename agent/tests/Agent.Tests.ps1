@@ -293,7 +293,7 @@ Version 2.3.13.1687
 
 Describe 'Array-returning functions' {
     # These functions return with the `, $array` idiom so an empty result is still an
-    # array. That does not compose with an @() wrapper at the call site — @(f) then
+    # array. That does not compose with an @() wrapper at the call site - @(f) then
     # nests the array one level deeper and every element access silently returns an
     # array instead of a record. Assert the contract so a future caller cannot
     # reintroduce it unnoticed.

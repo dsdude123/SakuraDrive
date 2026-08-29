@@ -109,7 +109,7 @@ $partVolumes = @(
         sizeBytes = 8000000000000; freeBytes = 292000000000; path = '\\?\Volume{bbbb}\'
         mountPoints = @('C:\PoolDisks\DRIVEPOOL9\'); physicalDiskIds = @('\\.\PHYSICALDRIVE4') }
 )
-# Mounted into folders, not lettered — as on an array with more disks than letters.
+# Mounted into folders, not lettered - as on an array with more disks than letters.
 $partLetters = @{ 'PoolPart.a546b1c2-8af0-47a5-b2ee-d5eeadb98481' = 'C:\PoolDisks\DRIVEPOOL4'
     'PoolPart.e83fad5b-1e0d-4101-b337-b308443ca478' = 'C:\PoolDisks\DRIVEPOOL9' }
 $parts = Resolve-PoolPartVolume -Parts $parts -Volumes $partVolumes -TestPath {

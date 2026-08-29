@@ -108,7 +108,7 @@ Describe 'Windows paths as WSL sees them' {
         ConvertTo-WslPath -Path 'C:\PoolDisks\DRIVEPOOL4\' | Should -Be '/mnt/c/PoolDisks/DRIVEPOOL4'
     }
 
-    # The volume GUID path is exactly what WSL cannot reach — the reason for this script.
+    # The volume GUID path is exactly what WSL cannot reach - the reason for this script.
     It 'returns nothing for a volume GUID path' {
         ConvertTo-WslPath -Path '\\?\Volume{9f3a-1}\' | Should -BeNullOrEmpty
     }
@@ -324,5 +324,69 @@ Describe 'Enumerating the host' {
 
     It 'numbers the rows so the picker can refer to them' {
         @(Get-MountCandidate).Index | Should -Be @(1, 2)
+    }
+}
+
+# This suite lives here rather than in Agent.Tests.ps1 because it is about the files
+# themselves, not about any one function in them.
+Describe 'Every PowerShell file is safe for Windows PowerShell 5.1' {
+    BeforeAll {
+        $script:AgentRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+        $script:PowerShellFiles = @(
+            Get-ChildItem -Path $script:AgentRoot -Recurse -Include '*.ps1', '*.psm1' -File |
+                Sort-Object FullName
+        )
+    }
+
+    It 'finds the agent, the installer, the tools and the tests' {
+        $script:PowerShellFiles.Count | Should -BeGreaterOrEqual 5
+    }
+
+    <#
+        Windows PowerShell 5.1 -- which is what ships with Windows Server, and what the
+        host runs -- reads a .ps1 as the ANSI codepage unless it has a UTF-8 BOM. On a
+        Western install that is Windows-1252, so a UTF-8 em dash (E2 80 94) arrives as
+        "a", "EUR", and 0x94 -- which is U+201D, a smart closing quote. PowerShell accepts
+        smart quotes as string delimiters, so the string ends early and the rest of the
+        file fails to parse. It cost the whole agent: every file had at least one.
+
+        Keeping the files pure ASCII fixes it regardless of codepage or BOM, and keeps
+        the console output legible too. This test is the guard.
+    #>
+    It 'contains no character that changes meaning under a different codepage' {
+        foreach ($file in $script:PowerShellFiles) {
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $offending = @()
+            for ($i = 0; $i -lt $bytes.Length; $i++) {
+                if ($bytes[$i] -gt 127) {
+                    $line = ([System.Text.Encoding]::UTF8.GetString($bytes, 0, $i) -split "`n").Count
+                    $offending += "byte 0x{0:X2} at line {1}" -f $bytes[$i], $line
+                    if ($offending.Count -ge 3) { break }
+                }
+            }
+            $offending -join '; ' | Should -BeNullOrEmpty -Because "$($file.Name) must be pure ASCII"
+        }
+    }
+
+    # The same file read as Windows-1252 has to be the same script. For ASCII bytes it
+    # trivially is, which is the point: this asserts the property that makes it so.
+    It 'parses identically whether read as UTF-8 or as the ANSI codepage' {
+        foreach ($file in $script:PowerShellFiles) {
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $utf8 = [System.Text.Encoding]::UTF8.GetString($bytes)
+            $ansi = [System.Text.Encoding]::GetEncoding(1252).GetString($bytes)
+            $ansi | Should -Be $utf8 -Because "$($file.Name) must read the same on a 1252 console"
+        }
+    }
+
+    It 'parses without error' {
+        foreach ($file in $script:PowerShellFiles) {
+            $errors = $null
+            $tokens = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+                $file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            ($errors | ForEach-Object { "$($file.Name):$($_.Extent.StartLineNumber) $($_.Message)" }) -join "`n" |
+                Should -BeNullOrEmpty
+        }
     }
 }

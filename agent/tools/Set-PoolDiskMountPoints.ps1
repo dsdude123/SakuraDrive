@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     List every volume on this host and give the ones you choose a folder mount point,
-    so WSL2 — and therefore SakuraDrive's container — can see them.
+    so WSL2 - and therefore SakuraDrive's container - can see them.
 
 .DESCRIPTION
     Windows has 26 drive letters and this host has more disks than spare ones, which is
@@ -195,7 +195,7 @@ function Format-DiskSize {
 
 .DESCRIPTION
     Not Join-Path: that resolves the drive qualifier against the current provider, so
-    'C:\PoolDisks' throws on a machine with no C: — which is every machine the tests run
+    'C:\PoolDisks' throws on a machine with no C: - which is every machine the tests run
     on. These are Windows paths being *composed*, not paths being resolved.
 #>
 function Join-WindowsPath {
@@ -213,8 +213,8 @@ function Join-WindowsPath {
     Shape one volume plus its partition into the row the picker works with.
 
 .DESCRIPTION
-    Takes the objects rather than fetching them so the classification — which is the
-    part that decides what gets mounted — can be tested without a Windows host.
+    Takes the objects rather than fetching them so the classification - which is the
+    part that decides what gets mounted - can be tested without a Windows host.
 #>
 function ConvertTo-MountCandidate {
     [CmdletBinding()]
@@ -237,7 +237,7 @@ function ConvertTo-MountCandidate {
     }
 
     # A folder mount point is any access path that is not the volume GUID path and not
-    # a bare drive root — that is, somewhere a person could actually cd into.
+    # a bare drive root - that is, somewhere a person could actually cd into.
     $folders = @(
         $accessPaths | Where-Object {
             $_ -and $_ -notmatch '^\\\\\?\\Volume\{' -and $_ -notmatch '^[A-Za-z]:\\?$'
@@ -404,7 +404,7 @@ function Add-VolumeMountPoint {
     if (Test-Path -LiteralPath $Path) {
         $existing = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
         if ($existing.Count -gt 0) {
-            throw "$Path is not empty. A mount point has to be an empty directory — pick another name or clear it first."
+            throw "$Path is not empty. A mount point has to be an empty directory - pick another name or clear it first."
         }
     }
     elseif ($PSCmdlet.ShouldProcess($Path, 'Create empty directory')) {
@@ -555,7 +555,7 @@ function Invoke-Main {
     Write-Host ''
     Write-Host 'Next: check WSL can see them.' -ForegroundColor Cyan
     Write-Host '  A folder mount point is a reparse point, so WSL2 follows it like any other'
-    Write-Host '  directory — but confirm it rather than trusting it. From WSL:'
+    Write-Host '  directory - but confirm it rather than trusting it. From WSL:'
     Write-Host ''
     foreach ($candidate in $done) {
         Write-Host "    ls '$($candidate.WslPath)'"
@@ -563,7 +563,7 @@ function Invoke-Main {
     Write-Host ''
     Write-Host '  Empty output means drvfs did not follow the mount point. In that case give the'
     Write-Host '  volume a drive letter instead (Get-Volume | Set-Partition -NewDriveLetter), which'
-    Write-Host '  always works — you have enough spare letters for the pool as it stands today.'
+    Write-Host '  always works - you have enough spare letters for the pool as it stands today.'
     Write-Host ''
     Write-Host 'Then add these to docker/docker-compose.yml under volumes:' -ForegroundColor Cyan
     Write-Host ''

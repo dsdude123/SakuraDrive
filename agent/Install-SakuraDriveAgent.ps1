@@ -142,7 +142,7 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
     # Two triggers, because one is not enough: AtStartup means monitoring resumes after
     # a reboot without waiting out the interval, and the repeating trigger covers the
     # steady state. The task runs as SYSTEM, so neither depends on anyone being logged
-    # in — it survives a reboot and a sign-out alike.
+    # in - it survives a reboot and a sign-out alike.
     $atStartup = New-ScheduledTaskTrigger -AtStartup
     $atStartup.Delay = 'PT2M'
     $repeating = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `

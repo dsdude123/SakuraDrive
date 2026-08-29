@@ -1,5 +1,23 @@
 # The Windows agent
 
+
+## PowerShell version
+
+Everything under `agent/` runs on **Windows PowerShell 5.1**, which is what ships with
+Windows Server. PowerShell 7 is not required and is not assumed anywhere.
+
+Two things keep it that way, because neither is obvious by reading:
+
+- **The files are pure ASCII.** Windows PowerShell 5.1 reads a `.ps1` as the ANSI
+  codepage unless the file has a UTF-8 BOM. On a Western install that is Windows-1252,
+  where a UTF-8 em dash arrives as three characters, the last of which is a smart closing
+  quote — and PowerShell accepts smart quotes as string delimiters, so the string ends
+  early and the rest of the file will not parse. A Pester test asserts every file is
+  ASCII and reads identically under both encodings.
+- **CI checks the cmdlet surface** with PSScriptAnalyzer against a real Server 2019 /
+  5.1 profile, so a parameter that only exists in a newer Storage module fails the build
+  rather than the host.
+
 ## Why it exists
 
 SMART attributes, volume labels, the NTFS dirty bit, StableBit DrivePool's configuration
