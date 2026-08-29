@@ -173,6 +173,13 @@ export function registerSettingsRoutes(app: FastifyInstance, services: Services)
 
   app.get('/api/backup/runs', async () => ({ runs: backup.listRuns(), summary: backup.summary() }));
 
+  /**
+   * What the backup rules cover and what they do not. Deliberately not an alert: a
+   * folder left out of the backup is usually a cost decision, and the tool's job is to
+   * make that decision visible rather than to nag about it.
+   */
+  app.get('/api/backup/coverage', async () => ({ roots: backup.coverage() }));
+
   app.get('/api/backup/issues', async (request, reply) => {
     const query = parseQuery(
       z.object({

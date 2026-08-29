@@ -11,6 +11,17 @@ import { Badge, Banner, Card, EmptyState, Loading, Table } from '../components/u
 import { useMutation, useQuery } from '../hooks/useApi.js';
 import { useToast } from '../hooks/useToast.js';
 
+interface CoverageRoot {
+  rootId: string;
+  rootName: string;
+  expectations: string[];
+  coveredFiles: number;
+  coveredBytes: number;
+  uncoveredFiles: number;
+  uncoveredBytes: number;
+  uncoveredFolders: Array<{ name: string; files: number; bytes: number }>;
+}
+
 interface BackupRunsResponse {
   runs: BackupVerificationSummary[];
   summary: { enabled: boolean; lastRunAt: string | null; missingFiles: number; missingBytes: number; expectations: number };
@@ -18,6 +29,7 @@ interface BackupRunsResponse {
 
 export function BackupPage(): JSX.Element {
   const runs = useQuery<BackupRunsResponse>('/api/backup/runs', { pollMs: 30_000 });
+  const coverage = useQuery<{ roots: CoverageRoot[] }>('/api/backup/coverage', { pollMs: 300_000 });
   const [kind, setKind] = useState<'' | 'missing' | 'stale' | 'size-mismatch'>('');
   const [search, setSearch] = useState('');
   const issues = useQuery<{ issues: BackupIssue[]; total: number }>('/api/backup/issues', {
@@ -89,6 +101,54 @@ export function BackupPage(): JSX.Element {
             </div>
           </div>
         )}
+
+        <Card
+          flush
+          title="What the rules cover"
+          description="Not everything belongs in cloud storage. This is what you have decided to leave out, so the decision is visible before a disk dies rather than after."
+        >
+          {coverage.loading && !coverage.data && <Loading />}
+          {(coverage.data?.roots.length ?? 0) === 0 && !coverage.loading && (
+            <EmptyState title="No catalog roots">
+              Add a root under Settings, then run a catalog scan.
+            </EmptyState>
+          )}
+          {(coverage.data?.roots.length ?? 0) > 0 && (
+            <Table headers={['Root', 'Rules', '#Covered', '#Not covered', 'Left out']}>
+              {(coverage.data?.roots ?? []).map((root) => (
+                <tr key={root.rootId}>
+                  <td>
+                    <strong>{root.rootName}</strong>
+                  </td>
+                  <td>
+                    {root.expectations.length > 0 ? (
+                      root.expectations.join(', ')
+                    ) : (
+                      <Badge tone="warning">none</Badge>
+                    )}
+                  </td>
+                  <td className="num">
+                    {formatBytes(root.coveredBytes)}
+                    <div className="hint">{formatCount(root.coveredFiles)} files</div>
+                  </td>
+                  <td className="num">
+                    {formatBytes(root.uncoveredBytes)}
+                    <div className="hint">{formatCount(root.uncoveredFiles)} files</div>
+                  </td>
+                  <td>
+                    {root.uncoveredFolders.length === 0
+                      ? '—'
+                      : root.uncoveredFolders
+                          .slice(0, 6)
+                          .map((folder) => `${folder.name} (${formatBytes(folder.bytes)})`)
+                          .join(', ')}
+                    {root.uncoveredFolders.length > 6 && ` and ${root.uncoveredFolders.length - 6} more`}
+                  </td>
+                </tr>
+              ))}
+            </Table>
+          )}
+        </Card>
 
         <Card flush title="Verification runs">
           {runs.loading && !runs.data && <Loading />}

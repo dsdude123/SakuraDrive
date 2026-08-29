@@ -885,6 +885,7 @@ function BackupTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.E
         excludeGlobs: [],
         kopiaSource: '',
         kopiaPathPrefix: '',
+        kopiaSnapshotPrefix: '',
         minFileSizeBytes: 0,
         maxSnapshotAgeHours: 192,
       });
@@ -1083,6 +1084,18 @@ function BackupTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.E
                       value={expectation.kopiaPathPrefix}
                       onChange={(event) =>
                         patch((next) => { next.backup.expectations[index]!.kopiaPathPrefix = event.target.value; })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Snapshot path prefix"
+                    help="A folder the snapshot has that catalog paths do not, because the Kopia source starts above the catalog root. Snapshotting a whole pool member disk needs PoolPart.* here — the wildcard is resolved against the snapshot, so the pool GUID stays out of the settings."
+                  >
+                    <input
+                      type="text"
+                      value={expectation.kopiaSnapshotPrefix}
+                      onChange={(event) =>
+                        patch((next) => { next.backup.expectations[index]!.kopiaSnapshotPrefix = event.target.value; })
                       }
                     />
                   </Field>

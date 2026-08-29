@@ -109,6 +109,9 @@ and `siblingRoots` holds only the parts on other drives that a copy could surviv
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/backup/runs` | Verification history and the current summary |
+| GET | `/api/backup/coverage` | Per root: which folders backup rules cover, and which they do not |
+
+Expectations and the two path prefixes are explained in [BACKUP-EXPECTATIONS.md](BACKUP-EXPECTATIONS.md).
 | GET | `/api/backup/issues` | `?runId=&kind=missing\|stale\|size-mismatch&status=` |
 | POST | `/api/backup/issues/status` | `{ids:[], status, note}` |
 | POST | `/api/settings/test-kopia` | Connects and lists visible snapshot sources |

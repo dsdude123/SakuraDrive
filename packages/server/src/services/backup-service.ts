@@ -173,6 +173,32 @@ export class BackupService {
     return summary;
   }
 
+  /**
+   * The folder the snapshot has that our paths do not.
+   *
+   * Written as `PoolPart.*` it is resolved against the snapshot's own top level, so the
+   * pool GUID never has to be copied into the settings — and it keeps working after
+   * DrivePool is removed and re-added to a disk, which changes that GUID.
+   */
+  private resolveSnapshotPrefix(pattern: string | null | undefined): string {
+    // Settings written before this field existed simply do not have it.
+    const wanted = normalizeRelPath(pattern ?? '');
+    if (wanted === '') return '';
+    if (!wanted.includes('*')) return wanted;
+
+    const match = compileGlobList([wanted]);
+    const rows = this.db
+      .prepare<[], { segment: string }>(
+        `SELECT DISTINCT CASE WHEN INSTR(path_key, '/') > 0
+                              THEN SUBSTR(path_key, 1, INSTR(path_key, '/') - 1)
+                              ELSE path_key END AS segment
+           FROM ${ENTRY_TABLE}`,
+      )
+      .all();
+    // Lowercased because path_key is; the glob is compiled case-insensitively already.
+    return rows.find((row) => match(row.segment))?.segment ?? '';
+  }
+
   /* ---------------------------------------------------------- comparison */
 
   private compare(
@@ -186,6 +212,7 @@ export class BackupService {
     const includeMatch = include.length === 0 ? () => true : compileGlobList(include);
     const excludeMatch = compileGlobList(exclude);
     const prefix = normalizeRelPath(expectation.kopiaPathPrefix);
+    const snapshotPrefix = this.resolveSnapshotPrefix(expectation.kopiaSnapshotPrefix);
 
     const total =
       this.db
@@ -248,7 +275,8 @@ export class BackupService {
       if (row.size_bytes < expectation.minFileSizeBytes) continue;
 
       summary.expectedFiles += 1;
-      const snapshotPath = stripPrefix(relPath, prefix);
+      const stripped = stripPrefix(relPath, prefix);
+      const snapshotPath = snapshotPrefix === '' ? stripped : `${snapshotPrefix}/${stripped}`;
       const entry = lookup.get(snapshotPath.toLowerCase());
 
       if (!entry) {
@@ -494,6 +522,101 @@ export class BackupService {
       for (const id of ids) changed += update.run(status, note, id).changes;
     })();
     return changed;
+  }
+
+  /**
+   * What the backup rules do and do not cover.
+   *
+   * Not everything is meant to be backed up — cloud storage costs money and some of
+   * this data is replaceable — so a root with no expectation is a *decision*, not a
+   * fault, and it raises no alert. But a decision you cannot see is indistinguishable
+   * from an oversight, and the moment that matters is the one where a disk has just
+   * died. This is the answer to "what am I not protecting?", available before then.
+   *
+   * Coverage is judged per top-level folder, because that is the granularity people
+   * actually think in (Tier0, Tier1, ...) and the granularity the rules are written at.
+   * A folder is covered when some enabled rule's include globs reach into it; what a
+   * rule then excludes *within* that folder is verification's business, not this.
+   */
+  coverage(): Array<{
+    rootId: string;
+    rootName: string;
+    expectations: string[];
+    coveredFiles: number;
+    coveredBytes: number;
+    uncoveredFiles: number;
+    uncoveredBytes: number;
+    uncoveredFolders: Array<{ name: string; files: number; bytes: number }>;
+  }> {
+    const config = this.settings.get();
+    const enabledExpectations = config.backup.expectations.filter(
+      (expectation) => expectation.enabled,
+    );
+
+    return config.catalog.roots
+      .filter((root) => root.enabled !== false)
+      .map((root) => {
+        const rules = enabledExpectations.filter(
+          (expectation) => expectation.rootId === root.id,
+        );
+        // Include globs only. They are written against folders ("Tier1/**"), which is
+        // the question here: does any rule reach into this folder at all? Excludes are
+        // file-level refinements inside a folder a rule already claims, and verification
+        // is what reports on those — counting them here would call a folder unprotected
+        // because one `*.tmp` in it is skipped.
+        const matchers = rules.map((rule) =>
+          rule.includeGlobs.length === 0 ? () => true : compileGlobList(rule.includeGlobs),
+        );
+
+        // One pass over the root's top-level folders rather than over every file: the
+        // rules are written against folders, and a pool disk holds millions of files.
+        const folders = this.db
+          .prepare<[string], { name: string; files: number; bytes: number; sample: string }>(
+            `SELECT CASE WHEN INSTR(rel_path, '/') > 0
+                         THEN SUBSTR(rel_path, 1, INSTR(rel_path, '/') - 1)
+                         ELSE '' END AS name,
+                    COUNT(*)                    AS files,
+                    COALESCE(SUM(size_bytes),0) AS bytes,
+                    MIN(rel_path)               AS sample
+               FROM files
+              WHERE root_id = ? AND deleted_at IS NULL
+              GROUP BY name`,
+          )
+          .all(root.id);
+
+        let coveredFiles = 0;
+        let coveredBytes = 0;
+        const uncoveredFolders: Array<{ name: string; files: number; bytes: number }> = [];
+
+        for (const folder of folders) {
+          // A folder counts as covered when some rule would accept a file in it. The
+          // sample path is a real path from that folder, so a rule like `Tier1/**`
+          // matches exactly as it will during verification.
+          const covered = matchers.some((matcher) => matcher(folder.sample));
+          if (covered) {
+            coveredFiles += folder.files;
+            coveredBytes += folder.bytes;
+          } else {
+            uncoveredFolders.push({
+              name: folder.name === '' ? '(root)' : folder.name,
+              files: folder.files,
+              bytes: folder.bytes,
+            });
+          }
+        }
+
+        uncoveredFolders.sort((a, b) => b.bytes - a.bytes);
+        return {
+          rootId: root.id,
+          rootName: root.name,
+          expectations: rules.map((rule) => rule.name),
+          coveredFiles,
+          coveredBytes,
+          uncoveredFiles: uncoveredFolders.reduce((sum, folder) => sum + folder.files, 0),
+          uncoveredBytes: uncoveredFolders.reduce((sum, folder) => sum + folder.bytes, 0),
+          uncoveredFolders,
+        };
+      });
   }
 
   summary(): { enabled: boolean; lastRunAt: string | null; missingFiles: number; missingBytes: number; expectations: number } {

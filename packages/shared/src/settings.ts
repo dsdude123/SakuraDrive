@@ -64,8 +64,20 @@ export const backupExpectationSchema = z.object({
   excludeGlobs: z.array(z.string()).default([]),
   /** Kopia source path this root maps to, e.g. `SERVER\\user:P:\\Media`. */
   kopiaSource: z.string().default(''),
-  /** Path prefix inside the Kopia snapshot, when the source root differs from ours. */
+  /**
+   * Leading folder of *our* paths that is not in the snapshot, because the Kopia source
+   * starts deeper than the catalog root: source `J:\Tier1` against a root catalogued
+   * from `J:\` needs `Tier1` here. Files outside it are not expected in this snapshot.
+   */
   kopiaPathPrefix: z.string().default(''),
+  /**
+   * The mirror image: a leading folder present in the *snapshot* but not in our paths,
+   * because the Kopia source starts higher than the catalog root. Snapshotting a whole
+   * pool member disk (`D:`) needs `PoolPart.*` here, since the catalog strips that
+   * folder from a pool part's paths. A trailing `*` is resolved against the snapshot,
+   * so the pool GUID does not have to be copied into the configuration.
+   */
+  kopiaSnapshotPrefix: z.string().default(''),
   /** Files smaller than this are not expected to be backed up. */
   minFileSizeBytes: z.number().int().nonnegative().default(0),
   /** Flag a backed-up file as stale when the snapshot copy is older than this. */

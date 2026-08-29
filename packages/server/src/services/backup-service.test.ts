@@ -23,6 +23,7 @@ const EXPECTATION = {
   excludeGlobs: ['**/*.tmp'],
   kopiaSource: 'backup@NAS-01:P:\\',
   kopiaPathPrefix: '',
+  kopiaSnapshotPrefix: '',
   minFileSizeBytes: 0,
   maxSnapshotAgeHours: 48,
 };
@@ -255,6 +256,92 @@ describe('verify', () => {
   });
 });
 
+describe('a Kopia source that starts higher than the catalog root', () => {
+  // Snapshotting a whole pool member disk (D:) captures `PoolPart.<guid>\Tier1\...`,
+  // while the catalog strips that folder from a pool part's paths. Without bridging the
+  // two, every file in a perfectly good backup reads as missing.
+  const POOLPART = 'PoolPart.d304fce8-5935-49cb-a280-e93bf43d12bd';
+
+  beforeEach(() => {
+    seedCatalog([
+      { relPath: 'Tier1/movie.mkv', size: 100 },
+      { relPath: 'Tier1/song.flac', size: 50 },
+    ]);
+  });
+
+  it('finds the files when the snapshot prefix is given literally', async () => {
+    settings.update({
+      backup: {
+        expectations: [
+          {
+            ...EXPECTATION,
+            includeGlobs: ['Tier1/**'],
+            excludeGlobs: [],
+            kopiaSnapshotPrefix: POOLPART,
+          },
+        ],
+      },
+    });
+    const service = makeService(
+      kopiaRunner([
+        { name: `${POOLPART}/Tier1/movie.mkv`, type: 'f', size: 100, mtime: '2024-01-01T00:00:00Z' },
+        { name: `${POOLPART}/Tier1/song.flac`, type: 'f', size: 50, mtime: '2024-01-01T00:00:00Z' },
+      ]),
+    );
+
+    const summary = await service.verify({ expectation: settings.get().backup.expectations[0]!, workflowRunId: null });
+    expect(summary.expectedFiles).toBe(2);
+    expect(summary.presentFiles).toBe(2);
+    expect(summary.missingFiles).toBe(0);
+  });
+
+  // The GUID changes if DrivePool is removed and re-added to a disk, so it should not
+  // have to live in the settings at all.
+  it('resolves a wildcard prefix against the snapshot itself', async () => {
+    settings.update({
+      backup: {
+        expectations: [
+          {
+            ...EXPECTATION,
+            includeGlobs: ['Tier1/**'],
+            excludeGlobs: [],
+            kopiaSnapshotPrefix: 'PoolPart.*',
+          },
+        ],
+      },
+    });
+    const service = makeService(
+      kopiaRunner([
+        { name: `${POOLPART}/Tier1/movie.mkv`, type: 'f', size: 100, mtime: '2024-01-01T00:00:00Z' },
+        { name: `${POOLPART}/Tier1/song.flac`, type: 'f', size: 50, mtime: '2024-01-01T00:00:00Z' },
+      ]),
+    );
+
+    const summary = await service.verify({ expectation: settings.get().backup.expectations[0]!, workflowRunId: null });
+    expect(summary.presentFiles).toBe(2);
+    expect(summary.missingFiles).toBe(0);
+  });
+
+  it('still reports a genuinely missing file under the prefix', async () => {
+    settings.update({
+      backup: {
+        expectations: [
+          { ...EXPECTATION, includeGlobs: ['Tier1/**'], excludeGlobs: [], kopiaSnapshotPrefix: 'PoolPart.*' },
+        ],
+      },
+    });
+    const service = makeService(
+      kopiaRunner([
+        { name: `${POOLPART}/Tier1/movie.mkv`, type: 'f', size: 100, mtime: '2024-01-01T00:00:00Z' },
+      ]),
+    );
+
+    const summary = await service.verify({ expectation: settings.get().backup.expectations[0]!, workflowRunId: null });
+    expect(summary.missingFiles).toBe(1);
+    expect(service.listIssues({}).issues[0]!.relPath).toBe('Tier1/song.flac');
+  });
+});
+
 describe('manifest mode', () => {
   it('verifies against a plain listing file', async () => {
     seedCatalog([
@@ -288,6 +375,104 @@ describe('manifest mode', () => {
     settings.update({ backup: { mode: 'manifest', manifestPath: '/no/such/file' } });
     const summary = await makeService(null).verify({ expectation: EXPECTATION, workflowRunId: null });
     expect(summary.error).toContain('not found');
+  });
+});
+
+describe('coverage', () => {
+  // Not everything is meant to be in Backblaze — the tool's job is to make what is left
+  // out visible, not to nag about it, so none of this raises an alert.
+  it('separates the folders the rules cover from the ones they do not', () => {
+    seedCatalog([
+      { relPath: 'Media/Movies/a.mkv', size: 100 },
+      { relPath: 'Media/Music/b.flac', size: 50 },
+      { relPath: 'Scratch/render.tmp', size: 4000 },
+      { relPath: 'Games/install.bin', size: 900 },
+    ]);
+
+    const coverage = makeService(null).coverage();
+    expect(coverage).toHaveLength(1);
+    const root = coverage[0]!;
+    expect(root.rootName).toBe('Pool');
+    expect(root.expectations).toEqual(['Media to Backblaze']);
+    expect(root.coveredFiles).toBe(2);
+    expect(root.coveredBytes).toBe(150);
+    expect(root.uncoveredFiles).toBe(2);
+    expect(root.uncoveredBytes).toBe(4900);
+    // Largest gap first: that is the one worth a decision.
+    expect(root.uncoveredFolders.map((folder) => folder.name)).toEqual(['Scratch', 'Games']);
+  });
+
+  it('reports a root with no rule at all as entirely uncovered', () => {
+    settings.update({ backup: { expectations: [] } });
+    seedCatalog([{ relPath: 'Media/Movies/a.mkv', size: 100 }]);
+
+    const root = makeService(null).coverage()[0]!;
+    expect(root.expectations).toEqual([]);
+    expect(root.coveredFiles).toBe(0);
+    expect(root.uncoveredFolders.map((folder) => folder.name)).toEqual(['Media']);
+  });
+
+  it('treats a disabled rule as no rule', () => {
+    settings.update({ backup: { expectations: [{ ...EXPECTATION, enabled: false }] } });
+    seedCatalog([{ relPath: 'Media/Movies/a.mkv', size: 100 }]);
+    expect(makeService(null).coverage()[0]!.coveredFiles).toBe(0);
+  });
+
+  it('counts a root with no include globs as fully covered', () => {
+    settings.update({ backup: { expectations: [{ ...EXPECTATION, includeGlobs: [], excludeGlobs: [] }] } });
+    seedCatalog([
+      { relPath: 'Media/Movies/a.mkv', size: 100 },
+      { relPath: 'Scratch/render.tmp', size: 4000 },
+    ]);
+
+    const root = makeService(null).coverage()[0]!;
+    expect(root.uncoveredFolders).toEqual([]);
+    expect(root.coveredFiles).toBe(2);
+  });
+
+  it('names files sitting at the root of the tree', () => {
+    settings.update({ backup: { expectations: [] } });
+    seedCatalog([{ relPath: 'readme.txt', size: 10 }]);
+    expect(makeService(null).coverage()[0]!.uncoveredFolders[0]!.name).toBe('(root)');
+  });
+
+  it('reports an empty catalog without inventing gaps', () => {
+    expect(makeService(null).coverage()[0]!.uncoveredFolders).toEqual([]);
+  });
+
+  // An exclude trims files inside a folder a rule already claims; it does not make the
+  // folder unprotected, and reporting it that way would cry wolf over one .tmp file.
+  it('still counts a folder as covered when a rule excludes some files in it', () => {
+    settings.update({
+      backup: {
+        expectations: [{ ...EXPECTATION, includeGlobs: ['Media/**'], excludeGlobs: ['**/*.tmp'] }],
+      },
+    });
+    seedCatalog([
+      { relPath: 'Media/Movies/a.mkv', size: 100 },
+      { relPath: 'Media/cache.tmp', size: 5 },
+    ]);
+    expect(makeService(null).coverage()[0]!.uncoveredFolders).toEqual([]);
+  });
+
+  it('covers a folder when any one of several rules accepts it', () => {
+    settings.update({
+      backup: {
+        expectations: [
+          EXPECTATION,
+          { ...EXPECTATION, id: 'exp2', name: 'Games too', includeGlobs: ['Games/**'] },
+        ],
+      },
+    });
+    seedCatalog([
+      { relPath: 'Media/Movies/a.mkv', size: 100 },
+      { relPath: 'Games/install.bin', size: 900 },
+      { relPath: 'Scratch/render.tmp', size: 4000 },
+    ]);
+
+    const root = makeService(null).coverage()[0]!;
+    expect(root.expectations).toEqual(['Media to Backblaze', 'Games too']);
+    expect(root.uncoveredFolders.map((folder) => folder.name)).toEqual(['Scratch']);
   });
 });
 

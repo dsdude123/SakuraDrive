@@ -69,21 +69,42 @@ On tokyo-3 the fourteen HDD pool members are letterless, which has two consequen
   catalogued or hashed.
 
 To catalogue them, give each disk a folder mount point on Windows — the standard way
-around the 26-letter limit:
+around the 26-letter limit. `agent/tools/Set-PoolDiskMountPoints.ps1` does the whole job:
 
 ```powershell
-# One empty folder per pool disk, then mount the volume into it.
-New-Item -ItemType Directory -Path C:\PoolDisks\DRIVEPOOL4 -Force
+# Look first. Needs no elevation, changes nothing.
+.\Set-PoolDiskMountPoints.ps1 -ListOnly
 
-# Find the volume by its label, then add the folder as an access path.
-$volume = Get-Volume -FileSystemLabel DRIVEPOOL4
-$partition = Get-Partition -Volume $volume
+#   #  Label            Ltr  FS     Size     Status    Reachable from WSL as
+#   1  DRIVEPOOL4       -    NTFS   7.3 TB   unmounted NOT VISIBLE
+#   2  SSDPOOl1         M:   NTFS   2.5 TB   letter    /mnt/m
+
+# Then pick what to mount: numbers, ranges like 4-9, or "all".
+.\Set-PoolDiskMountPoints.ps1
+```
+
+It refuses to touch the system volume, requires an empty target directory, verifies each
+mount took rather than assuming it, and prints the docker-compose lines for what it
+mounted. `-WhatIf` shows the plan without writing anything, `-Label` and `-All` script
+it, `-MountRoot` puts the folders somewhere other than `C:\PoolDisks`, and `-Remove`
+undoes it — the volume and its contents are untouched, only the path you reach it by
+goes away.
+
+By hand it is three commands per disk:
+
+```powershell
+New-Item -ItemType Directory -Path C:\PoolDisks\DRIVEPOOL4 -Force
+$partition = Get-Partition -Volume (Get-Volume -FileSystemLabel DRIVEPOOL4)
 Add-PartitionAccessPath -DiskNumber $partition.DiskNumber `
     -PartitionNumber $partition.PartitionNumber -AccessPath 'C:\PoolDisks\DRIVEPOOL4'
 ```
 
-Mount points survive reboots. Once they exist, `/mnt/c/PoolDisks/DRIVEPOOL4` is visible
-inside WSL2 and can be bind-mounted read-only into the container as a pool-part root.
+Mount points survive reboots. Once they exist, `/mnt/c/PoolDisks/DRIVEPOOL4` should be
+visible inside WSL2 and can be bind-mounted read-only into the container as a pool-part
+root. Check that it is — `ls /mnt/c/PoolDisks/DRIVEPOOL4` from WSL — before adding it to
+the compose file: a mount point is a reparse point, and drvfs following it is the one
+part of this that depends on WSL rather than on Windows. If the listing comes back
+empty, give the volume a drive letter instead, which always works.
 
 The volumes page shows each volume's mount point, or "not mounted" when it has neither
 a letter nor a folder — which is exactly the set of disks that still need this.
