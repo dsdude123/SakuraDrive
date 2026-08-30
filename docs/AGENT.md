@@ -52,10 +52,44 @@ administrative rights, and SYSTEM is used so the task keeps running when you log
 Useful switches:
 
 ```powershell
--IntervalMinutes 30            # default 15
+-IntervalMinutes 30                          # default 15
 -InstallPath 'D:\Tools\Agent'
--Uninstall                     # removes the task and the installed files
+-SmartctlPath 'C:\Tools\smartctl.exe'        # blank = search the usual places
+-DpcmdPath    'C:\Tools\dpcmd.exe'
+-RxpccPath    'C:\Tools\rxpcc.exe'
+-KeepConfig                                  # re-register the task, keep agent.config.json
+-Uninstall                                   # removes the task and the installed files
 ```
+
+## The configuration file
+
+`agent.config.json` lives next to the installed agent and is read on every run, so a
+change takes effect at the next report — no reinstall. It is the single source of truth
+for everything the agent does; the switches above are just a way to set some of it at
+install time.
+
+The installer builds it from the agent's own defaults and overlays what you passed, so
+it cannot list a different set of keys from the one the agent reads. `-KeepConfig`
+re-registers the task without touching the file, and adds any keys a newer agent
+introduced — use it for upgrades once you have tuned something.
+
+A bad configuration fails at install time rather than in a log fifteen minutes later,
+and a tool path that does not exist is warned about rather than silently ignored.
+
+`agent.config.example.json` is generated from those same defaults and a test asserts it
+still matches, so it cannot go stale.
+
+| Key | What it does |
+| --- | --- |
+| `ServerUrl`, `Token` | Where to report, and the token from Settings → Agents |
+| `IntervalSeconds` | How often to report. 900 is the default |
+| `SmartctlPath`, `DpcmdPath`, `RxpccPath` | Explicit tool paths. Blank means search |
+| `CollectSmart`, `CollectPerformance`, `CollectDrivePool`, `CollectPrimoCache` | Turn a collector off |
+| `CollectCatalogJobs` | Take catalog scan and hash work. Off means health reporting only |
+| `DuplicationDepth` | How deep to probe DrivePool duplication. 3 suits a tiered layout |
+| `PerformanceSamples` | Seconds of performance-counter sampling per report |
+| `SkipCertificateCheck` | Only for a self-signed certificate on a trusted LAN |
+| `TimeoutSeconds`, `LogPath` | HTTP timeout, and where the agent logs |
 
 ## Full SMART attributes
 

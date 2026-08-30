@@ -914,3 +914,30 @@ textarea {
     padding: 16px 14px 48px;
   }
 }
+
+/* Reference lists: a term and what it means, without prose wrapping around bold runs. */
+.definitions {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+  align-items: baseline;
+}
+.definitions dt {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+.definitions dd {
+  margin: 0;
+  color: var(--text-muted);
+}
+@media (max-width: 560px) {
+  .definitions {
+    grid-template-columns: 1fr;
+    gap: 2px 0;
+  }
+  .definitions dd {
+    margin-bottom: 8px;
+  }
+}

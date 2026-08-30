@@ -91,13 +91,6 @@ export function SchedulePage(): JSX.Element {
         }
       />
       <div className="content">
-        <Banner tone="info" title="Why this exists">
-          Cataloguing and hashing read the whole pool, which is exactly the workload that makes
-          clients stutter. Painted hours are the only times those workflows start on their own — and
-          when an hour ends, a running workflow is asked to stop, saves its position and resumes in
-          the next window rather than starting over.
-        </Banner>
-
         <Card
           title="Weekly I/O window"
           description={`${formatSchedule(grid)} · ${enabledHoursPerWeek(grid)} hours per week`}

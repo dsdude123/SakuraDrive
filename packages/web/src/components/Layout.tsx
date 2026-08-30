@@ -53,6 +53,7 @@ export function Layout({
 
   const operations = [
     { to: '/workflows', label: 'Workflows' },
+    { to: '/agent-jobs', label: 'Agent jobs' },
     { to: '/schedule', label: 'Schedule' },
     { to: '/settings', label: 'Settings' },
   ];

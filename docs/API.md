@@ -34,6 +34,8 @@ matching HTTP status.
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/api/agent/report` | Bearer token. Body is `agentReportSchema` |
+| GET | `/api/agents/jobs` | What the agent is running, waiting on, and just finished |
+| POST | `/api/agents/jobs/:id/cancel` | Ask a running job to stop at its next batch, or drop a queued one |
 | GET | `/api/agents` | Reporting agents and their freshness |
 | GET | `/api/agents/tokens` | Never returns token plaintext |
 | POST | `/api/agents/tokens` | `{name}`. Returns the plaintext **once** |

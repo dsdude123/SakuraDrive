@@ -1110,3 +1110,43 @@ Describe 'Hashing for the catalog' {
         $result.fileId | Should -Be 9
     }
 }
+
+<#
+    The configuration had three definitions -- the module's defaults, a hand-written copy
+    inside the installer, and the example file -- and two of them had drifted. RxpccPath
+    and CollectCatalogJobs existed in the module and in neither of the others, so no
+    installed configuration ever mentioned them and nobody could tell they were settable.
+
+    The installer now starts from Get-DefaultAgentConfig. These tests keep the example
+    file honest, since nothing else would notice it going stale.
+#>
+Describe 'The example configuration matches the defaults' {
+    BeforeAll {
+        $script:Example = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' 'agent.config.example.json') -Raw |
+            ConvertFrom-Json
+        $script:Defaults = Get-DefaultAgentConfig
+    }
+
+    It 'documents every key the agent understands' {
+        $documented = @($script:Example.PSObject.Properties.Name | Sort-Object)
+        $known = @($script:Defaults.Keys | Sort-Object)
+        $documented | Should -Be $known
+    }
+
+    It 'names the three tool paths, so it is obvious they can be set' {
+        foreach ($tool in 'SmartctlPath', 'DpcmdPath', 'RxpccPath') {
+            $script:Example.PSObject.Properties.Name | Should -Contain $tool
+        }
+    }
+
+    It 'is a configuration the agent would actually accept' {
+        $merged = Merge-AgentConfig -UserConfig $script:Example
+        # Only the placeholder token stands between the example and a working install.
+        $merged.ServerUrl | Should -Match '^https?://'
+        (Test-AgentConfig -Config $merged).Count | Should -Be 0
+    }
+
+    It 'keeps the collectors on by default, including catalog jobs' {
+        $script:Defaults.CollectCatalogJobs | Should -BeTrue
+    }
+}

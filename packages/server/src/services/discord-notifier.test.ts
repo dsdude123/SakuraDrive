@@ -266,3 +266,68 @@ describe('buildDiscordMessage', () => {
     expect(message.embeds[0]!.description!.length).toBeLessThanOrEqual(3800);
   });
 });
+
+/**
+ * The test button used to always send, at info severity, bypassing the threshold. So it
+ * proved the webhook worked and nothing about the filter -- which is the setting most
+ * likely to be wrong, and the one whose failure mode is silence rather than an error.
+ */
+describe('the test message and the severity threshold', () => {
+  it('reports every level as delivered when the threshold is info', async () => {
+    const harness = createHarness({ minSeverity: 'info' });
+    const result = await harness.notifier.sendTest(WEBHOOK, 'SakuraDrive');
+    expect(result.ok).toBe(true);
+    expect(result.delivered).toEqual(['info', 'warning', 'critical']);
+    expect(result.suppressed).toEqual([]);
+  });
+
+  it('reports what a critical-only threshold will swallow', async () => {
+    const harness = createHarness({ minSeverity: 'critical' });
+    const result = await harness.notifier.sendTest(WEBHOOK, 'SakuraDrive');
+    expect(result.minSeverity).toBe('critical');
+    expect(result.delivered).toEqual(['critical']);
+    expect(result.suppressed).toEqual(['info', 'warning']);
+  });
+
+  it('says so in the message itself, not just in the response', async () => {
+    const harness = createHarness({ minSeverity: 'warning' });
+    await harness.notifier.sendTest(WEBHOOK, 'SakuraDrive');
+
+    const description = (
+      harness.bodies()[0]!.embeds as Array<{ description: string }>
+    )[0]!.description;
+    expect(description).toContain('**warning**');
+    expect(description).toContain('suppressed by the threshold');
+    expect(description).toContain('Minimum severity is set to **warning**');
+  });
+
+  // The point of running the real gate rather than describing it: the two cannot
+  // disagree, so the test cannot promise delivery the notifier then refuses.
+  it('agrees with what the notifier actually does', async () => {
+    const harness = createHarness({ minSeverity: 'warning' });
+    const result = await harness.notifier.sendTest(WEBHOOK, 'SakuraDrive');
+    expect(result.delivered).toContain('warning');
+    expect(result.suppressed).toContain('info');
+
+    harness.alerts.raise({ ...alertInput, dedupeKey: 'w', severity: 'warning' });
+    harness.alerts.raise({ ...alertInput, dedupeKey: 'i', severity: 'info' });
+    await harness.notifier.flush();
+
+    const titles = harness
+      .bodies()
+      .slice(1)
+      .flatMap((body) => (body.embeds as Array<{ title: string }>).map((embed) => embed.title))
+      .join(' ');
+    expect(titles).toContain('DRIVEPOOL27');
+    // The info alert was suppressed exactly as the test said it would be.
+    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM notifications").get()).toBeTruthy();
+  });
+
+  it('still reports the threshold when the webhook itself fails', async () => {
+    const harness = createHarness({ minSeverity: 'critical' });
+    harness.fetchMock.mockResolvedValueOnce(new Response('nope', { status: 404 }));
+    const result = await harness.notifier.sendTest(WEBHOOK, 'SakuraDrive');
+    expect(result.ok).toBe(false);
+    expect(result.suppressed).toEqual(['info', 'warning']);
+  });
+});

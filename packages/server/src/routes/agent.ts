@@ -168,7 +168,82 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
     return { ok: true };
   });
 
-  app.get('/api/agents/jobs', async () => ({ jobs: agentJobs.list() }));
+  /**
+   * What the agent is doing, is about to do, and just did.
+   *
+   * A scan of a 95 TB pool runs for days on the far side of a process boundary, so
+   * "is anything actually happening?" has to be answerable without reading a log on the
+   * Windows box. Rate and elapsed are computed here because they are what turns a pile
+   * of counters into that answer.
+   */
+  app.get('/api/agents/jobs', async () => {
+    const roots = settings.get().catalog.roots;
+    const now = Date.now();
+
+    const shape = (job: ReturnType<typeof agentJobs.list>[number]) => {
+      const stats = job.stats as {
+        filesSeen?: number;
+        bytesSeen?: number;
+        dirsDone?: number;
+        dirsRemaining?: number;
+      };
+      const startedAt = job.claimedAt ?? job.createdAt;
+      const elapsedMs = (job.finishedAt ? Date.parse(job.finishedAt) : now) - Date.parse(startedAt);
+      const filesSeen = stats.filesSeen ?? stats.dirsDone ?? 0;
+      return {
+        id: job.id,
+        type: job.type,
+        rootId: job.rootId,
+        rootName: roots.find((root) => root.id === job.rootId)?.name ?? job.rootId,
+        hostPath: roots.find((root) => root.id === job.rootId)?.hostPath ?? '',
+        state: job.state,
+        claimedBy: job.claimedBy,
+        error: job.error,
+        cancelRequested: job.cancelRequested,
+        createdAt: job.createdAt,
+        claimedAt: job.claimedAt,
+        heartbeatAt: job.heartbeatAt,
+        finishedAt: job.finishedAt,
+        elapsedMs: Math.max(0, elapsedMs),
+        // Seconds since the agent last said anything. The number that distinguishes
+        // "working through a big directory" from "the host went away".
+        silentForMs: job.heartbeatAt ? Math.max(0, now - Date.parse(job.heartbeatAt)) : null,
+        // How long a queued job has been waiting for an agent to take it.
+        queuedForMs: job.state === 'queued' ? Math.max(0, now - Date.parse(job.createdAt)) : null,
+        filesSeen,
+        bytesSeen: stats.bytesSeen ?? 0,
+        dirsDone: stats.dirsDone ?? 0,
+        dirsRemaining: stats.dirsRemaining ?? 0,
+        filesPerSecond: elapsedMs > 1000 ? (filesSeen / elapsedMs) * 1000 : null,
+      };
+    };
+
+    const jobs = agentJobs.list(100).map(shape);
+    return {
+      active: jobs.filter((job) => job.state === 'claimed'),
+      queued: jobs.filter((job) => job.state === 'queued'),
+      recent: jobs.filter((job) => job.state !== 'claimed' && job.state !== 'queued').slice(0, 25),
+      claimTimeoutSeconds: settings.get().catalog.agentClaimTimeoutSeconds,
+    };
+  });
+
+  /**
+   * Abandon a job by hand.
+   *
+   * A claimed job is asked to stop at its next batch, which is the same cooperative
+   * path the I/O window uses -- so it stops with a cursor rather than being killed
+   * mid-tree. A queued one is simply dropped.
+   */
+  app.post<{ Params: { id: string } }>('/api/agents/jobs/:id/cancel', async (request, reply) => {
+    const job = agentJobs.byId(Number(request.params.id));
+    if (!job) return reply.code(404).send({ error: 'not_found', message: 'Unknown job' });
+    if (job.state === 'claimed') {
+      agentJobs.requestCancel(job.id);
+      return { ok: true, stopping: true };
+    }
+    agentJobs.cancel(job.id, 'Cancelled from the interface');
+    return { ok: true, stopping: false };
+  });
 
   app.get('/api/agents', async () => ({ agents: agents.listAgents() }));
 

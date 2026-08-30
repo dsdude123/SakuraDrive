@@ -15,6 +15,7 @@ import { RecoveryPage } from './pages/Recovery.js';
 import { SchedulePage } from './pages/Schedule.js';
 import { SettingsPage } from './pages/Settings.js';
 import { StoragePage } from './pages/Storage.js';
+import { AgentJobsPage } from './pages/AgentJobs.js';
 import { WorkflowsPage } from './pages/Workflows.js';
 
 export interface AuthStatus {
@@ -83,6 +84,7 @@ export function App(): JSX.Element {
         <Route path="/recovery" element={<RecoveryPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/workflows" element={<WorkflowsPage />} />
+        <Route path="/agent-jobs" element={<AgentJobsPage />} />
         <Route path="/schedule" element={<SchedulePage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

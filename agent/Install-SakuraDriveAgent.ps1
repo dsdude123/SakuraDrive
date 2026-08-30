@@ -23,6 +23,19 @@
     How often to report. 15 minutes is a sensible default: often enough to catch a
     drive going bad, rare enough to be invisible.
 
+.PARAMETER SmartctlPath
+    Full path to smartctl.exe. Leave blank and the agent looks in the usual places.
+
+.PARAMETER DpcmdPath
+    Full path to StableBit DrivePool's dpcmd.exe. Blank means search.
+
+.PARAMETER RxpccPath
+    Full path to PrimoCache's rxpcc.exe. Blank means search.
+
+.PARAMETER KeepConfig
+    Re-register the task without touching agent.config.json. Use this after editing the
+    configuration by hand, so an upgrade does not overwrite it.
+
 .PARAMETER Uninstall
     Remove the scheduled task and the installed files.
 
@@ -39,6 +52,10 @@ param(
     [string] $InstallPath = 'C:\Program Files\SakuraDrive Agent',
     [int]    $IntervalMinutes = 15,
     [string] $TaskName = 'SakuraDrive Agent',
+    [string] $SmartctlPath = '',
+    [string] $DpcmdPath = '',
+    [string] $RxpccPath = '',
+    [switch] $KeepConfig,
     [switch] $Uninstall
 )
 
@@ -94,24 +111,49 @@ if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
     $logDirectory = 'C:\ProgramData\SakuraDrive'
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 
-    $configuration = [ordered]@{
-        ServerUrl            = $ServerUrl.TrimEnd('/')
-        Token                = $Token
-        IntervalSeconds      = $IntervalMinutes * 60
-        SmartctlPath         = ''
-        DpcmdPath            = ''
-        DuplicationDepth     = 3
-        PerformanceSamples   = 3
-        CollectSmart         = $true
-        CollectPerformance   = $true
-        CollectDrivePool     = $true
-        CollectPrimoCache    = $true
-        SkipCertificateCheck = $false
-        TimeoutSeconds       = 120
-        LogPath              = (Join-Path $logDirectory 'agent.log')
+    $configPath = Join-Path $InstallPath 'agent.config.json'
+
+    # Start from the agent's own defaults rather than a second list maintained here.
+    # A hand-written copy drifts: this one had lost RxpccPath and CollectCatalogJobs,
+    # so those keys were absent from every installed configuration and nobody could
+    # tell they were settable.
+    Import-Module (Join-Path $InstallPath 'SakuraDrive.Agent.psm1') -Force
+    $existing = $null
+    if ($KeepConfig -and (Test-Path -LiteralPath $configPath)) {
+        $existing = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        Write-Host 'Keeping the existing agent.config.json; only new keys are added.'
     }
 
-    $configPath = Join-Path $InstallPath 'agent.config.json'
+    $configuration = Merge-AgentConfig -UserConfig $existing
+    # Anything passed on the command line wins; anything left blank keeps what was
+    # there, so re-running an upgrade does not quietly reset a tuned installation.
+    if ($ServerUrl) { $configuration.ServerUrl = $ServerUrl.TrimEnd('/') }
+    if ($Token) { $configuration.Token = $Token }
+    if ($PSBoundParameters.ContainsKey('IntervalMinutes')) {
+        $configuration.IntervalSeconds = $IntervalMinutes * 60
+    }
+    foreach ($tool in 'SmartctlPath', 'DpcmdPath', 'RxpccPath') {
+        if ($PSBoundParameters.ContainsKey($tool) -and $PSBoundParameters[$tool]) {
+            $configuration[$tool] = $PSBoundParameters[$tool]
+        }
+    }
+    if (-not $configuration.LogPath) { $configuration.LogPath = Join-Path $logDirectory 'agent.log' }
+
+    # Fail here rather than fifteen minutes later in a log nobody is watching.
+    $problems = Test-AgentConfig -Config $configuration
+    if ($problems.Count -gt 0) {
+        throw ("The configuration is not usable:`n  " + ($problems -join "`n  "))
+    }
+
+    # A tool path that was given but does not exist is a typo, and the agent would
+    # silently fall back to searching. Say so now.
+    foreach ($tool in 'SmartctlPath', 'DpcmdPath', 'RxpccPath') {
+        $value = $configuration[$tool]
+        if ($value -and -not (Test-Path -LiteralPath $value)) {
+            Write-Warning "$tool is set to '$value', which does not exist. The agent will search the usual locations instead."
+        }
+    }
+
     $configuration | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
 
     # The token is a credential: keep the configuration readable only by administrators
@@ -125,6 +167,12 @@ if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
     Set-Acl -LiteralPath $configPath -AclObject $acl
 
     Write-Host "Installed the agent into $InstallPath."
+    Write-Host "Configuration: $configPath"
+    Write-Host '  Edit it and re-run with -KeepConfig to keep your changes across upgrades.'
+    foreach ($tool in 'SmartctlPath', 'DpcmdPath', 'RxpccPath') {
+        $value = $configuration[$tool]
+        Write-Host ("  {0,-14} {1}" -f $tool, $(if ($value) { $value } else { '(search the usual locations)' }))
+    }
 }
 
 # ------------------------------------------------------------- scheduled task

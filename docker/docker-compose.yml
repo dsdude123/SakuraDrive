@@ -17,8 +17,7 @@ services:
     restart: unless-stopped
 
     ports:
-      # 8099 continues the 8096 scrutiny / 8097 youtrack / 8098 sakurafinancial block.
-      # Confirm with `sudo ss -ltnp` before assuming it is free.
+      # Override with SAKURADRIVE_PORT. Check the host port is free first: `ss -ltnp`.
       - "${SAKURADRIVE_PORT:-8099}:8080"
 
     environment:

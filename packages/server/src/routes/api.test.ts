@@ -495,3 +495,111 @@ describe('disaster recovery report', () => {
     expect(body.siblingRoots).toEqual([{ id: 'part28', name: 'DRIVEPOOL28' }]);
   });
 });
+
+/**
+ * A scan of a 95 TB pool runs for days on the far side of a process boundary. "Is
+ * anything actually happening?" has to be answerable without reading a log on the
+ * Windows box.
+ */
+describe('agent jobs', () => {
+  const ROOT = {
+    id: 'dp16',
+    name: 'DRIVEPOOL16',
+    kind: 'poolpart' as const,
+    poolId: 'hdd',
+    hostPath: '\\\\?\\Volume{9f3a}\\PoolPart.d304fce8',
+  };
+
+  const queue = () => {
+    h.services.settings.update({ catalog: { roots: [ROOT] } });
+    return h.services.agentJobs.enqueue({
+      type: 'catalog.scan',
+      root: h.services.settings.get().catalog.roots[0]!,
+      workflowRunId: 1,
+      catalogRunId: 1,
+      payload: {},
+    });
+  };
+
+  beforeEach(async () => {
+    await h.signIn();
+  });
+
+  it('separates what is running from what is waiting and what is done', async () => {
+    const first = queue();
+    h.services.agentJobs.claim('tokyo-3');
+    h.services.agentJobs.heartbeat(first.id, { cursor: null, dirsDone: 4, dirsRemaining: 6 });
+
+    const body = json(await request(h, { method: 'GET', url: '/api/agents/jobs' }));
+    const active = body.active as unknown as Array<{ rootName: string; dirsDone: number; claimedBy: string }>;
+    expect(active).toHaveLength(1);
+    expect(active[0]!.rootName).toBe('DRIVEPOOL16');
+    expect(active[0]!.dirsDone).toBe(4);
+    expect(active[0]!.claimedBy).toBe('tokyo-3');
+    expect((body.queued as unknown as unknown[])).toHaveLength(0);
+  });
+
+  // The number that says "the agent is not running" rather than "this is slow".
+  it('reports how long a job has waited for an agent to take it', async () => {
+    queue();
+    h.services.db.prepare("UPDATE agent_jobs SET created_at = '2000-01-01T00:00:00.000Z'").run();
+
+    const body = json(await request(h, { method: 'GET', url: '/api/agents/jobs' }));
+    const queued = body.queued as unknown as Array<{ queuedForMs: number; rootName: string }>;
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.queuedForMs).toBeGreaterThan(1_000_000);
+    expect(body.claimTimeoutSeconds).toBeGreaterThan(0);
+  });
+
+  it('reports how long an agent has been silent, which is not the same as slow', async () => {
+    const job = queue();
+    h.services.agentJobs.claim('tokyo-3');
+    h.services.agentJobs.heartbeat(job.id, { cursor: null, dirsDone: 1, dirsRemaining: 1 });
+    h.services.db.prepare("UPDATE agent_jobs SET heartbeat_at = '2000-01-01T00:00:00.000Z'").run();
+
+    const body = json(await request(h, { method: 'GET', url: '/api/agents/jobs' }));
+    const active = body.active as unknown as Array<{ silentForMs: number }>;
+    expect(active[0]!.silentForMs).toBeGreaterThan(1_000_000);
+  });
+
+  it('lists a finished job with its outcome and reason', async () => {
+    const job = queue();
+    h.services.agentJobs.claim('tokyo-3');
+    h.services.agentJobs.finish(job.id, {
+      state: 'failed',
+      error: 'The volume is offline',
+      filesSeen: 12,
+      bytesSeen: 2048,
+      dirsDone: 3,
+    });
+
+    const body = json(await request(h, { method: 'GET', url: '/api/agents/jobs' }));
+    const recent = body.recent as unknown as Array<{ state: string; error: string; filesSeen: number }>;
+    expect(recent[0]!.state).toBe('failed');
+    expect(recent[0]!.error).toBe('The volume is offline');
+    expect(recent[0]!.filesSeen).toBe(12);
+  });
+
+  // Stopping a running job goes through the same cooperative path the I/O window uses,
+  // so the agent keeps its place instead of being killed mid-tree.
+  it('asks a running job to stop rather than killing it', async () => {
+    const job = queue();
+    h.services.agentJobs.claim('tokyo-3');
+
+    const response = json(await request(h, { method: 'POST', url: `/api/agents/jobs/${job.id}/cancel` }));
+    expect(response.stopping).toBe(true);
+    expect(h.services.agentJobs.byId(job.id)!.state).toBe('claimed');
+    expect(h.services.agentJobs.byId(job.id)!.cancelRequested).toBe(true);
+  });
+
+  it('drops a queued job outright', async () => {
+    const job = queue();
+    const response = json(await request(h, { method: 'POST', url: `/api/agents/jobs/${job.id}/cancel` }));
+    expect(response.stopping).toBe(false);
+    expect(h.services.agentJobs.byId(job.id)!.state).toBe('cancelled');
+  });
+
+  it('404s on a job that does not exist', async () => {
+    expect((await request(h, { method: 'POST', url: '/api/agents/jobs/999/cancel' })).statusCode).toBe(404);
+  });
+});

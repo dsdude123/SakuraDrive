@@ -309,12 +309,20 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
 
   return (
     <div className="stack">
-      <Banner tone="info" title="How roots map onto DrivePool">
-        A <strong>pool</strong> root is the DrivePool virtual drive — the logical view of your data.
-        A <strong>pool part</strong> root is one underlying disk&apos;s <code>PoolPart.*</code> folder;
-        cataloguing those as well is what lets the disaster-recovery report say exactly which files a
-        specific dead disk took with it. Give a pool and its parts the same pool id to link them.
-      </Banner>
+      <Card title="Root kinds">
+        <dl className="definitions">
+          <dt>pool</dt>
+          <dd>The DrivePool virtual drive.</dd>
+          <dt>poolpart</dt>
+          <dd>
+            One disk&apos;s <code>PoolPart.*</code> folder. Needed for the per-disk
+            disaster-recovery report.
+          </dd>
+          <dt>disk</dt>
+          <dd>Any other volume.</dd>
+        </dl>
+        <p className="hint">Give a pool and its parts the same pool id to link them.</p>
+      </Card>
 
       {(orphaned.data?.roots.length ?? 0) > 0 && (
         <Card
@@ -532,12 +540,10 @@ function DuplicationTab({ draft, patch }: { draft: Settings; patch: PatchFn }): 
 
   return (
     <div className="stack">
-      <Banner tone="info" title="Where duplication levels come from">
-        The Windows agent reads them straight from DrivePool with <code>dpcmd</code>, so normally
-        there is nothing to enter here. Rules you add by hand override the agent&apos;s at the same
-        depth, which is how you correct a bad reading or describe a pool the agent cannot reach.
-        Resolution follows DrivePool: the deepest matching folder wins and descendants inherit.
-      </Banner>
+      <p className="hint">
+        Read from DrivePool by the agent. Deepest matching folder wins, descendants inherit,
+        and a manual rule beats the agent&apos;s at the same depth.
+      </p>
 
       <Card title="Defaults">
         <div className="form-grid">
@@ -767,11 +773,27 @@ function DiscordTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.
   const toast = useToast();
 
   const test = async () => {
-    const result = await mutation.run<{ ok: boolean; error?: string }>('/api/settings/test-discord', {
+    const result = await mutation.run<{
+      ok: boolean;
+      error?: string;
+      minSeverity: string;
+      delivered: string[];
+      suppressed: string[];
+    }>('/api/settings/test-discord', {
       body: { webhookUrl: draft.notifications.discord.webhookUrl, username: draft.notifications.discord.username },
     });
-    if (result?.ok) toast.push('Test message sent — check the channel', 'success');
-    else toast.push(result?.error ?? mutation.error ?? 'Test failed', 'error');
+    if (!result?.ok) {
+      toast.push(result?.error ?? mutation.error ?? 'Test failed', 'error');
+      return;
+    }
+    // Say what the threshold does, since that is the setting whose failure mode is
+    // silence rather than an error.
+    toast.push(
+      result.suppressed.length === 0
+        ? 'Test message sent — every severity reaches this channel'
+        : `Test message sent — ${result.delivered.join(', ')} will arrive; ${result.suppressed.join(', ')} suppressed at "${result.minSeverity}"`,
+      result.suppressed.length === 0 ? 'success' : 'info',
+    );
   };
 
   return (
@@ -1276,12 +1298,6 @@ function ExportTab({
 
   return (
     <div className="stack">
-      <Banner tone="info" title="Why this matters more than it looks">
-        The catalog is most valuable immediately after a disk failure — which is exactly the moment
-        this container&apos;s own storage might be gone too. Bundles are written to a directory outside
-        the app&apos;s data volume, verified by reading them back, and old ones pruned.
-      </Banner>
-
       <Card
         title="Automatic exports"
         actions={
@@ -1531,13 +1547,6 @@ function AgentsTab(): JSX.Element {
 
   return (
     <div className="stack">
-      <Banner tone="info" title="Why an agent is needed at all">
-        SMART data, volume labels, DrivePool duplication settings and PrimoCache statistics live on
-        the Windows host and cannot be read from inside a Linux container. The agent is a PowerShell
-        script that collects them and posts a JSON report here on a schedule. Everything else — the
-        catalog, hashing, the storage map — works without it.
-      </Banner>
-
       <Card flush title="Reporting agents">
         {(agents.data?.agents.length ?? 0) === 0 ? (
           <EmptyState title="No agent has reported yet">

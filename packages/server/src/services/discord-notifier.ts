@@ -234,8 +234,34 @@ export class DiscordNotifier {
     this.logger.warn({ error, count: ids.length }, 'discord notification deferred');
   }
 
-  /** Post a test message immediately, bypassing the outbox. Used by the settings page. */
-  async sendTest(webhookUrl: string, username: string): Promise<{ ok: boolean; error?: string }> {
+  /**
+   * Post a test message immediately, bypassing the outbox.
+   *
+   * It runs the real severity gate rather than describing it, and says which levels
+   * would actually be delivered. A test that always sends proves the webhook works and
+   * nothing about the filter -- which is the setting most likely to be wrong, and the
+   * one whose failure mode is silence.
+   */
+  async sendTest(
+    webhookUrl: string,
+    username: string,
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    minSeverity: Severity;
+    delivered: Severity[];
+    suppressed: Severity[];
+  }> {
+    const minSeverity = this.config().minSeverity;
+    const levels: Severity[] = ['info', 'warning', 'critical'];
+    const delivered = levels.filter((level) => this.meetsThreshold(level));
+    const suppressed = levels.filter((level) => !this.meetsThreshold(level));
+
+    const describe = (level: Severity) =>
+      `${delivered.includes(level) ? '✅' : '🚫'} **${level}** — ${
+        delivered.includes(level) ? 'will reach this channel' : 'suppressed by the threshold'
+      }`;
+
     try {
       const response = await this.fetchImpl(webhookUrl, {
         method: 'POST',
@@ -246,19 +272,38 @@ export class DiscordNotifier {
             {
               title: '🌸 SakuraDrive test notification',
               description:
-                'If you can read this, alerts from your NAS will reach this channel.',
-              color: SEVERITY_COLOUR.info,
+                `Alerts from your NAS will reach this channel.\n\n` +
+                `Minimum severity is set to **${minSeverity}**, so:\n` +
+                levels.map(describe).join('\n') +
+                (suppressed.length > 0
+                  ? `\n\nLower the threshold under Settings → Notifications if you want the suppressed levels too.`
+                  : ''),
+              // Coloured as the lowest level that actually gets through, so the message
+              // looks like the alerts it is standing in for.
+              color: SEVERITY_COLOUR[delivered[0] ?? minSeverity],
               timestamp: this.now().toISOString(),
             },
           ],
         } satisfies DiscordPayload),
       });
       if (!response.ok) {
-        return { ok: false, error: `HTTP ${response.status}: ${await safeText(response)}` };
+        return {
+          ok: false,
+          error: `HTTP ${response.status}: ${await safeText(response)}`,
+          minSeverity,
+          delivered,
+          suppressed,
+        };
       }
-      return { ok: true };
+      return { ok: true, minSeverity, delivered, suppressed };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        minSeverity,
+        delivered,
+        suppressed,
+      };
     }
   }
 
