@@ -30,7 +30,7 @@ function configurePoolRoots(): void {
           name: 'DRIVEPOOL27',
           kind: 'poolpart',
           poolId: 'hdd',
-          containerPath: '/mnt/parts/27',
+          hostPath: 'E:\\',
           driveLabel: 'DRIVEPOOL27',
         },
         {
@@ -38,7 +38,7 @@ function configurePoolRoots(): void {
           name: 'DRIVEPOOL28',
           kind: 'poolpart',
           poolId: 'hdd',
-          containerPath: '/mnt/parts/28',
+          hostPath: 'F:\\',
           driveLabel: 'DRIVEPOOL28',
         },
       ],
@@ -168,7 +168,7 @@ describe('duplication check', () => {
     settings.update({
       catalog: {
         roots: [
-          { id: 'pool', name: 'HDD Pool', kind: 'pool', poolId: 'hdd', containerPath: '/mnt/pool' },
+          { id: 'pool', name: 'HDD Pool', kind: 'pool', poolId: 'hdd', hostPath: 'J:\\' },
         ],
       },
       duplication: {

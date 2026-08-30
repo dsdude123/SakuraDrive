@@ -34,46 +34,20 @@ services:
       - /mnt/m/Tier2/Docker/sakuradrive_data:/data
 
       # ------------------------------------------------------------------
-      # SSD pool (M:) and its three member disks.
+      # No pool disks are mounted here, and none need to be.
       #
-      # M: is a DrivePool pool over D:, E: and F: — the used figures add up exactly
-      # (878.94 + 849.01 + 797.08 = 2525.02 GB). The members have drive letters, so
-      # they can be catalogued individually with no extra work on the host.
+      # The agent reads every catalog root on the Windows side and streams the results
+      # back. That is not a workaround for the letterless disks -- though it is the only
+      # thing that works for them, since WSL2 only surfaces lettered drives and drvfs
+      # will not follow a folder mount point into another volume -- it is how the
+      # container stops caring how the host is laid out. Add a disk to the array, move
+      # to a bigger machine, re-letter everything: nothing here changes.
       #
-      # Catalogue the *members*, not M: itself. SakuraDrive builds the pool view from
-      # them, which costs one read instead of two and additionally tells you how many
-      # disks hold each file.
+      # Configure the roots in Settings -> Catalog roots. The path picker lists the pool
+      # parts the agent has found, so nobody types a volume GUID.
+      #
+      # See docs/ARCHITECTURE.md, "Who reads the disks".
       # ------------------------------------------------------------------
-      - /mnt/d:/mnt/parts/ssd-bay3:ro
-      - /mnt/e:/mnt/parts/ssd-bay2:ro
-      - /mnt/f:/mnt/parts/ssd-bay1:ro
-
-      # ------------------------------------------------------------------
-      # HDD pool (J:) member disks.
-      #
-      # These 14 disks have no drive letters, and no arrangement of this file can give
-      # this container access to them. WSL2 only surfaces lettered drives, and drvfs
-      # will not follow a folder mount point into another volume -- `ls` on one returns
-      # "Input/output error". Measured here, on all fourteen.
-      #
-      # So they are not bind-mounted at all. Set each one's catalog root to be read by
-      # the agent (Settings -> Catalog roots -> "Read by" -> The Windows agent) and give
-      # it the volume GUID path, which needs no drive letter:
-      #
-      #     \\?\Volume{guid}\PoolPart.{poolGuid}
-      #
-      # The agent walks and hashes them and streams the results back. The schedule, the
-      # catalog and the pause all work exactly as they do for a bind-mounted root; see
-      # docs/ARCHITECTURE.md, "Who reads the disks".
-      #
-      # Nothing to add here for the HDD pool. That is the point: the container's view of
-      # the host is no longer a constraint on how the array is laid out.
-      # ------------------------------------------------------------------
-
-      # The pooled views themselves. Not catalogued — mounted only so the interface can
-      # report pool capacity and so "Check mount" can confirm the pool is online.
-      - /mnt/j:/mnt/pools/drivepool:ro
-      - /mnt/m:/mnt/pools/ssdpool:ro
 
       # ------------------------------------------------------------------
       # Where automatic export bundles are written.

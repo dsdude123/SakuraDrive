@@ -48,10 +48,13 @@ describe('parseSettings', () => {
 
   it('applies scan root defaults', () => {
     const settings = parseSettings({
-      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', containerPath: '/mnt/pools/hdd' }] },
+      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', hostPath: 'J:\\' }] },
     });
     const root = settings.catalog.roots[0]!;
     expect(root.kind).toBe('pool');
+    // Every root is read by the agent, so the Windows path is the one that matters.
+    expect(root.hostPath).toBe('J:\\');
+    expect(root.agentHostname).toBe('');
     expect(root.enabled).toBe(true);
     expect(root.hashEnabled).toBe(true);
     expect(root.excludeGlobs).toEqual([]);
@@ -100,13 +103,13 @@ describe('mergeSettings', () => {
     const current = parseSettings({
       catalog: {
         roots: [
-          { id: 'a', name: 'A', containerPath: '/a' },
-          { id: 'b', name: 'B', containerPath: '/b' },
+          { id: 'a', name: 'A', hostPath: 'A:\\' },
+          { id: 'b', name: 'B', hostPath: 'B:\\' },
         ],
       },
     });
     const next = mergeSettings(current, {
-      catalog: { roots: [{ id: 'b', name: 'B', containerPath: '/b' }] },
+      catalog: { roots: [{ id: 'b', name: 'B', hostPath: 'B:\\' }] },
     });
     expect(next.catalog.roots.map((r) => r.id)).toEqual(['b']);
   });

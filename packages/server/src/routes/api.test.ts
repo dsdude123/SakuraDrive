@@ -276,17 +276,24 @@ describe('settings', () => {
     expect((json(response).heavyIo as unknown as string[])).toHaveLength(7);
   });
 
-  it('checks whether a bind mount is visible in the container', async () => {
-    const ok = json(
-      await request(h, { method: 'GET', url: `/api/settings/check-path?path=${encodeURIComponent(h.dataDir)}` }),
-    );
-    expect(ok.readable).toBe(true);
+  // Configuring a root means picking a volume the agent has already found, not typing
+  // a GUID and hoping. Nothing here can test a path itself: the container cannot reach
+  // these volumes at all.
+  it('offers the pool parts the agent reported, so a root can be picked not typed', async () => {
+    await h.signIn();
+    h.services.db
+      .prepare(
+        `INSERT INTO pool_parts (pool_id, part_id, name, volume_label, drive_letter, path, size_bytes, missing, last_seen_at)
+         VALUES ('hdd', 'p1', 'DRIVEPOOL16', 'DRIVEPOOL16', NULL, '\\\\?\\Volume{a}\\PoolPart.d304fce8', 1000, 0, 'now')`,
+      )
+      .run();
 
-    const missing = json(
-      await request(h, { method: 'GET', url: '/api/settings/check-path?path=/definitely/not/here' }),
-    );
-    expect(missing.readable).toBe(false);
-    expect(missing.hint).toContain('bind mount');
+    const body = json(await request(h, { method: 'GET', url: '/api/catalog/known-paths' }));
+    const parts = body.poolParts as unknown as Array<{ label: string; hostPath: string; missing: boolean }>;
+    expect(parts).toHaveLength(1);
+    expect(parts[0]!.label).toBe('DRIVEPOOL16');
+    expect(parts[0]!.hostPath).toContain('PoolPart.d304fce8');
+    expect(parts[0]!.missing).toBe(false);
   });
 
   it('sends a Discord test message', async () => {
@@ -383,7 +390,7 @@ describe('removed catalog roots', () => {
       method: 'PATCH',
       url: '/api/settings',
       payload: {
-        catalog: { roots: [{ id: 'r1', name: 'Pool', containerPath: '/mnt/pool' }] },
+        catalog: { roots: [{ id: 'r1', name: 'Pool', hostPath: 'J:\\' }] },
       },
     });
     h.services.db
@@ -427,7 +434,7 @@ describe('disaster recovery report', () => {
             name: 'DRIVEPOOL27',
             kind: 'poolpart',
             poolId: 'hdd',
-            containerPath: '/mnt/parts/27',
+            hostPath: 'E:\\',
             driveLabel: 'DRIVEPOOL27',
           },
           {
@@ -435,7 +442,7 @@ describe('disaster recovery report', () => {
             name: 'DRIVEPOOL28',
             kind: 'poolpart',
             poolId: 'hdd',
-            containerPath: '/mnt/parts/28',
+            hostPath: 'F:\\',
             driveLabel: 'DRIVEPOOL28',
           },
         ],

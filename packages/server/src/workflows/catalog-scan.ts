@@ -1,16 +1,11 @@
-import path from 'node:path';
 import {
-  compileGlobList,
-  createDuplicationResolver,
   formatBytes,
-  normalizeRootPath,
   type ScanRoot,
 } from '@sakuradrive/shared';
 import type { AgentJobService } from '../services/agent-job-service.js';
 import type { AlertService } from '../services/alert-service.js';
 import type { CatalogService } from '../services/catalog-service.js';
 import type { SettingsService } from '../services/settings-service.js';
-import { isReadableDirectory, readDirectory, type WalkedFile } from '../util/fs-walk.js';
 import type { WorkflowContext, WorkflowDefinition, WorkflowResult } from './engine.js';
 
 /**
@@ -87,73 +82,23 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
         return { state: 'completed' };
       }
 
-      const globalExclude = compileGlobList(config.catalog.globalExcludeGlobs);
-
       for (; cursor.rootIndex < roots.length; cursor.rootIndex += 1) {
         const root = roots[cursor.rootIndex]!;
-
-        // Roots the container cannot reach are walked by the agent instead. Same run,
-        // same catalog, same deletion rules; only the pair of hands is different.
-        if (root.source === 'agent') {
-          const runId = cursor.runId ?? catalog.activeRun(root.id) ?? catalog.beginRun(root.id, ctx.runId);
-          cursor.runId = runId;
-          const outcome = await runAgentScan(ctx, { deps, root, runId, cursor });
-          if (outcome === 'paused') {
-            ctx.setCursor(cursor);
-            return { state: 'paused' };
-          }
-          if (outcome === 'completed') finishRoot(ctx, deps, root, runId, cursor, config);
-          else {
-            // Failed or abandoned: leave the catalog exactly as it was.
-            catalog.finishRun(runId, 'failed', 'The agent did not finish the scan.');
-            cursor.runId = null;
-          }
-          resetRootCursor(cursor);
-          ctx.setCursor(cursor);
-          continue;
-        }
-
-        const rootPath = normalizeRootPath(root.containerPath);
-
-        if (!(await isReadableDirectory(rootPath))) {
-          // A missing bind mount looks exactly like a wiped disk. Never guess: skip the
-          // root so the catalog is left intact and tell the operator instead.
-          alerts.raise({
-            dedupeKey: `catalog:${root.id}:unreadable`,
-            category: 'catalog',
-            severity: 'critical',
-            title: `Catalog root "${root.name}" is not readable`,
-            detail: `${rootPath} could not be opened inside the container. The scan skipped this root so the existing catalog is preserved. Check that the bind mount still exists and that the drive is online.`,
-            context: { root: root.name, containerPath: rootPath, hostPath: root.hostPath },
-          });
-          ctx.log(`Skipped "${root.name}": ${rootPath} is not readable`);
-          continue;
-        }
-        alerts.resolve(`catalog:${root.id}:unreadable`);
-
         const runId = cursor.runId ?? catalog.activeRun(root.id) ?? catalog.beginRun(root.id, ctx.runId);
         cursor.runId = runId;
-        if (cursor.worklist.length === 0 && cursor.dirsDone === 0) {
-          cursor.worklist = [''];
-          ctx.log(`Scanning "${root.name}" (${root.hostPath || rootPath})`);
-        }
 
-        const paused = await scanRoot(ctx, {
-          root,
-          rootPath,
-          runId,
-          cursor,
-          settings,
-          catalog,
-          globalExclude,
-        });
-
-        if (paused) {
+        const outcome = await runAgentScan(ctx, { deps, root, runId, cursor });
+        if (outcome === 'paused') {
           ctx.setCursor(cursor);
           return { state: 'paused' };
         }
-
-        finishRoot(ctx, deps, root, runId, cursor, config);
+        if (outcome === 'completed') {
+          finishRoot(ctx, deps, root, runId, cursor, config);
+        } else {
+          // Failed or abandoned. Leave the catalog exactly as it was: a half-walked
+          // tree read as deletions would be far worse than a scan that did not happen.
+          catalog.finishRun(runId, 'failed', 'The agent did not finish the scan.');
+        }
         resetRootCursor(cursor);
         ctx.setCursor(cursor);
       }
@@ -254,6 +199,19 @@ async function runAgentScan(
     const current = agentJobs.byId(job.id);
     if (!current) return 'failed';
 
+    // Nobody has taken it. Waiting forever would leave the workflow looking busy while
+    // nothing at all is happening, which is the worst kind of failure: it does not look
+    // like one.
+    if (current.state === 'queued') {
+      const waited = (Date.now() - Date.parse(current.createdAt)) / 1000;
+      if (waited > config.catalog.agentClaimTimeoutSeconds) {
+        agentJobs.cancel(
+          job.id,
+          `No agent claimed this job within ${Math.round(waited)}s. Is the agent running on the host?`,
+        );
+      }
+    }
+
     if (!ctx.shouldContinue() && !cancelRequested) {
       agentJobs.requestCancel(job.id);
       cancelRequested = true;
@@ -303,99 +261,6 @@ async function runAgentScan(
     await new Promise((resolve) => setTimeout(resolve, config.catalog.agentPollMs));
     void catalog;
   }
-}
-
-interface ScanRootArgs {
-  root: ScanRoot;
-  rootPath: string;
-  runId: number;
-  cursor: ScanCursor;
-  settings: SettingsService;
-  catalog: CatalogService;
-  globalExclude: (input: string) => boolean;
-}
-
-/** Returns true when the scan paused before finishing this root. */
-async function scanRoot(ctx: WorkflowContext, args: ScanRootArgs): Promise<boolean> {
-  const { root, rootPath, runId, cursor, settings, catalog, globalExclude } = args;
-  const config = settings.get();
-  const rootExclude = compileGlobList(root.excludeGlobs);
-  const rootInclude = root.includeGlobs.length > 0 ? compileGlobList(root.includeGlobs) : null;
-  const duplicationFor = createDuplicationResolver(
-    config.duplication.rules.filter(
-      (rule) => rule.poolId === null || rule.poolId === root.poolId || root.poolId === null,
-    ),
-    config.duplication.defaultLevel,
-  );
-
-  const batchSize = config.catalog.batchSize;
-  let batch: WalkedFile[] = [];
-
-  const flush = () => {
-    if (batch.length === 0) return;
-    const result = catalog.recordFiles(runId, root, batch, duplicationFor);
-    cursor.created += result.created;
-    cursor.modified += result.modified;
-    cursor.restored += result.restored;
-    cursor.bytesSeen += result.bytes;
-    cursor.filesSeen += batch.length;
-    batch = [];
-    ctx.setProgress({
-      done: cursor.dirsDone,
-      total: cursor.dirsDone + cursor.worklist.length,
-      unit: 'directories',
-      message: `${root.name}: ${cursor.filesSeen.toLocaleString()} files (${formatBytes(cursor.bytesSeen)})`,
-      bytes: cursor.bytesSeen,
-    });
-  };
-
-  while (cursor.worklist.length > 0) {
-    if (!ctx.shouldContinue()) {
-      flush();
-      catalog.updateRunStats(runId, {
-        filesSeen: cursor.filesSeen,
-        dirsSeen: cursor.dirsDone,
-        bytesSeen: cursor.bytesSeen,
-        created: cursor.created,
-        modified: cursor.modified,
-        restored: cursor.restored,
-      });
-      ctx.log(`Paused in "${root.name}" with ${cursor.worklist.length} directories remaining`);
-      return true;
-    }
-
-    const relDir = cursor.worklist.pop()!;
-    const listing = await readDirectory(rootPath, relDir, {
-      followSymlinks: config.catalog.followSymlinks,
-      excludeDirectory: (relPath) => globalExclude(relPath) || rootExclude(relPath),
-      includeFile: (relPath) => {
-        if (globalExclude(relPath) || rootExclude(relPath)) return false;
-        if (rootInclude && !rootInclude(relPath)) return false;
-        return true;
-      },
-    });
-
-    cursor.dirsDone += 1;
-    // Reverse so the stack yields directories in the order they were listed, which
-    // keeps the progress message moving through the tree in a way that reads sensibly.
-    for (let i = listing.directories.length - 1; i >= 0; i -= 1) {
-      cursor.worklist.push(listing.directories[i]!);
-    }
-    batch.push(...listing.files);
-
-    for (const error of listing.errors) {
-      ctx.log(`Could not read ${path.posix.join(root.name, error.relPath)}: ${error.message}`);
-    }
-
-    if (batch.length >= batchSize) flush();
-
-    if (config.schedule.interFileDelayMs > 0 && cursor.dirsDone % 20 === 0) {
-      await new Promise((resolve) => setTimeout(resolve, config.schedule.interFileDelayMs));
-    }
-  }
-
-  flush();
-  return false;
 }
 
 function checkMassDeletion(

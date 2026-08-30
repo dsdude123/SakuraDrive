@@ -131,32 +131,37 @@ ls: cannot access '/mnt/c/PoolDisks/DRIVEPOOL16': Input/output error
 That is drvfs refusing the traversal, not a permission or timing problem, and it does not
 vary by disk — measured on this host after mounting all fourteen.
 
-### So the agent reads them instead
+### The agent reads every root
 
-Drive letters would work, and `-AssignDriveLetter` still does it, but it is a dead end as
-an architecture: 26 letters minus what is in use, and the container's plumbing deciding
-how the host may be laid out.
+Not just the letterless ones — **all of them**. Supporting two paths would mean two sets
+of failure modes and a setting nobody should have to think about, and the container has
+no path to most of these volumes anyway.
 
-Set the catalog root's **Read by** to *The Windows agent* and give it the volume GUID
-path. No letter, no mount point, no bind mount:
+Drive letters are no longer needed for cataloguing at all. `-AssignDriveLetter` still
+exists if you want letters for your own reasons, but SakuraDrive does not care either
+way.
+
+Configure each root in **Settings → Catalog roots** with the volume GUID path:
 
 ```
 \\?\Volume{9f3a...}\PoolPart.{d304fce8...}
 ```
 
-`dpcmd list-poolparts` prints exactly those paths, and the agent already resolves them —
-it is how pool membership has always been read.
+You should not have to type that. The agent reports every pool part it finds with each
+poll, and the root editor offers them in a list — pick the label off the caddy and the
+path, pool id and drive label are filled in.
 
 The agent then takes catalog scan and hash jobs from the server and streams results back.
 The server keeps the schedule, the catalog run, the cursor and the deletion rules, so a
-scan pauses at the window edge and resumes where it stopped exactly as a bind-mounted
-root does. `docs/ARCHITECTURE.md`, "Who reads the disks", has the split in full.
+scan pauses at the window edge and resumes where it stopped. `docs/ARCHITECTURE.md`,
+"Who reads the disks", has the split in full and the three failure modes.
 
-Set `CollectCatalogJobs` to `false` in `agent.config.json` if you want the agent to report
-health only and never take cataloguing work.
+Set `CollectCatalogJobs` to `false` in `agent.config.json` if you want the agent to
+report health only and never take cataloguing work.
 
-The volumes page shows each volume's mount point, or "not mounted" when it has neither
-a letter nor a folder — which is exactly the set of disks that still need this.
+The volumes page shows each volume's letter or mount point, or "not mounted" when it has
+neither. That is now informational rather than a prerequisite: a volume with no letter at
+all is catalogued exactly like one with a letter.
 
 ## DrivePool
 

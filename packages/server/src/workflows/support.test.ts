@@ -133,44 +133,120 @@ describe('maintenance: configured roots stay reachable', () => {
     return workflow.run(context);
   };
 
-  it('is quiet while every root is readable', async () => {
+  /**
+   * Reachability is now the agent's word for it. The container has no path to most of
+   * these volumes -- WSL2 only surfaces lettered drives -- so "can I open this
+   * directory?" is not a question it can ask. What it can do is check the pool parts
+   * and volumes the agent last reported, which is a better question anyway: it
+   * distinguishes "the disk dropped out of the pool" from "nobody has told me anything".
+   */
+  const seenAgent = () => {
+    db.prepare(
+      `INSERT INTO agents (hostname, agent_version, protocol_version, first_seen_at, last_report_at)
+       VALUES ('tokyo-3', '1.0.0', 1, 'now', 'now')`,
+    ).run();
+  };
+  const seenPart = (label: string, path: string, missing = 0) => {
+    db.prepare(
+      `INSERT INTO pool_parts (pool_id, part_id, name, volume_label, path, missing, last_seen_at)
+       VALUES ('hdd', ?, ?, ?, ?, ?, 'now')`,
+    ).run(`hdd:${label}`, label, label, path, missing);
+  };
+
+  it('is quiet while the agent can see every root', async () => {
+    seenAgent();
+    seenPart('DRIVEPOOL16', '\\\\?\\Volume{a}\\PoolPart.d304fce8');
     settings.update({
-      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', containerPath: temp.path }] },
+      catalog: {
+        roots: [
+          {
+            id: 'r1',
+            name: 'DRIVEPOOL16',
+            hostPath: '\\\\?\\Volume{a}\\PoolPart.d304fce8',
+            driveLabel: 'DRIVEPOOL16',
+          },
+        ],
+      },
     });
     const result = await run();
-    expect(result.stats!.unreadableRoots).toBe(0);
+    expect(result.stats!.unreachableRoots).toBe(0);
     expect(alerts.list().alerts.filter((alert) => alert.category === 'catalog')).toHaveLength(0);
   });
 
-  it('raises a critical alert for a root that has gone, without waiting for a scan', async () => {
+  it('raises a critical alert for a root the agent never reported', async () => {
+    seenAgent();
     settings.update({
-      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', containerPath: `${temp.path}/gone` }] },
+      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', hostPath: 'J:\\\\', driveLabel: 'GONE' }] },
     });
     const result = await run();
-    expect(result.stats!.unreadableRoots).toBe(1);
+    expect(result.stats!.unreachableRoots).toBe(1);
 
     const alert = alerts.list().alerts.find((entry) => entry.category === 'catalog')!;
     expect(alert.severity).toBe('critical');
     expect(alert.title).toContain('HDD Pool');
-    expect(alert.detail).toContain('disk is offline');
+    expect(alert.detail).toContain('offline');
   });
 
-  it('clears the alert once the mount comes back', async () => {
+  // DrivePool saying a part is missing is a stronger signal than silence: the disk was
+  // in the pool and is not now.
+  it('raises one for a pool part DrivePool reports as missing', async () => {
+    seenAgent();
+    seenPart('DRIVEPOOL16', '\\\\?\\Volume{a}\\PoolPart.d304fce8', 1);
     settings.update({
-      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', containerPath: `${temp.path}/later` }] },
+      catalog: {
+        roots: [
+          {
+            id: 'r1',
+            name: 'DRIVEPOOL16',
+            hostPath: '\\\\?\\Volume{a}\\PoolPart.d304fce8',
+            driveLabel: 'DRIVEPOOL16',
+          },
+        ],
+      },
+    });
+    expect((await run()).stats!.unreachableRoots).toBe(1);
+    expect(
+      alerts.list().alerts.find((entry) => entry.category === 'catalog')!.detail,
+    ).toContain('dropped out');
+  });
+
+  it('clears the alert once the disk comes back', async () => {
+    seenAgent();
+    settings.update({
+      catalog: {
+        roots: [
+          {
+            id: 'r1',
+            name: 'DRIVEPOOL16',
+            hostPath: '\\\\?\\Volume{a}\\PoolPart.d304fce8',
+            driveLabel: 'DRIVEPOOL16',
+          },
+        ],
+      },
     });
     await run();
     expect(alerts.list().alerts.some((alert) => alert.category === 'catalog')).toBe(true);
 
-    (await import('node:fs')).mkdirSync(`${temp.path}/later`, { recursive: true });
+    seenPart('DRIVEPOOL16', '\\\\?\\Volume{a}\\PoolPart.d304fce8');
     await run();
     expect(alerts.list().alerts.some((alert) => alert.category === 'catalog')).toBe(false);
   });
 
-  it('ignores roots the operator disabled', async () => {
+  // A fresh install has no agent yet. Alerting on that would fire on every new
+  // deployment, and the agent-freshness alert already covers a host that never checks in.
+  it('says nothing at all before any agent has reported', async () => {
     settings.update({
-      catalog: { roots: [{ id: 'r1', name: 'Off', containerPath: '/nope', enabled: false }] },
+      catalog: { roots: [{ id: 'r1', name: 'HDD Pool', hostPath: 'J:\\\\', driveLabel: 'X' }] },
     });
-    expect((await run()).stats!.unreadableRoots).toBe(0);
+    expect((await run()).stats!.unreachableRoots).toBe(0);
+    expect(alerts.list().alerts.filter((alert) => alert.category === 'catalog')).toHaveLength(0);
+  });
+
+  it('ignores roots the operator disabled', async () => {
+    seenAgent();
+    settings.update({
+      catalog: { roots: [{ id: 'r1', name: 'Off', hostPath: 'H:\\\\', enabled: false }] },
+    });
+    expect((await run()).stats!.unreachableRoots).toBe(0);
   });
 });

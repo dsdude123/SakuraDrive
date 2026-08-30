@@ -1,5 +1,3 @@
-import { isReadableDirectory } from '../util/fs-walk.js';
-import { normalizeRootPath } from '@sakuradrive/shared';
 import type { AgentService } from '../services/agent-service.js';
 import type { AgentJobService } from '../services/agent-job-service.js';
 import type { AlertService } from '../services/alert-service.js';
@@ -46,7 +44,7 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
       const config = settings.get();
 
       agents.checkAgentFreshness();
-      const unreadable = await checkRootsReadable(deps);
+      const unreachable = checkRootsReachable(deps);
 
       const timeSeries = agents.prune();
       const alertsPruned = alerts.prune(config.general.alertHistoryDays);
@@ -68,7 +66,7 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
       db.pragma('incremental_vacuum');
 
       const stats = {
-        unreadableRoots: unreadable,
+        unreachableRoots: unreachable,
         smartRows: timeSeries.smart,
         performanceRows: timeSeries.performance,
         primoCacheRows: timeSeries.primoCache,
@@ -81,7 +79,7 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
       };
       ctx.log(
         `Pruned ${Object.values(stats).reduce((sum, value) => sum + value, 0).toLocaleString()} rows` +
-          (unreadable > 0 ? `; ${unreadable} configured root(s) unreadable` : ''),
+          (unreachable > 0 ? `; ${unreachable} configured root(s) unreachable` : ''),
       );
       return { state: 'completed', stats };
     },
@@ -97,29 +95,66 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
  * either a serious hardware failure or a misconfiguration, and in both cases
  * monitoring is silently blind until it is fixed.
  */
-async function checkRootsReadable(deps: MaintenanceDeps): Promise<number> {
+function checkRootsReachable(deps: MaintenanceDeps): number {
   const roots = deps.settings.get().catalog.roots.filter((root) => root.enabled);
-  let unreadable = 0;
+  if (roots.length === 0) return 0;
+
+  // Nothing has reported yet, so nothing is known to be wrong. The agent-freshness
+  // alert covers a host that never checks in; this one must not double up on it.
+  const anyAgent =
+    (deps.db.prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM agents').get()?.n ?? 0) > 0;
+  if (!anyAgent) return 0;
+
+  const parts = deps.db
+    .prepare<[], { path: string | null; volume_label: string | null; missing: number }>(
+      'SELECT path, volume_label, missing FROM pool_parts',
+    )
+    .all();
+  const volumes = deps.db
+    .prepare<[], { label: string | null }>('SELECT label FROM volumes')
+    .all();
+
+  const normalise = (value: string | null | undefined) => (value ?? '').trim().toLowerCase();
+  let unreachable = 0;
 
   for (const root of roots) {
-    const path = normalizeRootPath(root.containerPath);
     const dedupeKey = `catalog:${root.id}:unreadable`;
-    if (await isReadableDirectory(path)) {
+    const wantedPath = normalise(root.hostPath);
+    const wantedLabel = normalise(root.driveLabel);
+
+    const part = parts.find(
+      (candidate) =>
+        (wantedPath !== '' && normalise(candidate.path) === wantedPath) ||
+        (wantedLabel !== '' && normalise(candidate.volume_label) === wantedLabel),
+    );
+    const volumeSeen =
+      wantedLabel !== '' && volumes.some((volume) => normalise(volume.label) === wantedLabel);
+
+    if (part && part.missing === 0) {
       deps.alerts.resolve(dedupeKey);
       continue;
     }
-    unreadable += 1;
+    if (!part && volumeSeen) {
+      // Not a pool member, but the agent can see the volume. Fine.
+      deps.alerts.resolve(dedupeKey);
+      continue;
+    }
+
+    unreachable += 1;
+    const reason = part
+      ? 'DrivePool reports this pool part as missing, which means the disk has dropped out of the pool.'
+      : 'The agent did not report a volume or pool part matching this root, so either the disk is offline or the path is wrong.';
     deps.alerts.raise({
       dedupeKey,
       category: 'catalog',
       severity: 'critical',
-      title: `Catalog root "${root.name}" is not readable`,
+      title: `Catalog root "${root.name}" is not reachable`,
       detail:
-        `${path} cannot be opened inside the container, so this root is not being catalogued, hashed or checked. ` +
-        'Either the bind mount has gone or the underlying disk is offline — both are worth looking at now. ' +
-        'The existing catalog for this root is left untouched in the meantime.',
-      context: { root: root.name, containerPath: path, hostPath: root.hostPath },
+        `${reason} This root is not being catalogued, hashed or checked, and monitoring of it is ` +
+        'silently blind until it is fixed. The existing catalog for this root is left untouched.',
+      context: { root: root.name, hostPath: root.hostPath, driveLabel: root.driveLabel },
     });
   }
-  return unreadable;
+  return unreachable;
 }
+

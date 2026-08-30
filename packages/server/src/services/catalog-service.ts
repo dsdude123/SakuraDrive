@@ -15,8 +15,20 @@ import {
   type ScanRoot,
 } from '@sakuradrive/shared';
 import { nowIso, type Db } from '../db/index.js';
-import type { WalkedFile } from '../util/fs-walk.js';
 import type { SettingsService } from './settings-service.js';
+
+/**
+ * One file as recorded into the catalog. Produced by the agent's walk; the shape
+ * predates that and is kept because it is the vocabulary the whole write path speaks.
+ */
+export interface WalkedFile {
+  /** Root-relative POSIX path, original casing preserved. */
+  relPath: string;
+  name: string;
+  sizeBytes: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
 
 export interface CatalogRunStats {
   filesSeen: number;
@@ -1243,6 +1255,17 @@ export class CatalogService {
           WHERE id = ?`,
       )
       .run(hash, algorithm, nowIso(), sizeBytes, mtimeMs, fileId);
+  }
+
+  /** Files whose last hash attempt failed, so the workflow can alert on them. */
+  countHashErrors(rootId: string): number {
+    return (
+      this.db
+        .prepare<[string], { n: number }>(
+          'SELECT COUNT(*) AS n FROM files WHERE root_id = ? AND deleted_at IS NULL AND hash_error IS NOT NULL',
+        )
+        .get(rootId)?.n ?? 0
+    );
   }
 
   recordHashError(fileId: number, message: string): void {

@@ -11,7 +11,6 @@ import {
   normalizeRelPath,
   normalizeRootPath,
   stripPoolPartPrefix,
-  toHostPath,
   toPosix,
   toWindows,
 } from './paths.js';
@@ -104,14 +103,3 @@ describe('DrivePool helpers', () => {
   });
 });
 
-describe('toHostPath', () => {
-  it('translates a container path back to the Windows path the user recognises', () => {
-    expect(toHostPath('/mnt/pools/hdd', 'P:\\', '/mnt/pools/hdd/Media/Movies/a.mkv')).toBe(
-      'P:\\Media\\Movies\\a.mkv',
-    );
-  });
-
-  it('returns the host root for the root itself', () => {
-    expect(toHostPath('/mnt/pools/hdd', 'P:', '/mnt/pools/hdd')).toBe('P:');
-  });
-});

@@ -85,7 +85,7 @@ beforeEach(() => {
   alerts = new AlertService(db);
   settings.update({
     backup: { enabled: true, mode: 'kopia', expectations: [EXPECTATION] },
-    catalog: { roots: [{ id: ROOT_ID, name: 'Pool', containerPath: '/mnt/pool' }] },
+    catalog: { roots: [{ id: ROOT_ID, name: 'Pool', hostPath: 'J:\\' }] },
   });
 });
 

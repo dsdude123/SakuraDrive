@@ -324,6 +324,15 @@ export const agentHashResultSchema = z.object({
   /** Re-stated at hash time: a file that changed under us must not be recorded. */
   sizeBytes: z.number().nonnegative().nullish(),
   mtimeMs: z.number().nullish(),
+  /**
+   * Set when the agent was given an expected hash, got a different one, and read the
+   * file a second time: true if both reads agreed. A controller glitch produces a
+   * different hash without the bytes on disk having changed, so a single disagreeing
+   * read is a read fault, not bit rot. The second read happens on the agent because
+   * that is where the file is -- asking for it from here would be another round trip
+   * over the very disk that just misbehaved.
+   */
+  verified: z.boolean().nullish(),
   error: z.string().nullish(),
 });
 export type AgentHashResult = z.infer<typeof agentHashResultSchema>;
@@ -345,8 +354,18 @@ export const agentJobSchema = z.object({
   /** `catalog.hash` only: exactly which files to hash, and how. */
   hashAlgorithm: z.string().default('sha256'),
   files: z
-    .array(z.object({ fileId: z.number().int(), relPath: nonEmpty, sizeBytes: z.number() }))
+    .array(
+      z.object({
+        fileId: z.number().int(),
+        relPath: nonEmpty,
+        sizeBytes: z.number(),
+        /** What we hold. A different result means a re-read before believing it. */
+        expectedHash: z.string().nullish(),
+      }),
+    )
     .default([]),
+  /** Bytes per second the agent should not exceed while hashing. 0 is unthrottled. */
+  maxBytesPerSecond: z.number().nonnegative().default(0),
 });
 export type AgentJob = z.infer<typeof agentJobSchema>;
 

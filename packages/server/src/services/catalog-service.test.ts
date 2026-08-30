@@ -12,13 +12,13 @@ function configurePoolRoots(): void {
   settings.update({
     catalog: {
       roots: [
-        { id: 'pool', name: 'HDD Pool', kind: 'pool', poolId: 'hdd', containerPath: '/mnt/pool' },
+        { id: 'pool', name: 'HDD Pool', kind: 'pool', poolId: 'hdd', hostPath: 'J:\\' },
         {
           id: 'part27',
           name: 'DRIVEPOOL27',
           kind: 'poolpart',
           poolId: 'hdd',
-          containerPath: '/mnt/parts/27',
+          hostPath: 'E:\\',
           driveLabel: 'DRIVEPOOL27',
         },
         {
@@ -26,7 +26,7 @@ function configurePoolRoots(): void {
           name: 'DRIVEPOOL28',
           kind: 'poolpart',
           poolId: 'hdd',
-          containerPath: '/mnt/parts/28',
+          hostPath: 'F:\\',
           driveLabel: 'DRIVEPOOL28',
         },
       ],
@@ -186,7 +186,7 @@ describe('disaster recovery', () => {
             name: 'DRIVEPOOL27',
             kind: 'poolpart',
             poolId: 'hdd',
-            containerPath: '/mnt/parts/27',
+            hostPath: 'E:\\',
             driveLabel: 'DRIVEPOOL27',
           },
         ],

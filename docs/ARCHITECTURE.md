@@ -140,51 +140,65 @@ anywhere counts as missing from the pool.
 
 ## Who reads the disks
 
-Every catalog root declares a `source`.
+**The agent. All of it.** There is no second path and no setting.
 
-**`container`** walks a bind-mounted path. Simple, and right for any volume with a
-drive letter.
+The container cannot read most of these volumes and never will. WSL2 only surfaces
+lettered drives under `/mnt/<letter>`, and a pool with more disks than spare letters has
+members with none. Folder mount points look like the answer and are not: drvfs refuses
+to cross a reparse point into another volume and returns `EIO`.
 
-**`agent`** has the Windows agent walk the volume and stream the inventory back.
+Handing out drive letters would work until it did not — 26 minus what is in use, and the
+container's plumbing dictating how the host may be laid out. Supporting *both* would have
+been worse still: two code paths, two sets of failure modes, and a setting nobody should
+have to reason about. So the reading happens on the side of the boundary that can see
+everything, for every root, always. The agent opens a volume by GUID path,
+`\\?\Volume{guid}\PoolPart.guid`, and needs no letter, no mount point and no bind
+mount. Add a disk, re-letter the array, move to a bigger machine: nothing in the
+container's configuration changes, because it has no opinion about the host's disks.
 
-The second exists because the first cannot work for part of a real array. WSL2 only
-surfaces lettered drives under `/mnt/<letter>`, and a pool with more disks than spare
-letters has members with none. Folder mount points look like the answer and are not:
-drvfs refuses to cross a reparse point into another volume and returns `EIO`. So for
-those disks there is no path into the container at all, and no arrangement of the
-container can create one.
-
-Handing out drive letters would work until it did not — 26 minus what is already in use,
-and the container's plumbing dictating how the host is laid out. The reading moves
-instead to the side of the boundary that can already see everything. The agent opens a
-volume by GUID path, `\\?\Volume{guid}\PoolPart.guid`, and needs no letter, no mount
-point and no bind mount.
+It is also faster. A native read beats the same bytes pulled through drvfs, which at
+95 TB is measured in days of hashing.
 
 What does *not* move is the interesting part:
 
-| Stays on the server | Done by the agent |
+| Server | Agent |
 | --- | --- |
 | The I/O window and when to pause | Enumerating a directory |
 | The catalog run and its cursor | Reading a file's size and mtime |
 | What "created", "modified" and "deleted" mean | Computing a hash |
-| The deletion sweep, and refusing to run it on a partial scan | |
+| Whether a hash mismatch is bit rot | Re-reading once when a hash disagrees |
+| The deletion sweep, and refusing it after a partial scan | |
 | Duplication resolution, dir rollups, the pool view | |
 
-Batches land through the same `recordFiles` path a local walk uses, so there is one
-implementation of what a scan means and the agent stays a pair of hands.
+The agent reads bytes; it holds no opinions. Batches land through the same `recordFiles`
+path the catalog has always used, so "what a scan means" has one implementation.
 
-The schedule reaches across the process boundary through the reply to each batch. The
-agent posts what it found and asks, in effect, "more?"; when the window closes the
-server says no, and the agent stops at that batch boundary and returns its cursor. It
-knows nothing about schedules, and a paused scan resumes at the directory it stopped on.
+### How the window crosses the process boundary
 
-Failure is treated the same as an unreadable bind mount: an agent that dies mid-tree has
-its job requeued after five minutes with the cursor intact, and the catalog run it was
-feeding is abandoned rather than swept. **A half-walked tree is never read as
-deletions** — the guarantee the disaster-recovery report depends on.
+The agent posts a batch and, in effect, asks "more?". The reply says yes or no. When the
+window closes the server says no, and the agent stops at that batch boundary and returns
+its cursor. It knows nothing about schedules, and a paused scan resumes at the directory
+it stopped on rather than re-walking the tree.
 
-It is also simply faster. A native read beats the same bytes pulled through drvfs, which
-matters most for hashing 95 TB.
+### When the agent is not there
+
+Three failure modes, each with a defined outcome:
+
+- **Job never claimed** — the agent is not running. After `agentClaimTimeoutSeconds` the
+  job is cancelled and the scan fails loudly. Waiting forever would leave the workflow
+  looking busy while nothing at all happened, which is the worst kind of failure because
+  it does not look like one.
+- **Agent goes quiet mid-scan** — a reboot, say. The job is requeued after five minutes
+  with its cursor intact, and picked up when the agent returns.
+- **Job fails** — a critical alert, and the catalog is left exactly as it was.
+
+In all three, **a half-walked tree is never read as deletions**. That is the guarantee
+the disaster-recovery report rests on, and it is why an unfinished scan abandons its
+catalog run rather than completing it.
+
+Reachability is judged from what the agent last reported rather than from a `stat` the
+container cannot perform — which is a better question anyway, because it distinguishes
+"DrivePool says this part is missing" from "nobody has told me anything".
 
 ## Disaster recovery, precisely
 

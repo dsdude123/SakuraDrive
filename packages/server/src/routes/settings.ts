@@ -10,11 +10,10 @@ import {
   settingsSchema,
 } from '@sakuradrive/shared';
 import type { Services } from '../services/container.js';
-import { isReadableDirectory } from '../util/fs-walk.js';
 import { errorMessage, parseBody, parseQuery } from './helpers.js';
 
 export function registerSettingsRoutes(app: FastifyInstance, services: Services): void {
-  const { settings, catalog, notifier, kopia, backup } = services;
+  const { settings, catalog, notifier, kopia, backup, db } = services;
 
   app.get('/api/settings', async () => {
     const config = settings.get();
@@ -102,26 +101,33 @@ export function registerSettingsRoutes(app: FastifyInstance, services: Services)
     };
   });
 
-  /** Check a bind mount before the operator saves a root that does not exist. */
-  app.get('/api/settings/check-path', async (request, reply) => {
-    const query = parseQuery(z.object({ path: z.string().min(1) }), request, reply);
-    if (!query) return reply;
-    const readable = await isReadableDirectory(query.path);
-    let entries: string[] = [];
-    if (readable) {
-      try {
-        entries = fs.readdirSync(query.path).slice(0, 20);
-      } catch {
-        entries = [];
-      }
-    }
+  /**
+   * The pool parts the agent has actually seen, so a root can be configured by picking
+   * one rather than by typing a volume GUID. `dpcmd list-poolparts` reports these paths
+   * and the agent forwards them with every poll, which is what makes a letterless disk
+   * addressable at all.
+   */
+  app.get('/api/catalog/known-paths', async () => {
+    const parts = db
+      .prepare<[], {
+        pool_id: string; volume_label: string | null; drive_letter: string | null;
+        path: string | null; size_bytes: number | null; missing: number;
+      }>(
+        `SELECT pool_id, volume_label, drive_letter, path, size_bytes, missing
+           FROM pool_parts ORDER BY volume_label`,
+      )
+      .all();
     return {
-      path: query.path,
-      readable,
-      entries,
-      hint: readable
-        ? undefined
-        : 'Not visible inside the container. Add a bind mount for this path in docker-compose.yml and restart.',
+      poolParts: parts
+        .filter((part) => part.path)
+        .map((part) => ({
+          poolId: part.pool_id,
+          label: part.volume_label ?? '',
+          driveLetter: part.drive_letter,
+          hostPath: part.path!,
+          sizeBytes: part.size_bytes,
+          missing: part.missing === 1,
+        })),
     };
   });
 

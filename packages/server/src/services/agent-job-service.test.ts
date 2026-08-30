@@ -16,7 +16,6 @@ const ROOT = {
   poolId: 'hdd',
   source: 'agent' as const,
   agentHostname: '',
-  containerPath: '',
   hostPath: '\\\\?\\Volume{9f3a}\\PoolPart.d304fce8',
   driveLabel: 'DRIVEPOOL16',
 };

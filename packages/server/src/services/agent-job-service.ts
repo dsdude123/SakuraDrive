@@ -292,6 +292,7 @@ export class AgentJobService {
       batchSize: payload.batchSize ?? 2000,
       cursor: job.cursor,
       hashAlgorithm: payload.hashAlgorithm ?? 'sha256',
+      maxBytesPerSecond: payload.maxBytesPerSecond ?? 0,
       files: payload.files ?? [],
     };
   }

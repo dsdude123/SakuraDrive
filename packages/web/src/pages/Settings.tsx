@@ -256,8 +256,18 @@ function GeneralTab({
 /* -------------------------------------------------------------------- roots */
 
 function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.Element {
-  const [checking, setChecking] = useState<string | null>(null);
-  const [checks, setChecks] = useState<Record<string, { readable: boolean; hint?: string; entries: string[] }>>({});
+  // The paths the agent has actually seen, so a root is configured by picking one
+  // rather than by typing a volume GUID nobody can be expected to remember.
+  const knownPaths = useQuery<{
+    poolParts: Array<{
+      poolId: string;
+      label: string;
+      driveLetter: string | null;
+      hostPath: string;
+      sizeBytes: number | null;
+      missing: boolean;
+    }>;
+  }>('/api/catalog/known-paths');
   const orphaned = useQuery<{ roots: Array<{ rootId: string; stats: { files: number; bytes: number } }> }>(
     '/api/catalog/orphaned',
   );
@@ -281,12 +291,10 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
       next.catalog.roots.push({
         id: newLocalId('root'),
         name: 'New root',
-        kind: 'pool',
+        kind: 'poolpart',
         poolId: null,
-        source: 'container',
         agentHostname: '',
-        containerPath: '/mnt/pools/hdd',
-        hostPath: 'P:\\',
+        hostPath: '',
         driveLabel: '',
         enabled: true,
         hashEnabled: true,
@@ -298,20 +306,6 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
     });
   };
 
-  const check = async (root: ScanRoot) => {
-    setChecking(root.id);
-    try {
-      const result = await api<{ readable: boolean; hint?: string; entries: string[] }>(
-        '/api/settings/check-path',
-        { query: { path: root.containerPath } },
-      );
-      setChecks((current) => ({ ...current, [root.id]: result }));
-      toast.push(result.readable ? `${root.containerPath} is readable` : (result.hint ?? 'Not readable'),
-        result.readable ? 'success' : 'error');
-    } finally {
-      setChecking(null);
-    }
-  };
 
   return (
     <div className="stack">
@@ -356,17 +350,9 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
         <Card
           key={root.id}
           title={root.name || 'Root'}
-          description={
-            root.source === 'agent'
-              ? `${root.kind} · read by the agent · ${root.hostPath}`
-              : `${root.kind} · ${root.containerPath}`
-          }
+          description={`${root.kind} · ${root.hostPath || 'no path set'}`}
           actions={
             <>
-              <button className="small" disabled={checking === root.id} onClick={() => void check(root)}>
-                {checking === root.id && <span className="spinner" />}
-                Check mount
-              </button>
               <button
                 className="small danger"
                 onClick={() => patch((next) => { next.catalog.roots.splice(index, 1); })}
@@ -376,13 +362,12 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
             </>
           }
         >
-          {checks[root.id] && (
-            <Banner tone={checks[root.id]!.readable ? 'ok' : 'critical'}>
-              {checks[root.id]!.readable
-                ? `Readable — contains ${checks[root.id]!.entries.slice(0, 6).join(', ')}${
-                    checks[root.id]!.entries.length > 6 ? '…' : ''
-                  }`
-                : checks[root.id]!.hint}
+          {knownPaths.data?.poolParts.some(
+            (part) => part.hostPath === root.hostPath && part.missing,
+          ) && (
+            <Banner tone="critical" title="DrivePool reports this part as missing">
+              The pool no longer has a volume holding this path. Either the disk has
+              dropped out or it is offline. The catalog for this root is left untouched.
             </Banner>
           )}
 
@@ -416,60 +401,56 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
               />
             </Field>
             <Field
-              label="Read by"
-              help="A disk with no drive letter cannot be bind-mounted into this container: WSL2 only exposes lettered drives, and it will not follow a folder mount point into another volume. Have the agent read those instead — it has native access to every volume, and the schedule, the catalog and the pause all still work the same way."
-            >
-              <select
-                value={root.source}
-                onChange={(event) =>
-                  patch((next) => {
-                    next.catalog.roots[index]!.source = event.target.value as ScanRoot['source'];
-                  })
-                }
-              >
-                <option value="container">This container, via a bind mount</option>
-                <option value="agent">The Windows agent</option>
-              </select>
-            </Field>
-            {root.source === 'container' && (
-              <Field label="Path inside the container" help="The bind mount target, e.g. /mnt/pools/hdd">
-                <input
-                  type="text"
-                  value={root.containerPath}
-                  onChange={(event) =>
-                    patch((next) => { next.catalog.roots[index]!.containerPath = event.target.value; })
-                  }
-                />
-              </Field>
-            )}
-            <Field
               label="Windows path"
-              help={
-                root.source === 'agent'
-                  ? 'What the agent walks. A volume GUID path works and is the point: \\?\Volume{guid}\PoolPart.guid needs no drive letter.'
-                  : 'Shown in alerts and reports so paths are actionable on the host.'
-              }
+              help="What the agent walks. Every root is read by the agent: most of these volumes have no drive letter, so the container has no path to them at all. A volume GUID path needs none."
             >
               <input
                 type="text"
                 value={root.hostPath}
+                placeholder="\\?\Volume{guid}\PoolPart.{poolGuid}"
                 onChange={(event) => patch((next) => { next.catalog.roots[index]!.hostPath = event.target.value; })}
               />
+              {knownPaths.data && knownPaths.data.poolParts.length > 0 && (
+                <select
+                  value=""
+                  onChange={(event) => {
+                    const chosen = knownPaths.data!.poolParts.find(
+                      (part) => part.hostPath === event.target.value,
+                    );
+                    if (!chosen) return;
+                    patch((next) => {
+                      const target = next.catalog.roots[index]!;
+                      target.hostPath = chosen.hostPath;
+                      target.driveLabel = chosen.label;
+                      target.poolId = chosen.poolId;
+                      target.kind = 'poolpart';
+                      if (!target.name || target.name === 'New root') target.name = chosen.label;
+                    });
+                  }}
+                >
+                  <option value="">Or pick one the agent found…</option>
+                  {knownPaths.data.poolParts.map((part) => (
+                    <option key={part.hostPath} value={part.hostPath}>
+                      {part.label || part.hostPath}
+                      {part.driveLetter ? ` (${part.driveLetter}:)` : ''}
+                      {part.missing ? ' — MISSING' : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
             </Field>
-            {root.source === 'agent' && (
-              <Field
-                label="Agent hostname"
-                help="Leave blank when there is one agent. Set it when several report and only one can see this disk."
-              >
-                <input
-                  type="text"
-                  value={root.agentHostname}
-                  onChange={(event) =>
-                    patch((next) => { next.catalog.roots[index]!.agentHostname = event.target.value; })
-                  }
-                />
-              </Field>
-            )}
+            <Field
+              label="Agent hostname"
+              help="Leave blank when there is one agent. Set it when several report and only one can see this disk."
+            >
+              <input
+                type="text"
+                value={root.agentHostname}
+                onChange={(event) =>
+                  patch((next) => { next.catalog.roots[index]!.agentHostname = event.target.value; })
+                }
+              />
+            </Field>
             <Field label="Drive label" help="The label you wrote on the caddy, e.g. DRIVEPOOL27.">
               <input
                 type="text"

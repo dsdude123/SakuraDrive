@@ -1,16 +1,12 @@
-import path from 'node:path';
 import {
   formatBytes,
-  normalizeRootPath,
-  type HashAlgorithm,
   type ScanRoot,
 } from '@sakuradrive/shared';
 import type { AgentJobService } from '../services/agent-job-service.js';
 import type { AlertService } from '../services/alert-service.js';
 import type { BitrotService } from '../services/bitrot-service.js';
-import type { CatalogService, HashCandidate } from '../services/catalog-service.js';
+import type { CatalogService } from '../services/catalog-service.js';
 import type { SettingsService } from '../services/settings-service.js';
-import { HashAbortedError, hashFile, sleep } from '../util/hash.js';
 import type { WorkflowContext, WorkflowDefinition, WorkflowResult } from './engine.js';
 
 interface HashCursor {
@@ -77,8 +73,14 @@ export function createCatalogHashWorkflow(deps: CatalogHashDeps): WorkflowDefini
     async run(ctx: WorkflowContext): Promise<WorkflowResult> {
       const cursor: HashCursor = { ...emptyCursor(), ...(ctx.getCursor<HashCursor>() ?? {}) };
       const config = settings.get();
-      const roots = hashableRoots();
 
+      // Opt-out is opt-out: "run now" must not hash a pool whose owner turned this off.
+      if (!config.bitrot.enabled) {
+        ctx.log('The bit-rot scan is switched off in settings.');
+        return { state: 'completed' };
+      }
+
+      const roots = hashableRoots();
       if (roots.length === 0) {
         ctx.log('No roots have hashing enabled.');
         return { state: 'completed' };
@@ -98,56 +100,18 @@ export function createCatalogHashWorkflow(deps: CatalogHashDeps): WorkflowDefini
 
       for (; cursor.rootIndex < roots.length; cursor.rootIndex += 1) {
         const root = roots[cursor.rootIndex]!;
-
-        // A root the container cannot read cannot be hashed here either. The agent has
-        // the file open natively anyway, which is faster than reading it back through
-        // drvfs would have been even where that was possible.
-        if (root.source === 'agent') {
-          const paused = await hashViaAgent(ctx, { deps, root, algorithm, cursor, concurrency });
-          if (paused) {
-            ctx.setCursor(cursor);
-            return { state: 'paused' };
-          }
-          continue;
-        }
-
-        const rootPath = normalizeRootPath(root.containerPath);
-
-        for (;;) {
-          if (!ctx.shouldContinue()) {
-            ctx.setCursor(cursor);
-            ctx.log(`Paused after hashing ${cursor.hashed.toLocaleString()} files`);
-            return { state: 'paused' };
-          }
-
-          const batch = catalog.hashQueue(
-            root.id,
-            config.catalog.rehashIntervalDays,
-            concurrency * 4,
-            root.minHashSizeBytes,
-            root.maxHashSizeBytes,
-          );
-          if (batch.length === 0) break;
-
-          await processBatch(ctx, {
-            batch,
-            rootPath,
-            rootId: root.id,
-            rootName: root.name,
-            algorithm,
-            maxBytesPerSecond,
-            concurrency,
-            cursor,
-            deps,
-          });
-
-          if (config.schedule.interFileDelayMs > 0) {
-            await sleep(config.schedule.interFileDelayMs, ctx.signal).catch(() => {});
-          }
+        if (await hashViaAgent(ctx, { deps, root, algorithm, cursor, concurrency })) {
+          ctx.setCursor(cursor);
+          ctx.log(`Paused after hashing ${cursor.hashed.toLocaleString()} files`);
+          return { state: 'paused' };
         }
       }
 
       bitrot.syncAlert();
+      cursor.errors = hashableRoots().reduce(
+        (total, root) => total + catalog.countHashErrors(root.id),
+        0,
+      );
       if (cursor.errors > 0) {
         alerts.raise({
           dedupeKey: 'catalog:hash-errors',
@@ -180,25 +144,15 @@ export function createCatalogHashWorkflow(deps: CatalogHashDeps): WorkflowDefini
   };
 }
 
-interface BatchArgs {
-  batch: HashCandidate[];
-  rootPath: string;
-  rootId: string;
-  rootName: string;
-  algorithm: HashAlgorithm;
-  maxBytesPerSecond: number;
-  concurrency: number;
-  cursor: HashCursor;
-  deps: CatalogHashDeps;
-}
 
 /**
- * Hash a root the container cannot read, by asking the agent to.
+ * Hash a root by asking the agent to.
  *
- * Same queue as the scan: the server decides which files are due a hash and when the
- * window is open, the agent opens them. It also happens to be the faster arrangement --
- * a native read beats the same bytes pulled back through drvfs -- but the reason it
- * exists is that for a volume with no drive letter there is no drvfs path at all.
+ * The server decides which files are due a hash, in what order, and when the window is
+ * open; the agent opens them. It has to be this way round for most of these volumes --
+ * the container has no path to a disk without a drive letter -- and it is the better
+ * arrangement regardless, since a native read beats the same bytes pulled through
+ * drvfs. At 95 TB that difference is measured in days.
  *
  * Returns true if the window closed before the queue emptied.
  */
@@ -235,10 +189,14 @@ async function hashViaAgent(
       catalogRunId: null,
       payload: {
         hashAlgorithm: algorithm,
+        maxBytesPerSecond: Math.round(config.schedule.maxHashMBps * 1024 * 1024),
         files: batch.map((file) => ({
           fileId: file.id,
           relPath: file.relPath,
           sizeBytes: file.sizeBytes,
+          // What we hold. A different result means the agent re-reads before we
+          // believe it: a controller glitch is not bit rot.
+          expectedHash: file.hash,
         })),
       },
     });
@@ -248,12 +206,29 @@ async function hashViaAgent(
       const current = agentJobs.byId(job.id);
       if (!current) return false;
 
+      // Nobody has taken it. Waiting forever would leave the workflow looking busy while
+      // nothing at all is happening, which is the worst kind of failure: it does not look
+      // like one.
+      if (current.state === 'queued') {
+        const waited = (Date.now() - Date.parse(current.createdAt)) / 1000;
+        if (waited > config.catalog.agentClaimTimeoutSeconds) {
+          agentJobs.cancel(
+            job.id,
+            `No agent claimed this job within ${Math.round(waited)}s. Is the agent running on the host?`,
+          );
+        }
+      }
+
       if (!ctx.shouldContinue() && !cancelRequested) {
         agentJobs.requestCancel(job.id);
         cancelRequested = true;
       }
 
-      const stats = current.stats as { filesSeen?: number; dirsDone?: number; dirsRemaining?: number };
+      const stats = current.stats as {
+        filesSeen?: number;
+        dirsDone?: number;
+        dirsRemaining?: number;
+      };
       ctx.setProgress({
         done: cursor.hashed + (stats.dirsDone ?? 0),
         total: cursor.hashed + (stats.dirsDone ?? 0) + (stats.dirsRemaining ?? 0),
@@ -277,98 +252,4 @@ async function hashViaAgent(
       await new Promise((resolve) => setTimeout(resolve, config.catalog.agentPollMs));
     }
   }
-}
-
-async function processBatch(ctx: WorkflowContext, args: BatchArgs): Promise<void> {
-  const { batch, concurrency } = args;
-  let index = 0;
-
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      if (!ctx.shouldContinue()) return;
-      const candidate = batch[index];
-      index += 1;
-      if (!candidate) return;
-      await hashOne(ctx, args, candidate);
-    }
-  };
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, batch.length) }, worker));
-}
-
-async function hashOne(ctx: WorkflowContext, args: BatchArgs, candidate: HashCandidate): Promise<void> {
-  const { rootPath, algorithm, maxBytesPerSecond, cursor, deps } = args;
-  const { catalog, bitrot, settings } = deps;
-  const filePath = path.join(rootPath, candidate.relPath);
-
-  let result: Awaited<ReturnType<typeof hashFile>>;
-  try {
-    result = await hashFile(filePath, {
-      algorithm,
-      maxBytesPerSecond,
-      signal: ctx.signal,
-    });
-  } catch (error) {
-    if (error instanceof HashAbortedError) return;
-    cursor.errors += 1;
-    catalog.recordHashError(candidate.id, error instanceof Error ? error.message : String(error));
-    ctx.log(`Could not hash ${candidate.relPath}: ${error instanceof Error ? error.message : error}`);
-    return;
-  }
-
-  const config = settings.get();
-  const previousHash = candidate.hash;
-  const contentShouldBeIdentical =
-    previousHash !== null &&
-    candidate.hashSizeBytes === candidate.sizeBytes &&
-    candidate.hashMtimeMs !== null &&
-    Math.abs(candidate.hashMtimeMs - candidate.mtimeMs) <= config.bitrot.mtimeToleranceMs &&
-    candidate.hashAlgorithm === algorithm;
-
-  if (contentShouldBeIdentical && previousHash !== result.hash) {
-    // Re-read once before believing it: a transient controller glitch produces a
-    // different hash without the bytes on disk having changed at all.
-    let verified = false;
-    if (config.bitrot.verifyOnDetect) {
-      try {
-        const second = await hashFile(filePath, { algorithm, maxBytesPerSecond, signal: ctx.signal });
-        verified = second.hash === result.hash;
-        if (!verified) {
-          ctx.log(`${candidate.relPath}: two reads disagreed — treating as a read fault, not bit rot`);
-        }
-      } catch {
-        verified = false;
-      }
-    }
-
-    const { isNew } = bitrot.record({
-      fileId: candidate.id,
-      rootId: candidate.rootId,
-      relPath: candidate.relPath,
-      sizeBytes: candidate.sizeBytes,
-      mtimeMs: candidate.mtimeMs,
-      expectedHash: previousHash,
-      actualHash: result.hash,
-      hashAlgorithm: algorithm,
-      previousHashedAt: candidate.hashedAt,
-      verified,
-    });
-    if (isNew) cursor.findings += 1;
-    ctx.log(
-      `Suspected bit rot in ${args.rootName}:${candidate.relPath} ` +
-        `(${previousHash.slice(0, 12)} → ${result.hash.slice(0, 12)})`,
-    );
-  }
-
-  catalog.recordHash(candidate.id, result.hash, algorithm, candidate.sizeBytes, candidate.mtimeMs);
-  cursor.hashed += 1;
-  cursor.bytes += result.bytesRead;
-
-  ctx.setProgress({
-    done: cursor.hashed,
-    total: cursor.total,
-    unit: 'files',
-    message: `${args.rootName}: ${candidate.relPath}`,
-    bytes: cursor.bytes,
-  });
 }

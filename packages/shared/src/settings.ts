@@ -26,28 +26,26 @@ export const scanRootSchema = z.object({
   /** Groups `poolpart` roots with their `pool` root. */
   poolId: z.string().nullable().default(null),
   /**
-   * Who reads this root's files.
+   * Which agent reads this root. Blank means the only agent reporting.
    *
-   * `container` walks `containerPath` from inside the container, which needs the volume
-   * bind-mounted and therefore, on WSL2, needs it to have a drive letter.
-   *
-   * `agent` has the Windows agent walk `hostPath` and stream the inventory back. That is
-   * the only option for a disk with no drive letter -- WSL2's drvfs will not follow a
-   * folder mount point into another volume -- and it is the better one generally: the
-   * agent reads natively instead of through drvfs, and the disk layout of the host stops
-   * being a constraint on the container.
+   * Every root is read by the agent. The container has no path to most of these
+   * volumes and never will: WSL2 only surfaces lettered drives, and it will not follow
+   * a folder mount point into another volume. Rather than let that decide how the host
+   * may be laid out -- or spend drive letters on it -- the reading happens on the
+   * Windows side, where every volume is addressable by GUID path whether or not it has
+   * a letter, and where the reads are native rather than through drvfs.
    */
-  source: z.enum(['container', 'agent']).default('container'),
-  /** Which agent owns an `agent` root. Blank means the only agent reporting. */
   agentHostname: z.string().default(''),
-  /** Path inside the container, i.e. the bind mount target. Only for `container` roots. */
-  containerPath: z.string().default(''),
   /**
-   * The Windows path. Shown in the UI and in alerts so paths are actionable, and for an
-   * `agent` root it is what the agent actually walks -- a volume GUID path such as
-   * `\\?\Volume{guid}\PoolPart.guid` works, which is what makes a letterless disk usable.
+   * The Windows path the agent walks.
+   *
+   * A volume GUID path is the normal case and the whole point:
+   * `\\?\Volume{9f3a...}\PoolPart.{d304fce8...}` needs no drive letter, no mount
+   * point and no bind mount. `dpcmd list-poolparts` prints exactly these, and the agent
+   * reports them with every poll, so the interface can offer them rather than ask
+   * anyone to type a GUID.
    */
-  hostPath: z.string().default(''),
+  hostPath: z.string().min(1),
   /** Volume label of the underlying disk, e.g. `DRIVEPOOL27`. */
   driveLabel: z.string().default(''),
   enabled: z.boolean().default(true),
@@ -58,23 +56,6 @@ export const scanRootSchema = z.object({
   /** Skip files smaller/larger than these when hashing. 0 disables the bound. */
   minHashSizeBytes: z.number().int().nonnegative().default(0),
   maxHashSizeBytes: z.number().int().nonnegative().default(0),
-}).superRefine((root, ctx) => {
-  // A root nobody can read is worse than no root: it looks configured and silently
-  // catalogues nothing, so the requirement is checked where the root is defined.
-  if (root.source === 'container' && root.containerPath.trim() === '') {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['containerPath'],
-      message: 'A container root needs the path the volume is bind-mounted at.',
-    });
-  }
-  if (root.source === 'agent' && root.hostPath.trim() === '') {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['hostPath'],
-      message: 'An agent root needs the Windows path the agent should walk.',
-    });
-  }
 });
 export type ScanRoot = z.infer<typeof scanRootSchema>;
 
@@ -218,6 +199,15 @@ export const settingsSchema = z.object({
        * enough that a closing I/O window is acted on promptly, long enough not to spin.
        */
       agentPollMs: z.number().int().min(200).max(60_000).default(2_000),
+      /**
+       * How long a job may sit unclaimed before the scan gives up on it.
+       *
+       * Without this a scan waits forever for an agent that is not running, and the
+       * workflow looks busy while nothing whatsoever is happening -- the worst kind of
+       * failure, because it does not look like one. Comfortably longer than the agent's
+       * own poll interval.
+       */
+      agentClaimTimeoutSeconds: z.number().int().min(5).max(86_400).default(1_800),
     })
     .default({}),
 

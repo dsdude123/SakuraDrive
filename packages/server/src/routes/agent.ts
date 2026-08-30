@@ -9,10 +9,11 @@ import {
 } from '@sakuradrive/shared';
 import { nowIso } from '../db/index.js';
 import type { Services } from '../services/container.js';
+import { applyAgentHashes } from '../services/hash-ingest.js';
 import { parseBody } from './helpers.js';
 
 export function registerAgentRoutes(app: FastifyInstance, services: Services): void {
-  const { agents, agentJobs, auth, catalog, settings, logger } = services;
+  const { agents, agentJobs, auth, bitrot, catalog, db, settings, logger } = services;
 
   /** Bearer token, or null. The agent is a scheduled task: no cookie, no password. */
   const authenticate = (request: { headers: Record<string, unknown> }): string | null => {
@@ -127,7 +128,15 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
     if (job.type === 'catalog.scan' && body.entries.length > 0 && job.catalogRunId !== null) {
       accepted = catalog.recordAgentFiles(job.catalogRunId, root, body.entries);
     } else if (job.type === 'catalog.hash' && body.hashes.length > 0) {
-      accepted = catalog.recordAgentHashes(body.hashes, job.payload.hashAlgorithm as string | undefined);
+      // Bit rot is decided here, not on the agent: the agent reads bytes, it does not
+      // hold opinions about what they mean.
+      const outcome = applyAgentHashes(
+        { db, catalog, bitrot, settings },
+        body.hashes,
+        (job.payload.hashAlgorithm as string | undefined) ?? 'sha256',
+      );
+      accepted = outcome.recorded;
+      if (outcome.findings > 0) bitrot.syncAlert();
     }
 
     for (const error of body.errors) {

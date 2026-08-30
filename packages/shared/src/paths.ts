@@ -2,9 +2,9 @@
  * Path helpers.
  *
  * Everything stored in the catalog is a POSIX-style, root-relative path with no
- * leading slash (`Media/Movies/foo.mkv`). The container sees the pools through bind
- * mounts while the agent and the user think in Windows paths, so translation happens
- * at the edges and the database only ever holds the normalized form.
+ * leading slash (`Media/Movies/foo.mkv`). The agent walks Windows paths and speaks in
+ * backslashes, so normalisation happens at that edge and the database only ever holds
+ * this one form -- which is what lets the same file on two pool disks compare equal.
  */
 
 /** `D:\Media\Movies` -> `D:/Media/Movies`, collapsing duplicate separators. */
@@ -120,11 +120,3 @@ export function isSystemDirName(name: string): boolean {
   return EXCLUDED_LOWER.has(name.toLowerCase());
 }
 
-/** Translate a container path back to the Windows path the user would type. */
-export function toHostPath(containerRoot: string, hostRoot: string, containerPath: string): string {
-  const root = normalizeRootPath(containerRoot);
-  const posix = toPosix(containerPath);
-  const rel = posix.startsWith(root) ? normalizeRelPath(posix.slice(root.length)) : normalizeRelPath(posix);
-  const host = hostRoot.replace(/[\\/]+$/, '');
-  return rel === '' ? host : `${host}\\${toWindows(rel)}`;
-}
