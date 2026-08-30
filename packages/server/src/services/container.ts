@@ -11,6 +11,7 @@ import { WorkflowManager } from '../workflows/engine.js';
 import { createExportBackupWorkflow } from '../workflows/export-backup.js';
 import { createMaintenanceWorkflow } from '../workflows/maintenance-prune.js';
 import { AgentService } from './agent-service.js';
+import { AgentJobService } from './agent-job-service.js';
 import { AlertService } from './alert-service.js';
 import { AuthService } from './auth-service.js';
 import { BackupService } from './backup-service.js';
@@ -30,6 +31,7 @@ export interface Services {
   auth: AuthService;
   agents: AgentService;
   catalog: CatalogService;
+  agentJobs: AgentJobService;
   bitrot: BitrotService;
   backup: BackupService;
   exports: ExportService;
@@ -67,6 +69,7 @@ export function createServices(options: CreateServicesOptions): Services {
   const agents = new AgentService({ db, settings, alerts, logger });
   const catalog = new CatalogService(db, settings);
   const bitrot = new BitrotService(db, alerts);
+  const agentJobs = new AgentJobService(db);
 
   const kopia = (): KopiaClient => {
     if (options.kopiaRunner) return new KopiaClient(options.kopiaRunner);
@@ -109,7 +112,7 @@ export function createServices(options: CreateServicesOptions): Services {
     logger,
     ...(options.now ? { now: options.now } : {}),
   });
-  workflows.register(createCatalogScanWorkflow({ settings, catalog, alerts }));
+  workflows.register(createCatalogScanWorkflow({ settings, catalog, alerts, agentJobs }));
   workflows.register(createCatalogHashWorkflow({ settings, catalog, bitrot, alerts }));
   workflows.register(createDuplicationWorkflow({ db, settings, catalog, alerts }));
   workflows.register(createBackupVerifyWorkflow({ db, settings, backup }));
@@ -127,6 +130,7 @@ export function createServices(options: CreateServicesOptions): Services {
       db,
       settings,
       catalog,
+      agentJobs,
       agents,
       alerts,
       auth,
@@ -144,6 +148,7 @@ export function createServices(options: CreateServicesOptions): Services {
   return {
     config,
     db,
+    agentJobs,
     logger,
     settings,
     alerts,

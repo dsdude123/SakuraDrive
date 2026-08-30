@@ -1,6 +1,7 @@
 import { isReadableDirectory } from '../util/fs-walk.js';
 import { normalizeRootPath } from '@sakuradrive/shared';
 import type { AgentService } from '../services/agent-service.js';
+import type { AgentJobService } from '../services/agent-job-service.js';
 import type { AlertService } from '../services/alert-service.js';
 import type { CatalogService } from '../services/catalog-service.js';
 import type { AuthService } from '../services/auth-service.js';
@@ -15,6 +16,7 @@ export interface MaintenanceDeps {
   settings: SettingsService;
   catalog: CatalogService;
   agents: AgentService;
+  agentJobs: AgentJobService;
   alerts: AlertService;
   auth: AuthService;
   manager: () => WorkflowManager;
@@ -27,7 +29,7 @@ export interface MaintenanceDeps {
  * bound is its own kind of outage.
  */
 export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefinition {
-  const { db, settings, catalog, agents, alerts, auth } = deps;
+  const { db, settings, catalog, agents, agentJobs, alerts, auth } = deps;
 
   return {
     id: 'maintenance.prune',
@@ -48,6 +50,10 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
 
       const timeSeries = agents.prune();
       const alertsPruned = alerts.prune(config.general.alertHistoryDays);
+      // Also put back any agent job whose agent went quiet, so a rebooting host does
+      // not leave a root stuck behind a job nobody is working on.
+      agentJobs.reclaimAbandoned();
+      const agentJobsPruned = agentJobs.prune(config.general.alertHistoryDays);
       const changesPruned = catalog.pruneChanges(config.catalog.changeHistoryRuns);
       const runsPruned = deps.manager().pruneRuns(config.general.workflowRunHistory);
       const sessionsPruned = auth.pruneSessions();
@@ -71,6 +77,7 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
         workflowRuns: runsPruned,
         sessions: sessionsPruned,
         notifications: notificationsPruned,
+        agentJobs: agentJobsPruned,
       };
       ctx.log(
         `Pruned ${Object.values(stats).reduce((sum, value) => sum + value, 0).toLocaleString()} rows` +

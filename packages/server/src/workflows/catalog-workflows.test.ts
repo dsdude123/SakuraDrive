@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { fullSchedule } from '@sakuradrive/shared';
 import { openTestDatabase, type Db } from '../db/index.js';
 import { createSilentLogger } from '../logger.js';
+import { AgentJobService } from '../services/agent-job-service.js';
 import { AlertService } from '../services/alert-service.js';
 import { BitrotService } from '../services/bitrot-service.js';
 import { CatalogService } from '../services/catalog-service.js';
@@ -18,6 +19,7 @@ let settings: SettingsService;
 let alerts: AlertService;
 let catalog: CatalogService;
 let bitrot: BitrotService;
+let agentJobs: AgentJobService;
 let manager: WorkflowManager;
 let temp: ReturnType<typeof createTempDir>;
 
@@ -57,8 +59,9 @@ beforeEach(() => {
   alerts = new AlertService(db);
   catalog = new CatalogService(db, settings);
   bitrot = new BitrotService(db, alerts);
+  agentJobs = new AgentJobService(db);
   manager = new WorkflowManager({ db, settings, logger: createSilentLogger() });
-  manager.register(createCatalogScanWorkflow({ settings, catalog, alerts }));
+  manager.register(createCatalogScanWorkflow({ settings, catalog, alerts, agentJobs }));
   manager.register(createCatalogHashWorkflow({ settings, catalog, bitrot, alerts }));
 });
 
@@ -573,5 +576,189 @@ describe('bit-rot scan', () => {
     const file = catalog.searchFiles({}).files[0]!;
     // md5("hello")
     expect(file.hash).toBe('5d41402abc4b2a76b9719d911017c592');
+  });
+});
+
+/**
+ * Roots the container cannot read at all.
+ *
+ * A pool member with no drive letter is invisible here: WSL2 only surfaces lettered
+ * drives, and drvfs will not follow a folder mount point into another volume. Those
+ * roots are walked by the Windows agent, which has native access to every volume. The
+ * catalog, the run, the cursor and the deletion rules stay on this side; only the
+ * reading moves.
+ */
+describe('an agent-sourced root', () => {
+  const AGENT_ROOT = {
+    id: 'dp16',
+    name: 'DRIVEPOOL16',
+    kind: 'poolpart' as const,
+    poolId: 'hdd',
+    source: 'agent' as const,
+    containerPath: '',
+    hostPath: '\\\\?\\Volume{9f3a}\\PoolPart.d304fce8',
+    driveLabel: 'DRIVEPOOL16',
+  };
+
+  function configureAgentRoot(overrides: Record<string, unknown> = {}) {
+    settings.update({
+      schedule: { heavyIo: fullSchedule() },
+      catalog: { agentPollMs: 200, roots: [{ ...AGENT_ROOT, ...overrides }] },
+    });
+  }
+
+  /** Stand in for the agent: claim the job, post batches, finish. */
+  async function actAsAgent(
+    batches: Array<Array<{ relPath: string; sizeBytes: number; mtimeMs: number }>>,
+    finish: 'completed' | 'paused' | 'failed' = 'completed',
+  ) {
+    let job = agentJobs.claim('tokyo-3');
+    for (let attempt = 0; attempt < 50 && !job; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      job = agentJobs.claim('tokyo-3');
+    }
+    if (!job) throw new Error('the server never queued a job');
+
+    let filesSeen = 0;
+    let bytesSeen = 0;
+    for (const entries of batches) {
+      const root = settings.get().catalog.roots.find((candidate) => candidate.id === job!.rootId)!;
+      catalog.recordAgentFiles(job.catalogRunId!, root, entries);
+      filesSeen += entries.length;
+      bytesSeen += entries.reduce((sum, entry) => sum + entry.sizeBytes, 0);
+      const keepGoing = agentJobs.heartbeat(job.id, { cursor: null, dirsDone: 1, dirsRemaining: 0 });
+      if (!keepGoing) break;
+    }
+    agentJobs.finish(job.id, { state: finish, filesSeen, bytesSeen, dirsDone: batches.length });
+    return job;
+  }
+
+  it('catalogues what the agent reports, with no bind mount anywhere', async () => {
+    configureAgentRoot();
+    const run = manager.start('catalog.scan', { force: true });
+    const agent = actAsAgent([
+      [
+        { relPath: 'Tier1/Movies/a.mkv', sizeBytes: 100, mtimeMs: 1 },
+        { relPath: 'Tier1/Music/b.flac', sizeBytes: 50, mtimeMs: 2 },
+      ],
+    ]);
+    await Promise.all([run, agent]);
+    await manager.drain();
+
+    const stats = catalog.rootStats('dp16');
+    expect(stats.files).toBe(2);
+    expect(stats.bytes).toBe(150);
+    expect(catalog.searchFiles({ rootId: 'dp16' }).files.map((file) => file.relPath).sort()).toEqual([
+      'Tier1/Movies/a.mkv',
+      'Tier1/Music/b.flac',
+    ]);
+  });
+
+  it('applies deletions only when the agent finished the whole tree', async () => {
+    configureAgentRoot();
+    let run = manager.start('catalog.scan', { force: true });
+    await Promise.all([
+      run,
+      actAsAgent([
+        [
+          { relPath: 'Tier1/a.mkv', sizeBytes: 100, mtimeMs: 1 },
+          { relPath: 'Tier1/b.mkv', sizeBytes: 100, mtimeMs: 1 },
+        ],
+      ]),
+    ]);
+    await manager.drain();
+    expect(catalog.rootStats('dp16').files).toBe(2);
+
+    // A second pass that only saw one of them, and did not finish.
+    run = manager.start('catalog.scan', { force: true });
+    await Promise.all([
+      run,
+      actAsAgent([[{ relPath: 'Tier1/a.mkv', sizeBytes: 100, mtimeMs: 1 }]], 'failed'),
+    ]);
+    await manager.drain();
+
+    // Still two: an unfinished scan is not evidence that anything was deleted.
+    expect(catalog.rootStats('dp16').files).toBe(2);
+  });
+
+  it('raises a critical alert when the agent cannot do the scan', async () => {
+    configureAgentRoot();
+    const run = manager.start('catalog.scan', { force: true });
+    await Promise.all([run, actAsAgent([], 'failed')]);
+    await manager.drain();
+
+    const alert = alerts.byKey('catalog:dp16:agent');
+    expect(alert?.severity).toBe('critical');
+    expect(alert?.state).toBe('open');
+  });
+
+  it('clears that alert once a scan gets through', async () => {
+    configureAgentRoot();
+    let run = manager.start('catalog.scan', { force: true });
+    await Promise.all([run, actAsAgent([], 'failed')]);
+    await manager.drain();
+    expect(alerts.byKey('catalog:dp16:agent')?.state).toBe('open');
+
+    run = manager.start('catalog.scan', { force: true });
+    await Promise.all([
+      run,
+      actAsAgent([[{ relPath: 'Tier1/a.mkv', sizeBytes: 1, mtimeMs: 1 }]]),
+    ]);
+    await manager.drain();
+    expect(alerts.byKey('catalog:dp16:agent')?.state).toBe('resolved');
+  });
+
+  it('hands the agent the host path and the globs, not a container path', async () => {
+    configureAgentRoot({ excludeGlobs: ['Temp/**'] });
+    const run = manager.start('catalog.scan', { force: true });
+
+    let job = agentJobs.claim('tokyo-3');
+    for (let attempt = 0; attempt < 50 && !job; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      job = agentJobs.claim('tokyo-3');
+    }
+    const root = settings.get().catalog.roots[0]!;
+    const wire = agentJobs.toWireJob(job!, root);
+    expect(wire.hostPath).toBe('\\\\?\\Volume{9f3a}\\PoolPart.d304fce8');
+    expect(wire.excludeGlobs).toContain('Temp/**');
+
+    agentJobs.finish(job!.id, { state: 'completed', filesSeen: 0, bytesSeen: 0, dirsDone: 0 });
+    await run;
+    await manager.drain();
+  });
+
+  it('normalises the backslashes the agent speaks in', async () => {
+    configureAgentRoot();
+    const run = manager.start('catalog.scan', { force: true });
+    await Promise.all([
+      run,
+      actAsAgent([[{ relPath: 'Tier1\\Movies\\a.mkv', sizeBytes: 10, mtimeMs: 1 }]]),
+    ]);
+    await manager.drain();
+    expect(catalog.searchFiles({ rootId: 'dp16' }).files[0]!.relPath).toBe('Tier1/Movies/a.mkv');
+  });
+
+  it('leaves container roots walking locally, so both can coexist', async () => {
+    writeFile(temp.path, 'Media/local.mkv', 'x');
+    settings.update({
+      schedule: { heavyIo: fullSchedule() },
+      catalog: {
+        agentPollMs: 200,
+        roots: [
+          { id: 'local', name: 'SSD', kind: 'disk', containerPath: temp.path, source: 'container' },
+          AGENT_ROOT,
+        ],
+      },
+    });
+
+    const run = manager.start('catalog.scan', { force: true });
+    await Promise.all([
+      run,
+      actAsAgent([[{ relPath: 'Tier1/remote.mkv', sizeBytes: 5, mtimeMs: 1 }]]),
+    ]);
+    await manager.drain();
+
+    expect(catalog.rootStats('local').files).toBe(1);
+    expect(catalog.rootStats('dp16').files).toBe(1);
   });
 });

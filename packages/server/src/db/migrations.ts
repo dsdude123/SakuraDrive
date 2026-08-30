@@ -424,6 +424,43 @@ export const MIGRATIONS: Migration[] = [
     CREATE INDEX export_records_time ON export_records(created_at DESC);
     `,
   },
+  {
+    version: 2,
+    name: 'agent-jobs',
+    up: `
+    -- Work the server hands to the Windows agent.
+    --
+    -- A pool with more disks than spare drive letters has members the container cannot
+    -- read at all: WSL2 only surfaces lettered drives, and drvfs will not follow a
+    -- folder mount point into another volume. The agent has native access to every
+    -- volume, so for those roots it does the walking and hashing and streams results
+    -- back. The server keeps the schedule, the cursor and the catalog.
+    CREATE TABLE agent_jobs (
+      id               INTEGER PRIMARY KEY,
+      type             TEXT NOT NULL,
+      root_id          TEXT NOT NULL,
+      -- Blank matches whichever agent asks; set when a root belongs to a named host.
+      hostname         TEXT NOT NULL DEFAULT '',
+      -- queued -> claimed -> completed | paused | failed | cancelled
+      state            TEXT NOT NULL DEFAULT 'queued',
+      payload_json     TEXT NOT NULL DEFAULT '{}',
+      cursor_json      TEXT,
+      stats_json       TEXT NOT NULL DEFAULT '{}',
+      error            TEXT,
+      -- Set when the window closes: the next batch response tells the agent to stop.
+      cancel_requested INTEGER NOT NULL DEFAULT 0,
+      workflow_run_id  INTEGER,
+      catalog_run_id   INTEGER,
+      claimed_by       TEXT,
+      created_at       TEXT NOT NULL,
+      claimed_at       TEXT,
+      heartbeat_at     TEXT,
+      finished_at      TEXT
+    );
+    CREATE INDEX agent_jobs_pending ON agent_jobs(state, created_at);
+    CREATE INDEX agent_jobs_root ON agent_jobs(root_id, created_at DESC);
+    `,
+  },
 ];
 
 export function currentSchemaVersion(): number {

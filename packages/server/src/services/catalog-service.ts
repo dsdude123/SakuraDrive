@@ -145,6 +145,82 @@ export class CatalogService {
    * Runs in one transaction — batching is what makes cataloguing millions of files
    * practical, and it keeps the catalog consistent if the process dies mid-scan.
    */
+  /**
+   * Record a batch the agent walked, rather than one this container walked.
+   *
+   * The same write path as a local scan on purpose. Where the bytes were read is a
+   * deployment detail; what a scan *means* -- created, modified, restored, and what the
+   * deletion sweep may then conclude -- has exactly one implementation, here.
+   */
+  recordAgentFiles(
+    runId: number,
+    root: ScanRoot,
+    entries: readonly { relPath: string; sizeBytes: number; mtimeMs: number; ctimeMs?: number }[],
+  ): number {
+    if (entries.length === 0) return 0;
+    const config = this.settings.get();
+    const duplicationFor = createDuplicationResolver(
+      config.duplication.rules.filter(
+        (rule) => rule.poolId === null || rule.poolId === root.poolId || root.poolId === null,
+      ),
+      config.duplication.defaultLevel,
+    );
+
+    const files: WalkedFile[] = entries.map((entry) => {
+      // The agent speaks Windows; the catalog is normalised to forward slashes with the
+      // on-disk casing kept, exactly as the local walker produces.
+      const relPath = entry.relPath.replace(/\\/g, '/').replace(/^\/+/, '');
+      const name = relPath.slice(relPath.lastIndexOf('/') + 1);
+      return {
+        relPath,
+        name,
+        sizeBytes: entry.sizeBytes,
+        mtimeMs: entry.mtimeMs,
+        ctimeMs: entry.ctimeMs ?? 0,
+      };
+    });
+
+    this.recordFiles(runId, root, files, duplicationFor);
+    return files.length;
+  }
+
+  /**
+   * Record hashes the agent computed.
+   *
+   * Size and mtime are re-stated by the agent as of the moment it read the file, and
+   * are stored alongside the hash: bit rot is "content changed while those did not", so
+   * a hash without them cannot be reasoned about later.
+   */
+  recordAgentHashes(
+    results: readonly {
+      fileId: number;
+      hash?: string | null;
+      sizeBytes?: number | null;
+      mtimeMs?: number | null;
+      error?: string | null;
+    }[],
+    algorithm = 'sha256',
+  ): number {
+    let recorded = 0;
+    this.db.transaction(() => {
+      for (const result of results) {
+        if (result.error || !result.hash) {
+          this.recordHashError(result.fileId, result.error ?? 'The agent returned no hash');
+          continue;
+        }
+        this.recordHash(
+          result.fileId,
+          result.hash,
+          algorithm,
+          result.sizeBytes ?? 0,
+          result.mtimeMs ?? 0,
+        );
+        recorded += 1;
+      }
+    })();
+    return recorded;
+  }
+
   recordFiles(
     runId: number,
     root: ScanRoot,

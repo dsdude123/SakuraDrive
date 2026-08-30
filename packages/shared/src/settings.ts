@@ -25,9 +25,28 @@ export const scanRootSchema = z.object({
   kind: z.enum(['pool', 'poolpart', 'disk']).default('pool'),
   /** Groups `poolpart` roots with their `pool` root. */
   poolId: z.string().nullable().default(null),
-  /** Path inside the container, i.e. the bind mount target. */
-  containerPath: z.string().min(1),
-  /** Matching Windows path, shown in the UI and in alerts so paths are actionable. */
+  /**
+   * Who reads this root's files.
+   *
+   * `container` walks `containerPath` from inside the container, which needs the volume
+   * bind-mounted and therefore, on WSL2, needs it to have a drive letter.
+   *
+   * `agent` has the Windows agent walk `hostPath` and stream the inventory back. That is
+   * the only option for a disk with no drive letter -- WSL2's drvfs will not follow a
+   * folder mount point into another volume -- and it is the better one generally: the
+   * agent reads natively instead of through drvfs, and the disk layout of the host stops
+   * being a constraint on the container.
+   */
+  source: z.enum(['container', 'agent']).default('container'),
+  /** Which agent owns an `agent` root. Blank means the only agent reporting. */
+  agentHostname: z.string().default(''),
+  /** Path inside the container, i.e. the bind mount target. Only for `container` roots. */
+  containerPath: z.string().default(''),
+  /**
+   * The Windows path. Shown in the UI and in alerts so paths are actionable, and for an
+   * `agent` root it is what the agent actually walks -- a volume GUID path such as
+   * `\\?\Volume{guid}\PoolPart.guid` works, which is what makes a letterless disk usable.
+   */
   hostPath: z.string().default(''),
   /** Volume label of the underlying disk, e.g. `DRIVEPOOL27`. */
   driveLabel: z.string().default(''),
@@ -39,6 +58,23 @@ export const scanRootSchema = z.object({
   /** Skip files smaller/larger than these when hashing. 0 disables the bound. */
   minHashSizeBytes: z.number().int().nonnegative().default(0),
   maxHashSizeBytes: z.number().int().nonnegative().default(0),
+}).superRefine((root, ctx) => {
+  // A root nobody can read is worse than no root: it looks configured and silently
+  // catalogues nothing, so the requirement is checked where the root is defined.
+  if (root.source === 'container' && root.containerPath.trim() === '') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['containerPath'],
+      message: 'A container root needs the path the volume is bind-mounted at.',
+    });
+  }
+  if (root.source === 'agent' && root.hostPath.trim() === '') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['hostPath'],
+      message: 'An agent root needs the Windows path the agent should walk.',
+    });
+  }
 });
 export type ScanRoot = z.infer<typeof scanRootSchema>;
 
@@ -177,6 +213,11 @@ export const settingsSchema = z.object({
       massDeletionAlertPercent: z.number().min(0).max(100).default(10),
       /** Files written to the catalog per transaction while walking. */
       batchSize: z.number().int().min(50).max(10_000).default(500),
+      /**
+       * How often the scan workflow checks on a job it handed to the agent. Short
+       * enough that a closing I/O window is acted on promptly, long enough not to spin.
+       */
+      agentPollMs: z.number().int().min(200).max(60_000).default(2_000),
     })
     .default({}),
 

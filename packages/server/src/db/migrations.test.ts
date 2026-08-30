@@ -36,6 +36,7 @@ describe('migrations', () => {
       'backup_runs',
       'backup_issues',
       'export_records',
+      'agent_jobs',
     ]) {
       expect(tables, `missing table ${table}`).toContain(table);
     }

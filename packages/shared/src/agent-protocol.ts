@@ -289,6 +289,106 @@ export const agentReportResponseSchema = z.object({
 });
 export type AgentReportResponse = z.infer<typeof agentReportResponseSchema>;
 
+/* ------------------------------------------------------------- agent jobs */
+
+/**
+ * Work the server hands to the agent.
+ *
+ * A disk with no drive letter cannot be bind-mounted into the container -- WSL2's drvfs
+ * will not follow a folder mount point into another volume -- so on a pool with more
+ * disks than spare letters the container simply cannot read the data. The agent can: it
+ * runs on Windows with native access to every volume, including by volume GUID path.
+ *
+ * So for those roots the agent walks and hashes, and streams the results here. The
+ * server still owns the schedule, the pause, the cursor and the catalog; the agent is
+ * the pair of hands, not the brain. That keeps one implementation of "what a scan
+ * means" and makes the container's view of the host irrelevant to the design.
+ */
+export const agentJobTypeSchema = z.enum(['catalog.scan', 'catalog.hash']);
+export type AgentJobType = z.infer<typeof agentJobTypeSchema>;
+
+/** One file the agent found, in the same shape the container-side walker produces. */
+export const agentFileEntrySchema = z.object({
+  /** Root-relative path, forward slashes, original casing. */
+  relPath: nonEmpty,
+  sizeBytes: z.number().nonnegative(),
+  mtimeMs: z.number(),
+  ctimeMs: z.number().default(0),
+});
+export type AgentFileEntry = z.infer<typeof agentFileEntrySchema>;
+
+/** One file the agent hashed, or failed to. */
+export const agentHashResultSchema = z.object({
+  fileId: z.number().int(),
+  hash: z.string().nullish(),
+  /** Re-stated at hash time: a file that changed under us must not be recorded. */
+  sizeBytes: z.number().nonnegative().nullish(),
+  mtimeMs: z.number().nullish(),
+  error: z.string().nullish(),
+});
+export type AgentHashResult = z.infer<typeof agentHashResultSchema>;
+
+export const agentJobSchema = z.object({
+  jobId: z.number().int(),
+  type: agentJobTypeSchema,
+  rootId: nonEmpty,
+  rootName: z.string().default(''),
+  /** The Windows path to walk. A `\\?\Volume{guid}\...` path is valid and expected. */
+  hostPath: nonEmpty,
+  includeGlobs: z.array(z.string()).default([]),
+  excludeGlobs: z.array(z.string()).default([]),
+  followSymlinks: z.boolean().default(false),
+  /** Entries per batch. Bounded so a pause is never more than one batch away. */
+  batchSize: z.number().int().positive().default(2000),
+  /** Opaque to the agent: handed back so a paused scan resumes where it stopped. */
+  cursor: z.unknown().nullish(),
+  /** `catalog.hash` only: exactly which files to hash, and how. */
+  hashAlgorithm: z.string().default('sha256'),
+  files: z
+    .array(z.object({ fileId: z.number().int(), relPath: nonEmpty, sizeBytes: z.number() }))
+    .default([]),
+});
+export type AgentJob = z.infer<typeof agentJobSchema>;
+
+export const agentJobClaimSchema = z.object({
+  hostname: nonEmpty,
+  agentVersion: z.string().default(''),
+});
+
+/** A batch of results, plus where the agent has got to. */
+export const agentJobBatchSchema = z.object({
+  entries: z.array(agentFileEntrySchema).default([]),
+  hashes: z.array(agentHashResultSchema).default([]),
+  /** Directories the agent could not read. Reported, never silently skipped. */
+  errors: z.array(z.object({ relPath: z.string(), message: z.string() })).default([]),
+  cursor: z.unknown().nullish(),
+  /** Progress hint for the interface; the server does not trust it for correctness. */
+  dirsDone: z.number().int().nonnegative().default(0),
+  dirsRemaining: z.number().int().nonnegative().default(0),
+});
+export type AgentJobBatch = z.infer<typeof agentJobBatchSchema>;
+
+export const agentJobBatchResponseSchema = z.object({
+  accepted: z.number().int().nonnegative(),
+  /**
+   * False when the I/O window has closed or the job was cancelled. The agent stops at
+   * this batch boundary and posts `paused`, which is how the schedule reaches across
+   * the process boundary without the agent knowing anything about schedules.
+   */
+  continue: z.boolean(),
+});
+export type AgentJobBatchResponse = z.infer<typeof agentJobBatchResponseSchema>;
+
+export const agentJobFinishSchema = z.object({
+  state: z.enum(['completed', 'paused', 'failed']),
+  cursor: z.unknown().nullish(),
+  error: z.string().nullish(),
+  filesSeen: z.number().int().nonnegative().default(0),
+  bytesSeen: z.number().nonnegative().default(0),
+  dirsDone: z.number().int().nonnegative().default(0),
+});
+export type AgentJobFinish = z.infer<typeof agentJobFinishSchema>;
+
 /**
  * Canonical device key. Serial numbers are the only identifier that survives a
  * controller change or a reboot re-ordering disks, so prefer them and fall back to the
