@@ -38,6 +38,14 @@
     Take the mount points under -MountRoot away again instead of creating them. The
     volume and its contents are untouched; only the path you reach it by is removed.
 
+.PARAMETER AssignDriveLetter
+    Give each selected volume the next free drive letter instead of a folder mount point.
+
+    This is what WSL2 actually needs. drvfs will not cross a folder mount point into
+    another volume -- `ls` on one returns "Input/output error" -- so a mount point is
+    reachable from Windows but not from a container. A lettered volume appears at
+    /mnt/<letter> with no traversal involved. Letters A and B are skipped.
+
 .EXAMPLE
     .\Set-PoolDiskMountPoints.ps1
     The interactive picker.
@@ -55,6 +63,11 @@
     Mount everything that is not already reachable, under C:\PoolDisks.
 
 .EXAMPLE
+    .\Set-PoolDiskMountPoints.ps1 -AssignDriveLetter
+    Give the volumes you pick a drive letter each. Use this when the container has to
+    see them: folder mount points do not survive the trip through WSL2.
+
+.EXAMPLE
     .\Set-PoolDiskMountPoints.ps1 -Label DRIVEPOOL4 -Remove
     Undo one of them.
 
@@ -68,7 +81,8 @@ param(
     [string[]] $Label,
     [switch]   $All,
     [switch]   $ListOnly,
-    [switch]   $Remove
+    [switch]   $Remove,
+    [switch]   $AssignDriveLetter
 )
 
 Set-StrictMode -Version Latest
@@ -187,6 +201,37 @@ function Format-DiskSize {
         $unit++
     }
     return ('{0:0.#} {1}' -f $value, $units[$unit])
+}
+
+<#
+.SYNOPSIS
+    The next free drive letters, in order.
+
+.DESCRIPTION
+    A and B are skipped: they are reserved for floppies and some software still assumes
+    it. Letters already in use are skipped whether they belong to a volume, a mapped
+    network drive or a subst, because Set-Partition will fail on any of them.
+#>
+function Select-FreeDriveLetter {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Used,
+        [Parameter(Mandatory)] [int] $Count
+    )
+
+    $taken = @{}
+    foreach ($letter in $Used) {
+        if ($letter) { $taken[([string]$letter).Trim(':', ' ').ToUpperInvariant()] = $true }
+    }
+
+    $free = [System.Collections.Generic.List[string]]::new()
+    foreach ($code in [int][char]'C'..[int][char]'Z') {
+        if ($free.Count -ge $Count) { break }
+        $letter = [string][char]$code
+        if (-not $taken.ContainsKey($letter)) { $free.Add($letter) }
+    }
+    return $free.ToArray()
 }
 
 <#
@@ -454,6 +499,54 @@ function Add-VolumeMountPoint {
 
 <#
 .SYNOPSIS
+    Give one volume a drive letter.
+
+.DESCRIPTION
+    The fallback when WSL2 cannot follow a folder mount point, which is the usual case:
+    drvfs refuses to cross a reparse point into another volume and returns EIO. A drive
+    letter needs no traversal at all -- the volume simply appears at /mnt/<letter> -- and
+    is the only arrangement WSL is documented to support.
+#>
+function Add-VolumeDriveLetter {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)] $Candidate,
+        [Parameter(Mandatory)] [string] $Letter
+    )
+
+    if ($Candidate.Status -eq 'system') {
+        throw "$($Candidate.Label) is the system or boot volume. Refusing to touch it."
+    }
+    if ($Candidate.Status -eq 'reserved') {
+        throw "$($Candidate.Label) is a Windows recovery or reserved partition, not a data disk. Refusing to touch it."
+    }
+    if ($Candidate.Letter) {
+        Write-Host "  already at $($Candidate.Letter):" -ForegroundColor DarkGray
+        return $false
+    }
+    if ($null -eq $Candidate.DiskNumber -or $null -eq $Candidate.PartitionNumber) {
+        throw "No partition found for $($Candidate.Label). Assign the letter from Disk Management instead."
+    }
+
+    if ($PSCmdlet.ShouldProcess("$($Candidate.Label) (disk $($Candidate.DiskNumber), partition $($Candidate.PartitionNumber))",
+            "Assign drive letter $Letter")) {
+        Set-Partition -DiskNumber $Candidate.DiskNumber -PartitionNumber $Candidate.PartitionNumber `
+            -NewDriveLetter $Letter -ErrorAction Stop
+
+        # Read it back. A letter that did not take would surface much later as an empty
+        # catalog root, which is the worst way to find out.
+        $check = Get-Partition -DiskNumber $Candidate.DiskNumber -PartitionNumber $Candidate.PartitionNumber
+        $paths = @($check.AccessPaths) -join ' '
+        if ($paths -notmatch [regex]::Escape("$($Letter):")) {
+            throw "Windows accepted the letter for $($Candidate.Label) but $($Letter): is not among its access paths."
+        }
+        return $true
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
     Detach a mount point. The volume and its contents are untouched.
 #>
 function Remove-VolumeMountPoint {
@@ -484,7 +577,8 @@ function Invoke-Main {
         [string[]] $Label,
         [switch]   $All,
         [switch]   $ListOnly,
-        [switch]   $Remove
+        [switch]   $Remove,
+        [switch]   $AssignDriveLetter
     )
 
     if (-not $ListOnly) { Assert-Administrator }
@@ -528,7 +622,7 @@ function Invoke-Main {
         $chosen = if ($Remove) { @($candidates | Where-Object { $_.MountFolders.Count -gt 0 }) } else { $invisible }
     }
     else {
-        $verb = if ($Remove) { 'unmount' } else { 'mount' }
+        $verb = if ($Remove) { 'unmount' } elseif ($AssignDriveLetter) { 'give a drive letter' } else { 'mount' }
         $suggestion = ($invisible | ForEach-Object { $_.Index }) -join ','
         Write-Host ''
         # ${verb} braced on purpose: PowerShell allows '?' in a variable name, so "$verb?"
@@ -549,23 +643,57 @@ function Invoke-Main {
         return
     }
 
+    # Letters are allocated up front so the plan can show them, and so two volumes can
+    # never be handed the same one.
+    $letters = @()
+    if ($AssignDriveLetter -and -not $Remove) {
+        $used = @($candidates | ForEach-Object { $_.Letter } | Where-Object { $_ })
+        $letters = @(Select-FreeDriveLetter -Used $used -Count $chosen.Count)
+        if ($letters.Count -lt $chosen.Count) {
+            throw "Only $($letters.Count) drive letter(s) are free and $($chosen.Count) were selected. Select fewer, or free some letters."
+        }
+    }
+
     # ---- confirm the plan ----
     Write-Host ''
     if ($Remove) { Write-Host 'Plan - remove these mount points:' }
+    elseif ($AssignDriveLetter) { Write-Host 'Plan - give these volumes drive letters:' }
     else { Write-Host 'Plan - mount these volumes:' }
-    foreach ($candidate in $chosen) {
-        $target = if ($Remove -and $candidate.MountFolders.Count -gt 0) { $candidate.MountFolders[0] } else { $candidate.ProposedPath }
+    for ($i = 0; $i -lt $chosen.Count; $i++) {
+        $candidate = $chosen[$i]
+        $target =
+        if ($Remove -and $candidate.MountFolders.Count -gt 0) { $candidate.MountFolders[0] }
+        elseif ($AssignDriveLetter) { "$($letters[$i]):" }
+        else { $candidate.ProposedPath }
         $shown = if ($candidate.Label) { $candidate.Label } else { '(no label)' }
         Write-Host ("  {0,-16} -> {1}" -f $shown, $target)
     }
     Write-Host ''
 
     $done = [System.Collections.Generic.List[object]]::new()
-    foreach ($candidate in $chosen) {
+    for ($i = 0; $i -lt $chosen.Count; $i++) {
+        $candidate = $chosen[$i]
         $name = if ($candidate.Label) { $candidate.Label } else { "disk $($candidate.DiskNumber)" }
         Write-Host "$name..."
         try {
-            if ($Remove) {
+            if ($AssignDriveLetter -and -not $Remove) {
+                if (Add-VolumeDriveLetter -Candidate $candidate -Letter $letters[$i]) {
+                    Write-Host "  now at $($letters[$i]): -> /mnt/$($letters[$i].ToLowerInvariant())" -ForegroundColor Green
+                    $done.Add((ConvertTo-MountCandidate -Volume ([pscustomobject]@{
+                                    FileSystemLabel = $candidate.Label
+                                    FileSystem      = $candidate.FileSystem
+                                    Size            = $candidate.SizeBytes
+                                    SizeRemaining   = $candidate.FreeBytes
+                                    Path            = $candidate.VolumePath
+                                    DriveLetter     = $letters[$i]
+                                }) -Partition ([pscustomobject]@{
+                                    DiskNumber      = $candidate.DiskNumber
+                                    PartitionNumber = $candidate.PartitionNumber
+                                    AccessPaths     = @("$($letters[$i]):\")
+                                }) -MountRoot $MountRoot -Index $candidate.Index))
+                }
+            }
+            elseif ($Remove) {
                 $target = if ($candidate.MountFolders.Count -gt 0) { $candidate.MountFolders[0] } else { $candidate.ProposedPath }
                 if (Remove-VolumeMountPoint -Candidate $candidate -Path $target) {
                     Write-Host "  removed $target" -ForegroundColor Green
@@ -598,16 +726,20 @@ function Invoke-Main {
 
     Write-Host ''
     Write-Host 'Next: check WSL can see them.' -ForegroundColor Cyan
-    Write-Host '  A folder mount point is a reparse point, so WSL2 follows it like any other'
-    Write-Host '  directory - but confirm it rather than trusting it. From WSL:'
+    if (-not $AssignDriveLetter) {
+        Write-Host '  Folder mount points are reparse points, and WSL2 drvfs will not cross one into'
+        Write-Host '  another volume - it returns "Input/output error". Expect this to fail; if it'
+        Write-Host '  does, re-run with -AssignDriveLetter, which is the arrangement WSL supports.'
+    }
+    Write-Host '  From WSL:'
     Write-Host ''
     foreach ($candidate in $done) {
         Write-Host "    ls '$($candidate.WslPath)'"
     }
     Write-Host ''
-    Write-Host '  Empty output means drvfs did not follow the mount point. In that case give the'
-    Write-Host '  volume a drive letter instead (Get-Volume | Set-Partition -NewDriveLetter), which'
-    Write-Host '  always works - you have enough spare letters for the pool as it stands today.'
+    Write-Host '  An I/O error or empty output means drvfs did not follow the path. In that case give the'
+    Write-Host '  volumes drive letters instead: re-run this with -AssignDriveLetter, which allocates'
+    Write-Host '  the next free letter to each and is the only arrangement WSL2 is documented to support.'
     Write-Host ''
     Write-Host 'Then add these to docker/docker-compose.yml under volumes:' -ForegroundColor Cyan
     Write-Host ''
@@ -619,5 +751,6 @@ function Invoke-Main {
 
 # Dot-sourcing (the tests do this) leaves the functions defined and runs nothing.
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-Main -MountRoot $MountRoot -Label $Label -All:$All -ListOnly:$ListOnly -Remove:$Remove
+    Invoke-Main -MountRoot $MountRoot -Label $Label -All:$All -ListOnly:$ListOnly `
+        -Remove:$Remove -AssignDriveLetter:$AssignDriveLetter
 }

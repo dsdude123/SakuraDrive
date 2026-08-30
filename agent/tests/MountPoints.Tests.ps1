@@ -600,3 +600,131 @@ Describe 'Running the picker end to end' {
         { Invoke-Main -ListOnly } | Should -Not -Throw
     }
 }
+
+Describe 'Choosing drive letters' {
+    It 'skips A and B, and anything already in use' {
+        Select-FreeDriveLetter -Used @('C', 'D', 'E', 'F', 'G', 'J', 'M') -Count 5 |
+            Should -Be @('H', 'I', 'K', 'L', 'N')
+    }
+
+    It 'copes with letters written as C: or with stray spacing' {
+        Select-FreeDriveLetter -Used @('C:', ' d: ', 'E') -Count 2 | Should -Be @('F', 'G')
+    }
+
+    It 'returns what it can when there are fewer free than asked for' {
+        $used = [char[]]([int][char]'C'..[int][char]'X') | ForEach-Object { [string]$_ }
+        (Select-FreeDriveLetter -Used $used -Count 5) | Should -Be @('Y', 'Z')
+    }
+
+    It 'returns nothing rather than failing when every letter is taken' {
+        $used = [char[]]([int][char]'A'..[int][char]'Z') | ForEach-Object { [string]$_ }
+        @(Select-FreeDriveLetter -Used $used -Count 3).Count | Should -Be 0
+    }
+
+    # This host: C D E F G J M are taken, 14 disks need letters. It fits, with room.
+    It 'has enough left for this pool' {
+        (Select-FreeDriveLetter -Used @('C', 'D', 'E', 'F', 'G', 'J', 'M') -Count 14).Count | Should -Be 14
+    }
+}
+
+<#
+    WSL2's drvfs will not cross a folder mount point into another volume: `ls` on one
+    returns "Input/output error". Mount points are therefore reachable from Windows and
+    not from a container, and a drive letter is the only arrangement that works.
+#>
+Describe 'Assigning drive letters end to end' {
+    BeforeAll {
+        function Get-Volume { param($FileSystemLabel) }
+        function Get-Partition { param($DiskNumber, $PartitionNumber, $Volume) }
+        function Set-Partition { param($DiskNumber, $PartitionNumber, $NewDriveLetter) }
+    }
+
+    BeforeEach {
+        Mock Get-Volume {
+            @(
+                [pscustomobject]@{ FileSystemLabel = 'DRIVEPOOL4'; DriveLetter = $null; FileSystem = 'NTFS'
+                    Size = 8001563222016; SizeRemaining = 1; Path = '\\?\Volume{a}\'; DriveType = 'Fixed' },
+                [pscustomobject]@{ FileSystemLabel = 'DRIVEPOOL9'; DriveLetter = $null; FileSystem = 'NTFS'
+                    Size = 8001563222016; SizeRemaining = 1; Path = '\\?\Volume{b}\'; DriveType = 'Fixed' },
+                [pscustomobject]@{ FileSystemLabel = 'SSDPool'; DriveLetter = 'M'; FileSystem = 'NTFS'
+                    Size = 2967184834560; SizeRemaining = 1; Path = '\\?\Volume{d}\'; DriveType = 'Fixed' }
+            )
+        }
+        Mock Get-Partition {
+            @(
+                [pscustomobject]@{ DiskNumber = 4; PartitionNumber = 2; AccessPaths = @('\\?\Volume{a}\'); IsSystem = $false; IsBoot = $false },
+                [pscustomobject]@{ DiskNumber = 9; PartitionNumber = 2; AccessPaths = @('\\?\Volume{b}\'); IsSystem = $false; IsBoot = $false },
+                [pscustomobject]@{ DiskNumber = 1; PartitionNumber = 1; AccessPaths = @('M:\', '\\?\Volume{d}\'); IsSystem = $false; IsBoot = $false }
+            )
+        }
+        Mock Assert-Administrator { }
+        Mock Set-Partition { }
+        # Read-back after assigning.
+        # The read-back after assigning. It has to contain whichever letter was handed
+        # out, and with only M: taken in this fixture those are C and D.
+        Mock Get-Partition -ParameterFilter { $null -ne $DiskNumber } {
+            [pscustomobject]@{ DiskNumber = $DiskNumber; PartitionNumber = $PartitionNumber
+                AccessPaths = @('C:\', 'D:\') }
+        }
+    }
+
+    It 'gives each selected volume a distinct free letter' {
+        Mock Read-Host { '1-2' }
+        Invoke-Main -AssignDriveLetter
+        Should -Invoke Set-Partition -Times 2
+        Should -Invoke Set-Partition -Times 1 -ParameterFilter { $NewDriveLetter -eq 'C' }
+        Should -Invoke Set-Partition -Times 1 -ParameterFilter { $NewDriveLetter -eq 'D' }
+    }
+
+    # M: is taken by the SSD pool, so nothing may be handed M.
+    It 'never hands out a letter that is already in use' {
+        Mock Read-Host { '1-2' }
+        Invoke-Main -AssignDriveLetter
+        Should -Invoke Set-Partition -Times 0 -ParameterFilter { $NewDriveLetter -eq 'M' }
+    }
+
+    It 'writes nothing under -WhatIf' {
+        Mock Read-Host { 'all' }
+        Invoke-Main -AssignDriveLetter -WhatIf
+        Should -Invoke Set-Partition -Times 0
+    }
+
+    It 'leaves a volume that already has a letter alone' {
+        Invoke-Main -AssignDriveLetter -Label 'SSDPool'
+        Should -Invoke Set-Partition -Times 0
+    }
+
+    It 'creates no folder mount point in this mode' {
+        function Add-PartitionAccessPath { param($DiskNumber, $PartitionNumber, $AccessPath) }
+        Mock Add-PartitionAccessPath { }
+        Mock Read-Host { '1' }
+        Invoke-Main -AssignDriveLetter
+        Should -Invoke Add-PartitionAccessPath -Times 0
+    }
+
+    # A letter that did not take would surface later as an empty catalog root.
+    It 'fails loudly when Windows accepts the letter but it did not take' {
+        Mock Read-Host { '1' }
+        Mock Get-Partition -ParameterFilter { $null -ne $DiskNumber } {
+            [pscustomobject]@{ DiskNumber = $DiskNumber; PartitionNumber = $PartitionNumber
+                AccessPaths = @('\\?\Volume{a}\') }
+        }
+        $output = Invoke-Main -AssignDriveLetter 6>&1 | Out-String
+        $output | Should -Match 'is not among its access paths'
+    }
+
+    It 'stops rather than assigning half of them when letters run short' {
+        Mock Get-Volume {
+            @([char[]]([int][char]'C'..[int][char]'Z') | ForEach-Object {
+                    [pscustomobject]@{ FileSystemLabel = "TAKEN$_"; DriveLetter = [string]$_; FileSystem = 'NTFS'
+                        Size = 1; SizeRemaining = 1; Path = "\\?\Volume{$_}\"; DriveType = 'Fixed' }
+                }) + @(
+                [pscustomobject]@{ FileSystemLabel = 'DRIVEPOOL4'; DriveLetter = $null; FileSystem = 'NTFS'
+                    Size = 1; SizeRemaining = 1; Path = '\\?\Volume{a}\'; DriveType = 'Fixed' }
+            )
+        }
+        Mock Read-Host { 'all' }
+        { Invoke-Main -AssignDriveLetter } | Should -Throw '*drive letter*free*'
+        Should -Invoke Set-Partition -Times 0
+    }
+}

@@ -86,45 +86,69 @@ On tokyo-3 the fourteen HDD pool members are letterless, which has two consequen
   `/mnt/<letter>`, so a letterless disk cannot be bind-mounted and therefore cannot be
   catalogued or hashed.
 
-To catalogue them, give each disk a folder mount point on Windows — the standard way
-around the 26-letter limit. `agent/tools/Set-PoolDiskMountPoints.ps1` does the whole job:
+`agent/tools/Set-PoolDiskMountPoints.ps1` does the whole job. Look first — this needs no
+elevation and changes nothing:
 
 ```powershell
-# Look first. Needs no elevation, changes nothing.
 .\Set-PoolDiskMountPoints.ps1 -ListOnly
 
 #   #  Label            Ltr  FS     Size     Status    Reachable from WSL as
 #   1  DRIVEPOOL4       -    NTFS   7.3 TB   unmounted NOT VISIBLE
-#   2  SSDPOOl1         M:   NTFS   2.5 TB   letter    /mnt/m
-
-# Then pick what to mount: numbers, ranges like 4-9, or "all".
-.\Set-PoolDiskMountPoints.ps1
+#   2  Recovery         -    NTFS   450 MB   reserved  NOT VISIBLE
+#   3  SSDPool          M:   NTFS   2.7 TB   letter    /mnt/m
 ```
 
-It refuses to touch the system volume *and* Windows' own recovery and reserved
-partitions -- which look exactly like small unmounted data disks in the listing, and
-would otherwise be offered alongside the pool members. It requires an empty target
-directory, verifies each mount took rather than assuming it, and prints the
-docker-compose lines for what it mounted. `-WhatIf` shows the plan without writing anything, `-Label` and `-All` script
-it, `-MountRoot` puts the folders somewhere other than `C:\PoolDisks`, and `-Remove`
-undoes it — the volume and its contents are untouched, only the path you reach it by
-goes away.
-
-By hand it is three commands per disk:
+Then give the disks you pick a drive letter each:
 
 ```powershell
-New-Item -ItemType Directory -Path C:\PoolDisks\DRIVEPOOL4 -Force
-$partition = Get-Partition -Volume (Get-Volume -FileSystemLabel DRIVEPOOL4)
-Add-PartitionAccessPath -DiskNumber $partition.DiskNumber `
-    -PartitionNumber $partition.PartitionNumber -AccessPath 'C:\PoolDisks\DRIVEPOOL4'
+.\Set-PoolDiskMountPoints.ps1 -AssignDriveLetter
 ```
 
-Mount points survive reboots. Once they exist, `/mnt/c/PoolDisks/DRIVEPOOL4` should be
-visible inside WSL2 and can be bind-mounted read-only into the container as a pool-part
-root. Check that it is — `ls /mnt/c/PoolDisks/DRIVEPOOL4` from WSL — before adding it to
-the compose file: a mount point is a reparse point, and drvfs following it is the one
-part of this that depends on WSL rather than on Windows. If the listing comes back
-empty, give the volume a drive letter instead, which always works.
+Pick by number, by range (`4-9`), or `all`; the candidates are suggested for you. It
+refuses to touch the system volume *and* Windows' own recovery and reserved partitions,
+which look exactly like small unmounted data disks in the listing and would otherwise be
+offered alongside the pool members. It verifies each change took rather than assuming it,
+and prints the `/mnt/<letter>` and the docker-compose line for everything it changed.
+
+`-WhatIf` shows the plan and writes nothing. `-Label` and `-All` script it. `-Remove`
+undoes a folder mount point — the volume and its contents are untouched, only the path
+you reach it by goes away.
+
+Without `-AssignDriveLetter` the script creates a **folder mount point** instead, under
+`-MountRoot` (default `C:\PoolDisks`). That is the classic answer to the 26-letter limit
+and works fine on Windows — but not for this container, for the reason below.
+
+### Folder mount points do not work for the container
+
+Mount points survive reboots and are fine on Windows, but **WSL2 cannot use them**.
+drvfs will not cross a reparse point into another volume:
+
+```
+$ ls /mnt/c/PoolDisks/DRIVEPOOL16
+ls: cannot access '/mnt/c/PoolDisks/DRIVEPOOL16': Input/output error
+```
+
+That is drvfs refusing the traversal, not a permission or timing problem, and it does
+not vary by disk — measured on this host after mounting all fourteen. So a folder mount
+point makes a volume reachable from Windows and *not* from a container, which is the
+opposite of what is needed here.
+
+**Give the volumes drive letters instead.** A lettered volume appears at `/mnt/<letter>`
+with no traversal involved, which is the only arrangement WSL2 supports:
+
+```powershell
+.\Set-PoolDiskMountPoints.ps1 -AssignDriveLetter
+```
+
+Same picker, same refusals; it allocates the next free letter to each volume you select,
+skipping A, B and anything already in use, and reports the `/mnt/<letter>` each one lands
+on. Letters are allocated up front, so if there are not enough it stops before touching
+anything rather than lettering half the pool and failing. This host has 19 free and
+needs 14.
+
+The agent itself needs none of this: it probes drive letters, folder mount points *and*
+volume GUID paths, so SMART, pool membership and duplication already work on a letterless
+disk. Only the container's bind mounts need the letter.
 
 The volumes page shows each volume's mount point, or "not mounted" when it has neither
 a letter nor a folder — which is exactly the set of disks that still need this.

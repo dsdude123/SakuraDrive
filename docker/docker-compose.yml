@@ -52,31 +52,37 @@ services:
       # HDD pool (J:) member disks.
       #
       # These 14 disks have no drive letters, so WSL2 cannot see them at /mnt/<letter>
-      # and neither can this container. Give each one a folder mount point on Windows
-      # first — agent/tools/Set-PoolDiskMountPoints.ps1 does it — then uncomment these.
-      # Until then the HDD pool cannot be catalogued.
+      # and neither can this container.
       #
-      # Do NOT uncomment before the volumes are actually mounted: Docker creates a
-      # missing bind source as an empty directory, which would catalogue as an empty
-      # disk rather than failing loudly.
+      # Folder mount points do NOT solve this. WSL2's drvfs will not cross a reparse
+      # point into another volume — `ls /mnt/c/PoolDisks/DRIVEPOOL16` returns
+      # "Input/output error" — so a mount point is reachable from Windows and not from
+      # here. Measured on this host, on all fourteen.
       #
-      # The list below is this host's, from `Set-PoolDiskMountPoints.ps1 -ListOnly`:
-      # the 14 members of J:, whose capacities sum to the 95.5 TB the pool reports.
+      # Give them drive letters instead:
+      #     .\Set-PoolDiskMountPoints.ps1 -AssignDriveLetter
+      # then replace <letter> below with what it reports for each label and uncomment.
       #
-      # - /mnt/c/PoolDisks/DRIVEPOOL4:/mnt/parts/drivepool4:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL5:/mnt/parts/drivepool5:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL6:/mnt/parts/drivepool6:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL7:/mnt/parts/drivepool7:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL8:/mnt/parts/drivepool8:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL9:/mnt/parts/drivepool9:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL10:/mnt/parts/drivepool10:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL11:/mnt/parts/drivepool11:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL12:/mnt/parts/drivepool12:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL13:/mnt/parts/drivepool13:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL14:/mnt/parts/drivepool14:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL15:/mnt/parts/drivepool15:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL16:/mnt/parts/drivepool16:ro
-      # - /mnt/c/PoolDisks/DRIVEPOOL17:/mnt/parts/drivepool17:ro
+      # Do NOT uncomment before the letters exist: Docker creates a missing bind source
+      # as an empty directory, which would catalogue as an empty disk rather than
+      # failing loudly.
+      #
+      # The 14 members of J:, whose capacities sum to the 95.5 TB the pool reports:
+      #
+      # - /mnt/<letter>:/mnt/parts/drivepool4:ro          # DRIVEPOOL4
+      # - /mnt/<letter>:/mnt/parts/drivepool5:ro          # DRIVEPOOL5
+      # - /mnt/<letter>:/mnt/parts/drivepool6:ro          # DRIVEPOOL6
+      # - /mnt/<letter>:/mnt/parts/drivepool7:ro          # DRIVEPOOL7
+      # - /mnt/<letter>:/mnt/parts/drivepool8:ro          # DRIVEPOOL8
+      # - /mnt/<letter>:/mnt/parts/drivepool9:ro          # DRIVEPOOL9
+      # - /mnt/<letter>:/mnt/parts/drivepool10:ro          # DRIVEPOOL10
+      # - /mnt/<letter>:/mnt/parts/drivepool11:ro          # DRIVEPOOL11
+      # - /mnt/<letter>:/mnt/parts/drivepool12:ro          # DRIVEPOOL12
+      # - /mnt/<letter>:/mnt/parts/drivepool13:ro          # DRIVEPOOL13
+      # - /mnt/<letter>:/mnt/parts/drivepool14:ro          # DRIVEPOOL14
+      # - /mnt/<letter>:/mnt/parts/drivepool15:ro          # DRIVEPOOL15
+      # - /mnt/<letter>:/mnt/parts/drivepool16:ro          # DRIVEPOOL16
+      # - /mnt/<letter>:/mnt/parts/drivepool17:ro          # DRIVEPOOL17
       # ------------------------------------------------------------------
 
       # The pooled views themselves. Not catalogued — mounted only so the interface can
