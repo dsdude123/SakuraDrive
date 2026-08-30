@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openTestDatabase, type Db } from '../db/index.js';
 import { createSilentLogger } from '../logger.js';
 import { AgentService } from '../services/agent-service.js';
+import { AgentJobService } from '../services/agent-job-service.js';
 import { AlertService } from '../services/alert-service.js';
 import { AuthService } from '../services/auth-service.js';
 import { CatalogService } from '../services/catalog-service.js';
@@ -102,7 +103,11 @@ describe('maintenance: configured roots stay reachable', () => {
     const agents = new AgentService({ db, settings, alerts, logger });
     const auth = new AuthService(db);
     const manager = new WorkflowManager({ db, settings, logger });
-    workflow = createMaintenanceWorkflow({ db, settings, catalog, agents, alerts, auth, manager: () => manager });
+    workflow = createMaintenanceWorkflow({
+      db, settings, catalog, agents, alerts, auth,
+      agentJobs: new AgentJobService(db),
+      manager: () => manager,
+    });
   });
 
   afterEach(() => {

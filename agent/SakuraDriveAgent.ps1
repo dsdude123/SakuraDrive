@@ -710,6 +710,178 @@ function Send-AgentReport {
     }
 }
 
+function Invoke-AgentApi {
+    <#
+    .SYNOPSIS
+        One authenticated call to the server.
+    #>
+    param($Config, [string] $Path, [string] $Method = 'Post', $Body = $null)
+
+    $parameters = @{
+        Uri         = "$(([string]$Config.ServerUrl).TrimEnd('/'))$Path"
+        Method      = $Method
+        ContentType = 'application/json'
+        Headers     = @{ Authorization = "Bearer $($Config.Token)" }
+        TimeoutSec  = [int]$Config.TimeoutSeconds
+    }
+    if ($null -ne $Body) { $parameters['Body'] = ($Body | ConvertTo-Json -Depth 8 -Compress) }
+    if ($Config.SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 6) {
+        $parameters['SkipCertificateCheck'] = $true
+    }
+    Invoke-RestMethod @parameters
+}
+
+function Invoke-CatalogScanJob {
+    <#
+    .SYNOPSIS
+        Walk a root the container cannot see, a batch at a time.
+    .DESCRIPTION
+        Stops when the server says stop. The agent knows nothing about I/O windows: it
+        posts a batch, and the reply either says keep going or says enough. That is what
+        keeps the schedule in one place -- on the server, where it is configured -- while
+        the reading happens here, where the disks actually are.
+
+        Whatever the outcome, the cursor goes back with it, so the next window resumes at
+        the directory this one stopped on rather than re-walking the tree.
+    #>
+    param($Config, $Job)
+
+    $worklist = @('')
+    if ($Job.cursor -and $Job.cursor.PSObject.Properties['worklist'] -and $Job.cursor.worklist) {
+        $worklist = @($Job.cursor.worklist)
+    }
+
+    $filesSeen = 0
+    $bytesSeen = 0
+    $dirsDone = 0
+    $state = 'completed'
+
+    while ($true) {
+        $batch = Get-CatalogBatch -RootPath $Job.hostPath -Worklist $worklist `
+            -IncludeGlobs @($Job.includeGlobs) -ExcludeGlobs @($Job.excludeGlobs) `
+            -BatchSize ([int]$Job.batchSize)
+
+        $worklist = @($batch.worklist)
+        $dirsDone += $batch.dirsDone
+        $filesSeen += $batch.files.Count
+        foreach ($file in $batch.files) { $bytesSeen += $file.sizeBytes }
+
+        $response = Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/batch" -Body ([ordered]@{
+                entries       = @($batch.files)
+                errors        = @($batch.errors)
+                cursor        = [ordered]@{ worklist = $worklist }
+                dirsDone      = $dirsDone
+                dirsRemaining = $batch.dirsRemaining
+            })
+
+        if ($batch.finished) { break }
+        if (-not $response.continue) { $state = 'paused'; break }
+    }
+
+    Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/finish" -Body ([ordered]@{
+            state     = $state
+            cursor    = [ordered]@{ worklist = $worklist }
+            filesSeen = $filesSeen
+            bytesSeen = $bytesSeen
+            dirsDone  = $dirsDone
+        }) | Out-Null
+
+    return [ordered]@{ state = $state; filesSeen = $filesSeen; bytesSeen = $bytesSeen }
+}
+
+function Invoke-CatalogHashJob {
+    <#
+    .SYNOPSIS
+        Hash the files the server named, stopping when it says to.
+    #>
+    param($Config, $Job)
+
+    $files = @($Job.files)
+    $hashed = 0
+    $state = 'completed'
+    $pending = [System.Collections.Generic.List[object]]::new()
+    $root = ([string]$Job.hostPath).TrimEnd('\')
+
+    foreach ($file in $files) {
+        $absolute = Join-Path $root ($file.relPath -replace '/', '\')
+        $pending.Add((Get-CatalogFileHash -FileId ([int]$file.fileId) -Path $absolute -Algorithm $Job.hashAlgorithm))
+        $hashed++
+
+        # Post in small batches so a closing window is honoured promptly: a single
+        # large file can take minutes, and the window edge should not wait for the lot.
+        if ($pending.Count -ge 25 -or $hashed -eq $files.Count) {
+            $response = Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/batch" -Body ([ordered]@{
+                    hashes        = @($pending)
+                    dirsDone      = $hashed
+                    dirsRemaining = ($files.Count - $hashed)
+                })
+            $pending.Clear()
+            if (-not $response.continue -and $hashed -lt $files.Count) { $state = 'paused'; break }
+        }
+    }
+
+    Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/finish" -Body ([ordered]@{
+            state     = $state
+            filesSeen = $hashed
+            bytesSeen = 0
+            dirsDone  = $hashed
+        }) | Out-Null
+
+    return [ordered]@{ state = $state; hashed = $hashed }
+}
+
+function Invoke-AgentJobs {
+    <#
+    .SYNOPSIS
+        Take whatever work the server has, until it has none.
+    .DESCRIPTION
+        Jobs exist because some roots cannot be read from inside the container at all -- a
+        pool member with no drive letter is invisible to WSL2, and drvfs will not follow a
+        folder mount point into another volume. Rather than bending the host's disk layout
+        around that, the reading happens here.
+
+        A failure is reported rather than swallowed: the server treats an unfinished scan
+        as "changed nothing", never as deletions.
+    #>
+    param($Config, [int] $MaxJobs = 4)
+
+    for ($taken = 0; $taken -lt $MaxJobs; $taken++) {
+        try {
+            $claim = Invoke-AgentApi -Config $Config -Path '/api/agent/jobs/claim' -Body ([ordered]@{
+                    hostname     = $env:COMPUTERNAME
+                    agentVersion = (Get-SakuraDriveAgentVersion)
+                })
+        }
+        catch {
+            Write-AgentLog -Message "Could not ask for work: $($_.Exception.Message)" -Level 'WARN' -Config $Config
+            return
+        }
+
+        if ($null -eq $claim -or $null -eq $claim.job) { return }
+        $job = $claim.job
+        Write-AgentLog -Message "Starting $($job.type) for $($job.rootName) ($($job.hostPath))" -Config $Config
+
+        try {
+            $result = switch ($job.type) {
+                'catalog.scan' { Invoke-CatalogScanJob -Config $Config -Job $job }
+                'catalog.hash' { Invoke-CatalogHashJob -Config $Config -Job $job }
+                default { throw "The server asked for '$($job.type)', which this agent does not know how to do. Update the agent." }
+            }
+            Write-AgentLog -Message "Finished $($job.type) for $($job.rootName): $($result.state)" -Config $Config
+        }
+        catch {
+            Write-AgentLog -Message "$($job.type) for $($job.rootName) failed: $($_.Exception.Message)" -Level 'ERROR' -Config $Config
+            try {
+                Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($job.jobId)/finish" -Body ([ordered]@{
+                        state = 'failed'; error = $_.Exception.Message
+                    }) | Out-Null
+            }
+            catch { }
+            return
+        }
+    }
+}
+
 # ---------------------------------------------------------------------------
 
 $config = Read-AgentConfig -Path $ConfigPath
@@ -737,6 +909,11 @@ do {
             foreach ($warning in @($response.warnings)) {
                 Write-AgentLog -Message $warning -Level 'WARN' -Config $config
             }
+
+            # Then take whatever cataloguing work the server has for roots it cannot
+            # read itself. Doing it after the report means the server always has fresh
+            # pool membership before it decides what to ask for.
+            if ($config.CollectCatalogJobs) { Invoke-AgentJobs -Config $config }
         }
     }
     catch {

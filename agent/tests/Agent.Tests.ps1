@@ -946,3 +946,167 @@ Describe 'New-AgentReport' {
         (New-AgentReport -Hostname '').hostname | Should -Be 'unknown-host'
     }
 }
+
+<#
+    The agent half of a catalog scan.
+
+    A pool member with no drive letter cannot be bind-mounted into the container at all:
+    WSL2 only surfaces lettered drives, and drvfs will not follow a folder mount point
+    into another volume. The agent has native access to every volume, so for those roots
+    it does the walking and the hashing.
+#>
+Describe 'Glob matching' {
+    It 'matches a single segment with *' {
+        Test-PathAgainstGlob -Path 'Tier1/a.mkv' -Globs @('Tier1/*.mkv') | Should -BeTrue
+        Test-PathAgainstGlob -Path 'Tier1/Sub/a.mkv' -Globs @('Tier1/*.mkv') | Should -BeFalse
+    }
+
+    It 'crosses segments with **' {
+        Test-PathAgainstGlob -Path 'Tier1/Sub/Deep/a.mkv' -Globs @('Tier1/**') | Should -BeTrue
+        Test-PathAgainstGlob -Path 'Tier2/a.mkv' -Globs @('Tier1/**') | Should -BeFalse
+    }
+
+    # `Temp/**` has to exclude the Temp directory itself, or the walk descends into a
+    # tree it was told to skip and only filters the files inside it.
+    It 'matches the directory a trailing /** names' {
+        Test-PathAgainstGlob -Path 'Temp' -Globs @('Temp/**') | Should -BeTrue
+    }
+
+    It 'matches one character with ?' {
+        Test-PathAgainstGlob -Path 'a1.log' -Globs @('a?.log') | Should -BeTrue
+        Test-PathAgainstGlob -Path 'a12.log' -Globs @('a?.log') | Should -BeFalse
+    }
+
+    It 'is case-insensitive, because these are NTFS volumes' {
+        Test-PathAgainstGlob -Path 'TIER1/A.MKV' -Globs @('tier1/*.mkv') | Should -BeTrue
+    }
+
+    It 'treats backslashes and forward slashes alike' {
+        Test-PathAgainstGlob -Path 'Tier1\Sub\a.mkv' -Globs @('Tier1/**') | Should -BeTrue
+    }
+
+    It 'matches nothing when there are no globs' {
+        Test-PathAgainstGlob -Path 'anything' -Globs @() | Should -BeFalse
+    }
+
+    It 'does not treat a dot as a wildcard' {
+        Test-PathAgainstGlob -Path 'axmkv' -Globs @('a.mkv') | Should -BeFalse
+    }
+}
+
+Describe 'Walking a tree for the catalog' {
+    BeforeAll {
+        $script:Tree = Join-Path ([System.IO.Path]::GetTempPath()) "sakura-walk-$([guid]::NewGuid())"
+        $null = New-Item -ItemType Directory -Path $script:Tree -Force
+        foreach ($rel in 'Tier1/Movies', 'Tier1/Music', 'Temp', 'Tier2') {
+            $null = New-Item -ItemType Directory -Path (Join-Path $script:Tree $rel) -Force
+        }
+        Set-Content -Path (Join-Path $script:Tree 'Tier1/Movies/a.mkv') -Value 'aaaa' -NoNewline
+        Set-Content -Path (Join-Path $script:Tree 'Tier1/Music/b.flac') -Value 'bb' -NoNewline
+        Set-Content -Path (Join-Path $script:Tree 'Tier2/c.iso') -Value 'c' -NoNewline
+        Set-Content -Path (Join-Path $script:Tree 'Temp/scratch.tmp') -Value 'x' -NoNewline
+        Set-Content -Path (Join-Path $script:Tree 'readme.txt') -Value 'hello' -NoNewline
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:Tree -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'finds every file, with root-relative forward-slash paths' {
+        $batch = Get-CatalogBatch -RootPath $script:Tree -BatchSize 1000
+        $batch.finished | Should -BeTrue
+        ($batch.files | ForEach-Object { $_.relPath } | Sort-Object) | Should -Be @(
+            'readme.txt', 'Temp/scratch.tmp', 'Tier1/Movies/a.mkv', 'Tier1/Music/b.flac', 'Tier2/c.iso'
+        )
+    }
+
+    It 'reports the size and both timestamps' {
+        $batch = Get-CatalogBatch -RootPath $script:Tree -BatchSize 1000
+        $file = $batch.files | Where-Object { $_.relPath -eq 'Tier1/Movies/a.mkv' }
+        $file.sizeBytes | Should -Be 4
+        $file.mtimeMs | Should -BeGreaterThan 0
+        $file.ctimeMs | Should -BeGreaterThan 0
+    }
+
+    It 'applies exclude globs to whole directories, not just to files' {
+        $batch = Get-CatalogBatch -RootPath $script:Tree -ExcludeGlobs @('Temp/**') -BatchSize 1000
+        ($batch.files | ForEach-Object { $_.relPath }) | Should -Not -Contain 'Temp/scratch.tmp'
+    }
+
+    It 'applies include globs to files only' {
+        $batch = Get-CatalogBatch -RootPath $script:Tree -IncludeGlobs @('**/*.mkv') -BatchSize 1000
+        ($batch.files | ForEach-Object { $_.relPath }) | Should -Be @('Tier1/Movies/a.mkv')
+    }
+
+    # The batch boundary is what lets the server stop a scan at the edge of an I/O
+    # window without killing it mid-tree, and lets a reboot resume rather than restart.
+    It 'stops at the batch size and hands back the rest of the worklist' {
+        $first = Get-CatalogBatch -RootPath $script:Tree -BatchSize 1
+        $first.finished | Should -BeFalse
+        $first.files.Count | Should -BeGreaterOrEqual 1
+        $first.worklist.Count | Should -BeGreaterThan 0
+    }
+
+    It 'resumes from a handed-back worklist and eventually sees everything' {
+        $seen = [System.Collections.Generic.List[string]]::new()
+        $worklist = @('')
+        for ($i = 0; $i -lt 50; $i++) {
+            $batch = Get-CatalogBatch -RootPath $script:Tree -Worklist $worklist -BatchSize 1
+            foreach ($file in $batch.files) { $seen.Add($file.relPath) }
+            if ($batch.finished) { break }
+            $worklist = $batch.worklist
+        }
+        ($seen | Sort-Object -Unique).Count | Should -Be 5
+    }
+
+    It 'reports a directory it cannot read rather than pretending it was empty' {
+        $batch = Get-CatalogBatch -RootPath (Join-Path $script:Tree 'does-not-exist') -BatchSize 10
+        $batch.errors.Count | Should -Be 1
+        $batch.files.Count | Should -Be 0
+    }
+
+    It 'returns an empty batch for an empty worklist without failing' {
+        $batch = Get-CatalogBatch -RootPath $script:Tree -Worklist @() -BatchSize 10
+        $batch.files.Count | Should -Be 0
+        $batch.finished | Should -BeTrue
+    }
+}
+
+Describe 'Hashing for the catalog' {
+    BeforeAll {
+        $script:HashFile = Join-Path ([System.IO.Path]::GetTempPath()) "sakura-hash-$([guid]::NewGuid()).bin"
+        Set-Content -Path $script:HashFile -Value 'abc' -NoNewline
+    }
+
+    AfterAll {
+        Remove-Item -LiteralPath $script:HashFile -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'computes sha256 by default' {
+        $result = Get-CatalogFileHash -FileId 42 -Path $script:HashFile
+        $result.fileId | Should -Be 42
+        # Known sha256 of "abc".
+        $result.hash | Should -Be 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+        $result.error | Should -BeNullOrEmpty
+    }
+
+    # Bit rot is "content changed while size and mtime did not", so a hash without those
+    # two beside it cannot be reasoned about later.
+    It 'reports the size and mtime it saw at hash time' {
+        $result = Get-CatalogFileHash -FileId 1 -Path $script:HashFile
+        $result.sizeBytes | Should -Be 3
+        $result.mtimeMs | Should -BeGreaterThan 0
+    }
+
+    It 'honours another algorithm' {
+        (Get-CatalogFileHash -FileId 1 -Path $script:HashFile -Algorithm 'md5').hash |
+            Should -Be '900150983cd24fb0d6963f7d28e17f72'
+    }
+
+    It 'reports a file it could not read instead of throwing' {
+        $result = Get-CatalogFileHash -FileId 9 -Path (Join-Path $script:HashFile 'nope')
+        $result.hash | Should -BeNullOrEmpty
+        $result.error | Should -Not -BeNullOrEmpty
+        $result.fileId | Should -Be 9
+    }
+}

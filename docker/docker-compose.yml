@@ -51,38 +51,23 @@ services:
       # ------------------------------------------------------------------
       # HDD pool (J:) member disks.
       #
-      # These 14 disks have no drive letters, so WSL2 cannot see them at /mnt/<letter>
-      # and neither can this container.
+      # These 14 disks have no drive letters, and no arrangement of this file can give
+      # this container access to them. WSL2 only surfaces lettered drives, and drvfs
+      # will not follow a folder mount point into another volume -- `ls` on one returns
+      # "Input/output error". Measured here, on all fourteen.
       #
-      # Folder mount points do NOT solve this. WSL2's drvfs will not cross a reparse
-      # point into another volume — `ls /mnt/c/PoolDisks/DRIVEPOOL16` returns
-      # "Input/output error" — so a mount point is reachable from Windows and not from
-      # here. Measured on this host, on all fourteen.
+      # So they are not bind-mounted at all. Set each one's catalog root to be read by
+      # the agent (Settings -> Catalog roots -> "Read by" -> The Windows agent) and give
+      # it the volume GUID path, which needs no drive letter:
       #
-      # Give them drive letters instead:
-      #     .\Set-PoolDiskMountPoints.ps1 -AssignDriveLetter
-      # then replace <letter> below with what it reports for each label and uncomment.
+      #     \\?\Volume{guid}\PoolPart.{poolGuid}
       #
-      # Do NOT uncomment before the letters exist: Docker creates a missing bind source
-      # as an empty directory, which would catalogue as an empty disk rather than
-      # failing loudly.
+      # The agent walks and hashes them and streams the results back. The schedule, the
+      # catalog and the pause all work exactly as they do for a bind-mounted root; see
+      # docs/ARCHITECTURE.md, "Who reads the disks".
       #
-      # The 14 members of J:, whose capacities sum to the 95.5 TB the pool reports:
-      #
-      # - /mnt/<letter>:/mnt/parts/drivepool4:ro          # DRIVEPOOL4
-      # - /mnt/<letter>:/mnt/parts/drivepool5:ro          # DRIVEPOOL5
-      # - /mnt/<letter>:/mnt/parts/drivepool6:ro          # DRIVEPOOL6
-      # - /mnt/<letter>:/mnt/parts/drivepool7:ro          # DRIVEPOOL7
-      # - /mnt/<letter>:/mnt/parts/drivepool8:ro          # DRIVEPOOL8
-      # - /mnt/<letter>:/mnt/parts/drivepool9:ro          # DRIVEPOOL9
-      # - /mnt/<letter>:/mnt/parts/drivepool10:ro          # DRIVEPOOL10
-      # - /mnt/<letter>:/mnt/parts/drivepool11:ro          # DRIVEPOOL11
-      # - /mnt/<letter>:/mnt/parts/drivepool12:ro          # DRIVEPOOL12
-      # - /mnt/<letter>:/mnt/parts/drivepool13:ro          # DRIVEPOOL13
-      # - /mnt/<letter>:/mnt/parts/drivepool14:ro          # DRIVEPOOL14
-      # - /mnt/<letter>:/mnt/parts/drivepool15:ro          # DRIVEPOOL15
-      # - /mnt/<letter>:/mnt/parts/drivepool16:ro          # DRIVEPOOL16
-      # - /mnt/<letter>:/mnt/parts/drivepool17:ro          # DRIVEPOOL17
+      # Nothing to add here for the HDD pool. That is the point: the container's view of
+      # the host is no longer a constraint on how the array is laid out.
       # ------------------------------------------------------------------
 
       # The pooled views themselves. Not catalogued — mounted only so the interface can

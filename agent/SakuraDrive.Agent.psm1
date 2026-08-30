@@ -54,6 +54,9 @@ function Get-DefaultAgentConfig {
         CollectPerformance   = $true
         CollectDrivePool     = $true
         CollectPrimoCache    = $true
+        # Take catalog scan and hash jobs for roots the container cannot read. Turn off
+        # only if you want the agent to report health and nothing else.
+        CollectCatalogJobs   = $true
         # Seconds of performance-counter sampling per report.
         PerformanceSamples   = 3
         # Skip TLS validation. Only for a self-signed certificate on a trusted LAN.
@@ -1286,6 +1289,207 @@ function ConvertFrom-SizeString {
 
 #endregion
 
+#region Catalog jobs ----------------------------------------------------------
+
+function Test-PathAgainstGlob {
+    <#
+    .SYNOPSIS
+        Does a root-relative path match any of these globs?
+    .DESCRIPTION
+        The same dialect the server uses: `*` within a segment, `**` across segments,
+        `?` for one character. Matching is case-insensitive because these are NTFS
+        volumes, and paths are compared with forward slashes so one set of globs works
+        on both sides of the boundary.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Path,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Globs
+    )
+
+    if ($Globs.Count -eq 0) { return $false }
+    $subject = ($Path -replace '\\', '/').TrimStart('/')
+
+    foreach ($glob in $Globs) {
+        if ([string]::IsNullOrWhiteSpace($glob)) { continue }
+        $pattern = ($glob -replace '\\', '/').TrimStart('/')
+
+        # Build a regex a segment at a time so ** can span separators and * cannot.
+        $regex = [System.Text.StringBuilder]::new('^')
+        $i = 0
+        while ($i -lt $pattern.Length) {
+            $char = $pattern[$i]
+            if ($char -eq '*') {
+                if ($i + 1 -lt $pattern.Length -and $pattern[$i + 1] -eq '*') {
+                    # A trailing /** also matches the directory itself.
+                    if ($i + 2 -ge $pattern.Length) { [void]$regex.Append('.*'); $i += 2 }
+                    elseif ($pattern[$i + 2] -eq '/') { [void]$regex.Append('(?:.*/)?'); $i += 3 }
+                    else { [void]$regex.Append('.*'); $i += 2 }
+                }
+                else { [void]$regex.Append('[^/]*'); $i += 1 }
+            }
+            elseif ($char -eq '?') { [void]$regex.Append('[^/]'); $i += 1 }
+            elseif ($char -eq '/' -and $pattern.Substring($i) -eq '/**') {
+                # A trailing `/**` has to match the directory itself as well as its
+                # contents, or an exclude of `Temp/**` still descends into Temp.
+                [void]$regex.Append('(?:/.*)?')
+                $i = $pattern.Length
+            }
+            else { [void]$regex.Append([regex]::Escape([string]$char)); $i += 1 }
+        }
+        [void]$regex.Append('$')
+
+        if ($subject -match $regex.ToString()) { return $true }
+    }
+    return $false
+}
+
+function Get-CatalogBatch {
+    <#
+    .SYNOPSIS
+        Walk part of a tree and return one batch of files, plus where to resume.
+    .DESCRIPTION
+        This is the agent half of a catalog scan. It exists because a pool member with
+        no drive letter cannot be bind-mounted into the container at all: WSL2 only
+        surfaces lettered drives, and drvfs will not follow a folder mount point into
+        another volume. The agent has native access to every volume, including by
+        `\\?\Volume{guid}\` path, so the reading happens here and the results are posted.
+
+        The walk is breadth-limited by design: it returns as soon as it has BatchSize
+        files, handing back the remaining directory worklist. That is what lets the
+        server stop the scan at the edge of an I/O window without killing it mid-tree,
+        and what lets a reboot resume rather than restart.
+
+        Directories that cannot be read are reported, never silently skipped: a
+        permission problem that quietly shrank the catalog would read as deletions.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $RootPath,
+        [AllowEmptyCollection()] [string[]] $Worklist = @(''),
+        [AllowEmptyCollection()] [string[]] $IncludeGlobs = @(),
+        [AllowEmptyCollection()] [string[]] $ExcludeGlobs = @(),
+        [int] $BatchSize = 2000
+    )
+
+    $files = [System.Collections.Generic.List[object]]::new()
+    $errors = [System.Collections.Generic.List[object]]::new()
+    $pending = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in $Worklist) { $pending.Add($item) }
+
+    $dirsDone = 0
+    $root = $RootPath.TrimEnd('\')
+
+    while ($pending.Count -gt 0 -and $files.Count -lt $BatchSize) {
+        # LIFO, so resuming continues at the directory the last batch stopped on.
+        $relDir = $pending[$pending.Count - 1]
+        $pending.RemoveAt($pending.Count - 1)
+
+        $absolute = if ($relDir) { Join-Path $root ($relDir -replace '/', '\') } else { $root }
+        $dirsDone++
+
+        try {
+            $entries = [System.IO.Directory]::EnumerateFileSystemEntries($absolute)
+        }
+        catch {
+            $errors.Add([ordered]@{ relPath = $relDir; message = $_.Exception.Message })
+            continue
+        }
+
+        foreach ($entry in $entries) {
+            $name = [System.IO.Path]::GetFileName($entry)
+            $rel = if ($relDir) { "$relDir/$name" } else { $name }
+
+            try {
+                $info = [System.IO.FileInfo]::new($entry)
+                $isDirectory = ($info.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0
+                # Reparse points are followed by nobody here: a junction into another
+                # tree would be catalogued twice, once under each path.
+                $isReparse = ($info.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            }
+            catch {
+                $errors.Add([ordered]@{ relPath = $rel; message = $_.Exception.Message })
+                continue
+            }
+
+            if (Test-PathAgainstGlob -Path $rel -Globs $ExcludeGlobs) { continue }
+
+            if ($isDirectory) {
+                if (-not $isReparse) { $pending.Add($rel) }
+                continue
+            }
+            if ($IncludeGlobs.Count -gt 0 -and -not (Test-PathAgainstGlob -Path $rel -Globs $IncludeGlobs)) {
+                continue
+            }
+
+            $files.Add([ordered]@{
+                    relPath   = $rel
+                    sizeBytes = [long]$info.Length
+                    mtimeMs   = [long]([DateTimeOffset]$info.LastWriteTimeUtc).ToUnixTimeMilliseconds()
+                    ctimeMs   = [long]([DateTimeOffset]$info.CreationTimeUtc).ToUnixTimeMilliseconds()
+                })
+        }
+    }
+
+    [ordered]@{
+        files         = @($files)
+        errors        = @($errors)
+        worklist      = @($pending)
+        dirsDone      = $dirsDone
+        dirsRemaining = $pending.Count
+        finished      = ($pending.Count -eq 0)
+    }
+}
+
+function Get-CatalogFileHash {
+    <#
+    .SYNOPSIS
+        Hash one file, reporting the size and mtime as of the moment it was read.
+    .DESCRIPTION
+        Bit rot is "the content changed while the size and mtime did not", so a hash
+        without those two alongside it cannot be reasoned about later. They are taken
+        from the same handle the hash was computed from, not from a second stat that
+        could straddle a write.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [int] $FileId,
+        [Parameter(Mandatory)] [string] $Path,
+        [string] $Algorithm = 'sha256'
+    )
+
+    $result = [ordered]@{ fileId = $FileId; hash = $null; sizeBytes = $null; mtimeMs = $null; error = $null }
+    try {
+        $info = [System.IO.FileInfo]::new($Path)
+        $result.sizeBytes = [long]$info.Length
+        $result.mtimeMs = [long]([DateTimeOffset]$info.LastWriteTimeUtc).ToUnixTimeMilliseconds()
+
+        $hasher = switch ($Algorithm.ToLowerInvariant()) {
+            'sha1' { [System.Security.Cryptography.SHA1]::Create() }
+            'md5' { [System.Security.Cryptography.MD5]::Create() }
+            default { [System.Security.Cryptography.SHA256]::Create() }
+        }
+        try {
+            # Sequential scan and a modest buffer: this runs against spinning disks
+            # while people are watching films off them.
+            $stream = [System.IO.FileStream]::new(
+                $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete,
+                1MB, [System.IO.FileOptions]::SequentialScan)
+            try { $result.hash = [System.BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+            finally { $stream.Dispose() }
+        }
+        finally { $hasher.Dispose() }
+    }
+    catch {
+        $result.error = $_.Exception.Message
+    }
+    $result
+}
+
+#endregion
+
 #region Report assembly -------------------------------------------------------
 
 function New-AgentReport {
@@ -1371,6 +1575,9 @@ Export-ModuleMember -Function @(
     'ConvertTo-NullableDouble'
     'ConvertTo-NullableBool'
     'ConvertFrom-SizeString'
+    'Test-PathAgainstGlob'
+    'Get-CatalogBatch'
+    'Get-CatalogFileHash'
     'New-AgentReport'
     'New-CollectorError'
 )

@@ -62,7 +62,7 @@ beforeEach(() => {
   agentJobs = new AgentJobService(db);
   manager = new WorkflowManager({ db, settings, logger: createSilentLogger() });
   manager.register(createCatalogScanWorkflow({ settings, catalog, alerts, agentJobs }));
-  manager.register(createCatalogHashWorkflow({ settings, catalog, bitrot, alerts }));
+  manager.register(createCatalogHashWorkflow({ settings, catalog, bitrot, alerts, agentJobs }));
 });
 
 afterEach(() => {

@@ -120,35 +120,40 @@ and works fine on Windows — but not for this container, for the reason below.
 
 ### Folder mount points do not work for the container
 
-Mount points survive reboots and are fine on Windows, but **WSL2 cannot use them**.
-drvfs will not cross a reparse point into another volume:
+Mount points are fine on Windows, but **WSL2 cannot use them**. drvfs will not cross a
+reparse point into another volume:
 
 ```
 $ ls /mnt/c/PoolDisks/DRIVEPOOL16
 ls: cannot access '/mnt/c/PoolDisks/DRIVEPOOL16': Input/output error
 ```
 
-That is drvfs refusing the traversal, not a permission or timing problem, and it does
-not vary by disk — measured on this host after mounting all fourteen. So a folder mount
-point makes a volume reachable from Windows and *not* from a container, which is the
-opposite of what is needed here.
+That is drvfs refusing the traversal, not a permission or timing problem, and it does not
+vary by disk — measured on this host after mounting all fourteen.
 
-**Give the volumes drive letters instead.** A lettered volume appears at `/mnt/<letter>`
-with no traversal involved, which is the only arrangement WSL2 supports:
+### So the agent reads them instead
 
-```powershell
-.\Set-PoolDiskMountPoints.ps1 -AssignDriveLetter
+Drive letters would work, and `-AssignDriveLetter` still does it, but it is a dead end as
+an architecture: 26 letters minus what is in use, and the container's plumbing deciding
+how the host may be laid out.
+
+Set the catalog root's **Read by** to *The Windows agent* and give it the volume GUID
+path. No letter, no mount point, no bind mount:
+
+```
+\\?\Volume{9f3a...}\PoolPart.{d304fce8...}
 ```
 
-Same picker, same refusals; it allocates the next free letter to each volume you select,
-skipping A, B and anything already in use, and reports the `/mnt/<letter>` each one lands
-on. Letters are allocated up front, so if there are not enough it stops before touching
-anything rather than lettering half the pool and failing. This host has 19 free and
-needs 14.
+`dpcmd list-poolparts` prints exactly those paths, and the agent already resolves them —
+it is how pool membership has always been read.
 
-The agent itself needs none of this: it probes drive letters, folder mount points *and*
-volume GUID paths, so SMART, pool membership and duplication already work on a letterless
-disk. Only the container's bind mounts need the letter.
+The agent then takes catalog scan and hash jobs from the server and streams results back.
+The server keeps the schedule, the catalog run, the cursor and the deletion rules, so a
+scan pauses at the window edge and resumes where it stopped exactly as a bind-mounted
+root does. `docs/ARCHITECTURE.md`, "Who reads the disks", has the split in full.
+
+Set `CollectCatalogJobs` to `false` in `agent.config.json` if you want the agent to report
+health only and never take cataloguing work.
 
 The volumes page shows each volume's mount point, or "not mounted" when it has neither
 a letter nor a folder — which is exactly the set of disks that still need this.

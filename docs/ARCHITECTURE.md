@@ -138,6 +138,54 @@ It also changes what "missing" means, correctly: a file deleted from one member 
 still present on another has not been lost, and only a path with no surviving copy
 anywhere counts as missing from the pool.
 
+## Who reads the disks
+
+Every catalog root declares a `source`.
+
+**`container`** walks a bind-mounted path. Simple, and right for any volume with a
+drive letter.
+
+**`agent`** has the Windows agent walk the volume and stream the inventory back.
+
+The second exists because the first cannot work for part of a real array. WSL2 only
+surfaces lettered drives under `/mnt/<letter>`, and a pool with more disks than spare
+letters has members with none. Folder mount points look like the answer and are not:
+drvfs refuses to cross a reparse point into another volume and returns `EIO`. So for
+those disks there is no path into the container at all, and no arrangement of the
+container can create one.
+
+Handing out drive letters would work until it did not — 26 minus what is already in use,
+and the container's plumbing dictating how the host is laid out. The reading moves
+instead to the side of the boundary that can already see everything. The agent opens a
+volume by GUID path, `\\?\Volume{guid}\PoolPart.guid`, and needs no letter, no mount
+point and no bind mount.
+
+What does *not* move is the interesting part:
+
+| Stays on the server | Done by the agent |
+| --- | --- |
+| The I/O window and when to pause | Enumerating a directory |
+| The catalog run and its cursor | Reading a file's size and mtime |
+| What "created", "modified" and "deleted" mean | Computing a hash |
+| The deletion sweep, and refusing to run it on a partial scan | |
+| Duplication resolution, dir rollups, the pool view | |
+
+Batches land through the same `recordFiles` path a local walk uses, so there is one
+implementation of what a scan means and the agent stays a pair of hands.
+
+The schedule reaches across the process boundary through the reply to each batch. The
+agent posts what it found and asks, in effect, "more?"; when the window closes the
+server says no, and the agent stops at that batch boundary and returns its cursor. It
+knows nothing about schedules, and a paused scan resumes at the directory it stopped on.
+
+Failure is treated the same as an unreadable bind mount: an agent that dies mid-tree has
+its job requeued after five minutes with the cursor intact, and the catalog run it was
+feeding is abandoned rather than swept. **A half-walked tree is never read as
+deletions** — the guarantee the disaster-recovery report depends on.
+
+It is also simply faster. A native read beats the same bytes pulled through drvfs, which
+matters most for hashing 95 TB.
+
 ## Disaster recovery, precisely
 
 Catalogue each disk's `PoolPart.*` folder as its own root with the same pool id and the

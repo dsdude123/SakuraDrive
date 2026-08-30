@@ -1,5 +1,11 @@
 import path from 'node:path';
-import { formatBytes, normalizeRootPath, type HashAlgorithm } from '@sakuradrive/shared';
+import {
+  formatBytes,
+  normalizeRootPath,
+  type HashAlgorithm,
+  type ScanRoot,
+} from '@sakuradrive/shared';
+import type { AgentJobService } from '../services/agent-job-service.js';
 import type { AlertService } from '../services/alert-service.js';
 import type { BitrotService } from '../services/bitrot-service.js';
 import type { CatalogService, HashCandidate } from '../services/catalog-service.js';
@@ -22,6 +28,7 @@ function emptyCursor(): HashCursor {
 }
 
 export interface CatalogHashDeps {
+  agentJobs: AgentJobService;
   settings: SettingsService;
   catalog: CatalogService;
   bitrot: BitrotService;
@@ -91,6 +98,19 @@ export function createCatalogHashWorkflow(deps: CatalogHashDeps): WorkflowDefini
 
       for (; cursor.rootIndex < roots.length; cursor.rootIndex += 1) {
         const root = roots[cursor.rootIndex]!;
+
+        // A root the container cannot read cannot be hashed here either. The agent has
+        // the file open natively anyway, which is faster than reading it back through
+        // drvfs would have been even where that was possible.
+        if (root.source === 'agent') {
+          const paused = await hashViaAgent(ctx, { deps, root, algorithm, cursor, concurrency });
+          if (paused) {
+            ctx.setCursor(cursor);
+            return { state: 'paused' };
+          }
+          continue;
+        }
+
         const rootPath = normalizeRootPath(root.containerPath);
 
         for (;;) {
@@ -170,6 +190,93 @@ interface BatchArgs {
   concurrency: number;
   cursor: HashCursor;
   deps: CatalogHashDeps;
+}
+
+/**
+ * Hash a root the container cannot read, by asking the agent to.
+ *
+ * Same queue as the scan: the server decides which files are due a hash and when the
+ * window is open, the agent opens them. It also happens to be the faster arrangement --
+ * a native read beats the same bytes pulled back through drvfs -- but the reason it
+ * exists is that for a volume with no drive letter there is no drvfs path at all.
+ *
+ * Returns true if the window closed before the queue emptied.
+ */
+async function hashViaAgent(
+  ctx: WorkflowContext,
+  args: {
+    deps: CatalogHashDeps;
+    root: ScanRoot;
+    algorithm: string;
+    cursor: HashCursor;
+    concurrency: number;
+  },
+): Promise<boolean> {
+  const { deps, root, algorithm, cursor } = args;
+  const { agentJobs, catalog, settings } = deps;
+  const config = settings.get();
+
+  for (;;) {
+    if (!ctx.shouldContinue()) return true;
+
+    const batch = catalog.hashQueue(
+      root.id,
+      config.catalog.rehashIntervalDays,
+      Math.max(50, args.concurrency * 50),
+      root.minHashSizeBytes,
+      root.maxHashSizeBytes,
+    );
+    if (batch.length === 0) return false;
+
+    const job = agentJobs.enqueue({
+      type: 'catalog.hash',
+      root,
+      workflowRunId: ctx.runId,
+      catalogRunId: null,
+      payload: {
+        hashAlgorithm: algorithm,
+        files: batch.map((file) => ({
+          fileId: file.id,
+          relPath: file.relPath,
+          sizeBytes: file.sizeBytes,
+        })),
+      },
+    });
+
+    let cancelRequested = false;
+    for (;;) {
+      const current = agentJobs.byId(job.id);
+      if (!current) return false;
+
+      if (!ctx.shouldContinue() && !cancelRequested) {
+        agentJobs.requestCancel(job.id);
+        cancelRequested = true;
+      }
+
+      const stats = current.stats as { filesSeen?: number; dirsDone?: number; dirsRemaining?: number };
+      ctx.setProgress({
+        done: cursor.hashed + (stats.dirsDone ?? 0),
+        total: cursor.hashed + (stats.dirsDone ?? 0) + (stats.dirsRemaining ?? 0),
+        unit: 'files',
+        message: `${root.name}: hashing via the agent`,
+      });
+
+      if (current.state === 'completed') {
+        cursor.hashed += stats.filesSeen ?? batch.length;
+        break;
+      }
+      if (current.state === 'paused') {
+        cursor.hashed += stats.filesSeen ?? 0;
+        return true;
+      }
+      if (current.state === 'failed' || current.state === 'cancelled') {
+        ctx.log(`Agent hashing of "${root.name}" stopped: ${current.error ?? 'no reason given'}`);
+        return false;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, config.catalog.agentPollMs));
+    }
+  }
 }
 
 async function processBatch(ctx: WorkflowContext, args: BatchArgs): Promise<void> {

@@ -283,6 +283,8 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
         name: 'New root',
         kind: 'pool',
         poolId: null,
+        source: 'container',
+        agentHostname: '',
         containerPath: '/mnt/pools/hdd',
         hostPath: 'P:\\',
         driveLabel: '',
@@ -354,7 +356,11 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
         <Card
           key={root.id}
           title={root.name || 'Root'}
-          description={`${root.kind} · ${root.containerPath}`}
+          description={
+            root.source === 'agent'
+              ? `${root.kind} · read by the agent · ${root.hostPath}`
+              : `${root.kind} · ${root.containerPath}`
+          }
           actions={
             <>
               <button className="small" disabled={checking === root.id} onClick={() => void check(root)}>
@@ -409,22 +415,61 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
                 }
               />
             </Field>
-            <Field label="Path inside the container" help="The bind mount target, e.g. /mnt/pools/hdd">
-              <input
-                type="text"
-                value={root.containerPath}
+            <Field
+              label="Read by"
+              help="A disk with no drive letter cannot be bind-mounted into this container: WSL2 only exposes lettered drives, and it will not follow a folder mount point into another volume. Have the agent read those instead — it has native access to every volume, and the schedule, the catalog and the pause all still work the same way."
+            >
+              <select
+                value={root.source}
                 onChange={(event) =>
-                  patch((next) => { next.catalog.roots[index]!.containerPath = event.target.value; })
+                  patch((next) => {
+                    next.catalog.roots[index]!.source = event.target.value as ScanRoot['source'];
+                  })
                 }
-              />
+              >
+                <option value="container">This container, via a bind mount</option>
+                <option value="agent">The Windows agent</option>
+              </select>
             </Field>
-            <Field label="Windows path" help="Shown in alerts and reports so paths are actionable on the host.">
+            {root.source === 'container' && (
+              <Field label="Path inside the container" help="The bind mount target, e.g. /mnt/pools/hdd">
+                <input
+                  type="text"
+                  value={root.containerPath}
+                  onChange={(event) =>
+                    patch((next) => { next.catalog.roots[index]!.containerPath = event.target.value; })
+                  }
+                />
+              </Field>
+            )}
+            <Field
+              label="Windows path"
+              help={
+                root.source === 'agent'
+                  ? 'What the agent walks. A volume GUID path works and is the point: \\?\Volume{guid}\PoolPart.guid needs no drive letter.'
+                  : 'Shown in alerts and reports so paths are actionable on the host.'
+              }
+            >
               <input
                 type="text"
                 value={root.hostPath}
                 onChange={(event) => patch((next) => { next.catalog.roots[index]!.hostPath = event.target.value; })}
               />
             </Field>
+            {root.source === 'agent' && (
+              <Field
+                label="Agent hostname"
+                help="Leave blank when there is one agent. Set it when several report and only one can see this disk."
+              >
+                <input
+                  type="text"
+                  value={root.agentHostname}
+                  onChange={(event) =>
+                    patch((next) => { next.catalog.roots[index]!.agentHostname = event.target.value; })
+                  }
+                />
+              </Field>
+            )}
             <Field label="Drive label" help="The label you wrote on the caddy, e.g. DRIVEPOOL27.">
               <input
                 type="text"
