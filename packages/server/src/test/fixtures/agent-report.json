@@ -105,7 +105,7 @@
       "label": "HDD Pool",
       "driveLetter": "P",
       "path": "P:\\",
-      "fileSystem": "Covefs",
+      "fileSystem": "NTFS",
       "fileSystemLabel": "HDD Pool",
       "sizeBytes": 28000000000000,
       "freeBytes": 3959207528857,

@@ -307,10 +307,15 @@ function Get-PoolInventory {
     .SYNOPSIS
         Discover DrivePool pools, their parts and their duplication settings.
     .DESCRIPTION
-        Pool drives are found by their filesystem type (Covefs). `dpcmd list-poolparts`
-        then gives the real pool GUID and the parts belonging to it - but identifies
-        those parts only by NT device path, so each is matched back to a drive letter by
-        finding which volume holds its PoolPart folder.
+        A pool is whatever `dpcmd list-poolparts` says is one. Nothing else is reliable:
+        Windows reports a DrivePool volume's filesystem as NTFS, not as the driver name,
+        so any check on the filesystem string finds no pools on a host that plainly has
+        one. So every lettered volume is probed with dpcmd and a pool is a volume dpcmd
+        answers for. That is a handful of cheap invocations once per report, and it needs
+        no heuristic at all.
+
+        dpcmd identifies parts only by NT device path, so each is matched back to a
+        volume by finding which one holds its PoolPart folder.
 
         Without dpcmd, parts are still discovered from the PoolPart folders themselves;
         the pool they belong to then has to come from the UI, which is why the pool id
@@ -321,15 +326,45 @@ function Get-PoolInventory {
     $result = [ordered]@{ pools = @(); duplication = @() }
     if (-not $Config.CollectDrivePool) { return $result }
 
-    $poolVolumes = @($Volumes | Where-Object { $_.fileSystem -match 'covefs' -and $_.driveLetter })
-    if ($poolVolumes.Count -eq 0) {
-        $Errors.Add((New-CollectorError -Collector 'drivepool' -Message 'No DrivePool volumes found. Pool drives are identified by the Covefs filesystem.'))
-        return $result
-    }
-
     $dpcmd = Resolve-DpcmdPath -Config $Config
     if (-not $dpcmd) {
         $Errors.Add((New-CollectorError -Collector 'dpcmd' -Message 'dpcmd.exe not found. Pool parts will be discovered from PoolPart folders, but pool membership and duplication settings need to be set in the web interface.'))
+    }
+
+    # Ask dpcmd about every lettered volume; the ones it answers for are the pools.
+    $lettered = @($Volumes | Where-Object { $_.driveLetter })
+    $poolVolumes = New-Object System.Collections.Generic.List[object]
+    $partsByLetter = @{}
+
+    if ($dpcmd) {
+        foreach ($volume in $lettered) {
+            $root = "$($volume.driveLetter):\"
+            try {
+                $lines = & $dpcmd list-poolparts $root 2>&1 | ForEach-Object { [string]$_ }
+                $found = ConvertFrom-DpcmdPoolParts -Lines $lines
+                if ($found.Count -gt 0 -and $found[0].poolId) {
+                    $poolVolumes.Add($volume)
+                    $partsByLetter[$volume.driveLetter] = $found
+                }
+            }
+            catch {
+                # Not a pool, or dpcmd refused. Either way this volume is simply not one;
+                # only say something if nothing turns out to be a pool at all.
+                Write-AgentLog -Message "dpcmd list-poolparts $root : $($_.Exception.Message)" -Level 'DEBUG' -Config $Config
+            }
+        }
+    }
+
+    if ($poolVolumes.Count -eq 0) {
+        $checked = ($lettered | ForEach-Object { "$($_.driveLetter):" }) -join ' '
+        $reason = if ($dpcmd) {
+            "dpcmd reported no pool for any of $checked. If DrivePool is installed and running, send the output of 'dpcmd list-poolparts J:\' so the parser can be matched to your version."
+        }
+        else {
+            "dpcmd.exe was not found, so pools cannot be identified. Set DpcmdPath in agent.config.json."
+        }
+        $Errors.Add((New-CollectorError -Collector 'drivepool' -Message $reason))
+        return $result
     }
 
     $pools = New-Object System.Collections.Generic.List[object]
@@ -340,24 +375,18 @@ function Get-PoolInventory {
         $poolId = ''
         $parts = @()
 
-        if ($dpcmd) {
-            try {
-                $lines = & $dpcmd list-poolparts $root 2>&1 | ForEach-Object { [string]$_ }
-                $parts = ConvertFrom-DpcmdPoolParts -Lines $lines
-                if ($parts.Count -gt 0 -and $parts[0].poolId) { $poolId = $parts[0].poolId }
-                $parts = Resolve-PoolPartVolume -Parts $parts -Volumes $Volumes -TestPath {
-                        param($path) Test-Path -LiteralPath $path -PathType Container
-                    }
-            }
-            catch {
-                $Errors.Add((New-CollectorError -Collector 'dpcmd' -Message "list-poolparts failed for $root" -Detail $_.Exception.Message))
-            }
+        if ($partsByLetter.ContainsKey($poolVolume.driveLetter)) {
+            $parts = $partsByLetter[$poolVolume.driveLetter]
+            if ($parts.Count -gt 0 -and $parts[0].poolId) { $poolId = $parts[0].poolId }
+            $parts = Resolve-PoolPartVolume -Parts $parts -Volumes $Volumes -TestPath {
+                    param($path) Test-Path -LiteralPath $path -PathType Container
+                }
         }
 
         if (-not $poolId) { $poolId = if ($poolVolume.volumeId) { $poolVolume.volumeId } else { $root } }
 
         if ($parts.Count -eq 0) {
-            $parts = Find-PoolPartFolders -Volumes $Volumes -Errors $Errors
+            $parts = Find-PoolPartFolders -Volumes $Volumes -Errors $Errors -PoolLetters @($poolVolumes | ForEach-Object { $_.driveLetter })
             foreach ($part in $parts) { $part.poolId = $poolId }
         }
 
@@ -393,11 +422,15 @@ function Find-PoolPartFolders {
     .SYNOPSIS
         Locate pool parts without dpcmd, by the PoolPart.* folder DrivePool creates.
     #>
-    param([array] $Volumes, [System.Collections.Generic.List[object]] $Errors)
+    param(
+        [array] $Volumes,
+        [System.Collections.Generic.List[object]] $Errors,
+        [string[]] $PoolLetters = @()
+    )
 
     $parts = New-Object System.Collections.Generic.List[object]
     foreach ($volume in $Volumes) {
-        if ($volume.fileSystem -match 'covefs') { continue }
+        if ($PoolLetters -contains $volume.driveLetter) { continue }
         # Prefer a letter, then a folder mount point, then the volume GUID path: a pool
         # disk on a large array often has no letter at all.
         $root = if ($volume.driveLetter) { "$($volume.driveLetter):\" }

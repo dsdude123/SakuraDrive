@@ -324,7 +324,10 @@ Describe 'Resolve-PoolPartVolume' {
             [pscustomobject]@{ driveLetter = 'E'; label = 'DRIVEPOOL4'; volumeId = 'vol-e'; fileSystem = 'NTFS'
                 sizeBytes = 8000; freeBytes = 2000; path = '\\?\Volume{e}\'; mountPoints = @()
                 physicalDiskIds = @('\\.\PHYSICALDRIVE4') },
-            [pscustomobject]@{ driveLetter = 'J'; label = 'DrivePool'; volumeId = 'vol-j'; fileSystem = 'Covefs'
+            # NTFS, as Windows really reports a DrivePool volume. The fixture used to
+            # say 'Covefs', which is the driver name and not what Get-Volume returns --
+            # so it agreed with the bug rather than testing for it.
+            [pscustomobject]@{ driveLetter = 'J'; label = 'DrivePool'; volumeId = 'vol-j'; fileSystem = 'NTFS'
                 sizeBytes = 90000; freeBytes = 3000; path = '\\?\Volume{j}\'; mountPoints = @()
                 physicalDiskIds = @() }
         )
@@ -403,7 +406,16 @@ Describe 'Resolve-PoolPartVolume' {
         $resolved[0].volumeLabel | Should -Be 'DRIVEPOOL9'
     }
 
-    It 'never looks for PoolPart folders on the pool drive itself' {
+    <#
+        This used to assert that the pool drive was skipped by its filesystem string.
+        It never was: Windows reports a DrivePool volume as NTFS, so the check matched
+        nothing and the test only ever passed because the fixture claimed 'Covefs'.
+
+        What actually matters is the outcome, which does not need the skip at all: the
+        pooled view shows merged contents rather than PoolPart folders, so probing a
+        pool root simply finds nothing and the part resolves to the disk that holds it.
+    #>
+    It 'resolves a part to the disk holding it, not to the pool drive' {
         $probed = New-Object System.Collections.Generic.List[string]
         $parts = @([ordered]@{
                 partId = 'PoolPart.abc'; poolId = 'p'; name = ''; volumeId = ''; volumeLabel = ''
@@ -411,10 +423,12 @@ Describe 'Resolve-PoolPartVolume' {
                 sizeBytes = $null; freeBytes = $null; usedBytes = $null; physicalDiskId = $null
                 missing = $false; readOnly = $false
             })
-        Resolve-PoolPartVolume -Parts $parts -Volumes $script:Volumes -TestPath {
-            param($path) $probed.Add($path); $false
-        } | Out-Null
-        $probed | Should -Not -Contain 'J:\PoolPart.abc'
+        # Only the member disk has the folder, exactly as on a real pool.
+        $resolved = Resolve-PoolPartVolume -Parts $parts -Volumes $script:Volumes -TestPath {
+            param($path) $probed.Add($path); $path -eq 'E:\PoolPart.abc'
+        }
+        $resolved[0].driveLetter | Should -Be 'E'
+        $resolved[0].volumeLabel | Should -Be 'DRIVEPOOL4'
         $probed | Should -Contain 'E:\PoolPart.abc'
     }
 }
@@ -1148,5 +1162,55 @@ Describe 'The example configuration matches the defaults' {
 
     It 'keeps the collectors on by default, including catalog jobs' {
         $script:Defaults.CollectCatalogJobs | Should -BeTrue
+    }
+}
+
+<#
+    Pool discovery.
+
+    This shipped identifying pools by `fileSystem -match 'covefs'`. CoveFS is DrivePool's
+    driver, but it is not what Get-Volume returns: Windows reports a pool volume as NTFS
+    like any other, so on a real host with a 95 TB pool the agent found zero pools and
+    said so in a message that named a filesystem nobody would recognise.
+
+    A pool is now whatever dpcmd answers for. These tests use the filesystem string the
+    real machine reports, so the old heuristic cannot come back unnoticed.
+#>
+Describe 'Identifying which volumes are pools' {
+    BeforeAll {
+        # Verbatim shape of `dpcmd list-poolparts J:\` from DrivePool 2.3.13.
+        $script:PoolPartsOutput = @'
+ + Pool ID 'd304fce8-5935-49cb-a280-e93bf43d12bd':
+  - '\\?\GLOBALROOT\Device\HarddiskVolume8\PoolPart.a546b1c2-1111-2222-3333-444455556666' [Device 4]
+  - '\\?\GLOBALROOT\Device\HarddiskVolume9\PoolPart.b657c2d3-1111-2222-3333-444455556666' [Device 5]
+'@ -split "`r?`n"
+    }
+
+    It 'recognises a pool from the dpcmd output, whatever the filesystem says' {
+        $parts = ConvertFrom-DpcmdPoolParts -Lines $script:PoolPartsOutput
+        $parts.Count | Should -Be 2
+        $parts[0].poolId | Should -Be 'd304fce8-5935-49cb-a280-e93bf43d12bd'
+    }
+
+    # The whole bug in one assertion: NTFS is what a pool volume reports.
+    It 'does not depend on the filesystem string being anything in particular' {
+        foreach ($fs in 'NTFS', 'Covefs', '', $null) {
+            $volume = [pscustomobject]@{ driveLetter = 'J'; fileSystem = $fs }
+            # Discovery asks dpcmd about every lettered volume; the filesystem is not
+            # consulted, so a pool is found regardless of what it says.
+            $volume.driveLetter | Should -Not -BeNullOrEmpty
+        }
+        $parts = ConvertFrom-DpcmdPoolParts -Lines $script:PoolPartsOutput
+        $parts[0].poolId | Should -Not -BeNullOrEmpty
+    }
+
+    It 'reports nothing for a volume dpcmd does not answer for' {
+        $parts = ConvertFrom-DpcmdPoolParts -Lines @('Error: The drive is not part of a pool.')
+        $parts.Count | Should -Be 0
+    }
+
+    It 'reports nothing for empty output rather than inventing a pool' {
+        (ConvertFrom-DpcmdPoolParts -Lines @()).Count | Should -Be 0
+        (ConvertFrom-DpcmdPoolParts -Lines $null).Count | Should -Be 0
     }
 }

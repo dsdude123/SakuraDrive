@@ -189,7 +189,8 @@ $volumes = @(
     },
     [ordered]@{
         volumeId = '\\?\Volume{44444444-4444-4444-4444-444444444444}\'; label = 'HDD Pool'
-        driveLetter = 'P'; path = 'P:\'; fileSystem = 'Covefs'; fileSystemLabel = 'HDD Pool'
+        # NTFS: that is what Windows reports for a DrivePool volume, driver name or not.
+        driveLetter = 'P'; path = 'P:\'; fileSystem = 'NTFS'; fileSystemLabel = 'HDD Pool'
         sizeBytes = 28000000000000; freeBytes = 3959207528857; healthStatus = 'Healthy'
         operationalStatus = 'OK'; dirty = $false; physicalDiskIds = @()
     }

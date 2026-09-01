@@ -387,7 +387,7 @@ function ConvertFrom-DpcmdPoolParts {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowEmptyCollection()] [AllowNull()] [string[]] $Lines
     )
 
     $parts = New-Object System.Collections.Generic.List[object]
@@ -471,7 +471,7 @@ function ConvertFrom-DpcmdDuplicationDetail {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowEmptyCollection()] [AllowNull()] [string[]] $Lines
     )
 
     $result = [ordered]@{
@@ -522,7 +522,7 @@ function ConvertFrom-DpcmdDuplication {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowEmptyCollection()] [AllowNull()] [string[]] $Lines
     )
 
     (ConvertFrom-DpcmdDuplicationDetail -Lines $Lines).expectedCopies
@@ -557,9 +557,10 @@ function Resolve-PoolPartVolume {
     foreach ($part in $Parts) {
         $matched = $null
         foreach ($volume in $Volumes) {
-            # A pool drive contains the pooled view, not the PoolPart folders.
-            if ($volume.fileSystem -match 'covefs') { continue }
-
+            # No filesystem check here. Windows reports a DrivePool volume as NTFS, so
+            # testing the filesystem string skipped nothing; and it never needed to,
+            # because the pooled view shows the merged contents rather than the
+            # PoolPart folders, so the probe below simply fails on a pool root.
             # On an array with more disks than there are drive letters, pool members
             # are normally mounted without one - so try the volume's own GUID path and
             # any folder mount point as well, not just `X:\`.
@@ -706,7 +707,7 @@ function ConvertFrom-RxpccStatus {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowEmptyCollection()] [AllowNull()] [string[]] $Lines
     )
 
     $caches = New-Object System.Collections.Generic.List[object]
@@ -828,7 +829,7 @@ function ConvertFrom-RxpccVolumeList {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowEmptyCollection()] [AllowNull()] [string[]] $Lines
     )
 
     $volumes = New-Object System.Collections.Generic.List[object]
@@ -924,7 +925,7 @@ function ConvertFrom-RxpccPerf {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [AllowNull()] [string[]] $Lines
+        [Parameter(Mandatory)] [AllowEmptyString()] [AllowEmptyCollection()] [AllowNull()] [string[]] $Lines
     )
 
     $result = [ordered]@{

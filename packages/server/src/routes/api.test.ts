@@ -159,6 +159,46 @@ describe('agent reporting', () => {
     expect(response.statusCode).toBe(401);
   });
 
+  /**
+   * The agent has a bearer token and no session. Every route test until now signed in
+   * first, so the session gate blocking the job endpoints -- it matched
+   * `/api/agent/report` exactly rather than the prefix -- went unnoticed until the
+   * agent hit it on a real host and reported a 401 that looked like a token problem.
+   */
+  it('lets a token-only request reach every agent endpoint, not just the report', async () => {
+    for (const url of ['/api/agent/jobs/claim']) {
+      const response = await h.app.inject({
+        method: 'POST',
+        url,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { hostname: 'tokyo-3', agentVersion: '1.0.0' },
+      });
+      // 204 means "no work", which is a perfectly good answer. 401 is not.
+      expect(response.statusCode, `${url} rejected a valid agent token`).not.toBe(401);
+    }
+  });
+
+  it('still rejects an agent endpoint when the token is wrong', async () => {
+    const response = await h.app.inject({
+      method: 'POST',
+      url: '/api/agent/jobs/claim',
+      headers: { authorization: 'Bearer not-a-real-token' },
+      payload: { hostname: 'tokyo-3' },
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
+  // The plural /api/agents/* endpoints are the interface's, not the agent's, and must
+  // stay behind the session gate. One character apart from the exempted prefix.
+  it('keeps the interface agent endpoints behind a session', async () => {
+    const response = await h.app.inject({
+      method: 'GET',
+      url: '/api/agents/jobs',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
   it('rejects a malformed report with a useful error', async () => {
     const response = await h.app.inject({
       method: 'POST',

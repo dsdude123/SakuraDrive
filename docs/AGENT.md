@@ -322,5 +322,14 @@ or was revoked.
 reports a blank or duplicated serial falls back to the device path, which changes when
 Windows renumbers the disks. Check `Get-PhysicalDisk | Select FriendlyName, SerialNumber`.
 
-**Pools are missing.** Pool drives are identified by their `Covefs` filesystem. Confirm
-with `Get-Volume | Where-Object FileSystemType -match covefs`.
+**Pools are missing.** A pool is whatever `dpcmd list-poolparts` says is one — the agent
+probes each lettered volume with it rather than inspecting the filesystem, because
+Windows reports a DrivePool volume as NTFS like any other. Confirm by hand:
+
+```powershell
+& 'C:\Program Files\StableBit\DrivePool\dpcmd.exe' list-poolparts J:\
+```
+
+If that prints a pool id and the agent still reports none, the output format differs
+from the one the parser was built against — send it and the parser can be matched to it.
+If dpcmd itself is not found, set `DpcmdPath` in `agent.config.json`.

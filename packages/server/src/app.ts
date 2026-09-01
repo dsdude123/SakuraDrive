@@ -45,14 +45,19 @@ export async function buildApp(services: Services): Promise<FastifyInstance> {
   });
 
   /**
-   * Session gate. The agent endpoint carries its own bearer token and is checked in
-   * its handler; everything else under /api needs a signed-in session unless login is
-   * turned off for a trusted LAN.
+   * Session gate. Everything under `/api/agent/` carries its own bearer token and is
+   * checked in its own handler; everything else under /api needs a signed-in session
+   * unless login is turned off for a trusted LAN.
+   *
+   * The prefix matters: this was written as an exact match on `/api/agent/report`, so
+   * every endpoint added under `/api/agent/` afterwards was silently gated behind a
+   * session the agent does not have and cannot get. It failed with a 401 that looked
+   * like a token problem and was not one.
    */
   app.addHook('onRequest', async (request, reply) => {
     const url = request.url.split('?')[0] ?? '';
     if (!url.startsWith('/api/')) return;
-    if (PUBLIC_PATHS.has(url) || url === '/api/agent/report') return;
+    if (PUBLIC_PATHS.has(url) || url.startsWith('/api/agent/')) return;
     if (services.config.disableAuth) return;
     if (!services.settings.get().security.requireLogin) return;
     // Before the first account exists the UI shows a setup screen, so let it through.
