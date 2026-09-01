@@ -173,6 +173,19 @@ export class AuthService {
       }));
   }
 
+  /**
+   * Delete revoked tokens past their retention window.
+   *
+   * Only revoked ones: an active token is never removed by housekeeping, because that
+   * would silently stop an agent and look exactly like the agent breaking.
+   */
+  pruneRevokedTokens(keepDays: number): number {
+    const cutoff = new Date(Date.now() - keepDays * 86_400_000).toISOString();
+    return this.db
+      .prepare('DELETE FROM agent_tokens WHERE revoked_at IS NOT NULL AND revoked_at < ?')
+      .run(cutoff).changes;
+  }
+
   revokeAgentToken(id: number): void {
     this.db.prepare('UPDATE agent_tokens SET revoked_at = ? WHERE id = ?').run(nowIso(), id);
   }

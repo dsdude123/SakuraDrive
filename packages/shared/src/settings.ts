@@ -143,6 +143,12 @@ export const settingsSchema = z.object({
       smartHistoryDays: z.number().int().min(1).default(365),
       performanceHistoryDays: z.number().int().min(1).default(30),
       alertHistoryDays: z.number().int().min(1).default(365),
+      /**
+       * How long a revoked agent token stays listed before it is deleted. Kept for a
+       * while so "was this host still reporting after I revoked it?" is answerable;
+       * deleted eventually so the list does not accumulate forever.
+       */
+      revokedTokenDays: z.number().int().min(1).default(30),
       workflowRunHistory: z.number().int().min(10).default(500),
     })
     .default({}),

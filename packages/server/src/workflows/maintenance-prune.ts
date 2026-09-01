@@ -52,6 +52,7 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
       // not leave a root stuck behind a job nobody is working on.
       agentJobs.reclaimAbandoned();
       const agentJobsPruned = agentJobs.prune(config.general.alertHistoryDays);
+      const tokensPruned = auth.pruneRevokedTokens(config.general.revokedTokenDays);
       const changesPruned = catalog.pruneChanges(config.catalog.changeHistoryRuns);
       const runsPruned = deps.manager().pruneRuns(config.general.workflowRunHistory);
       const sessionsPruned = auth.pruneSessions();
@@ -76,6 +77,7 @@ export function createMaintenanceWorkflow(deps: MaintenanceDeps): WorkflowDefini
         sessions: sessionsPruned,
         notifications: notificationsPruned,
         agentJobs: agentJobsPruned,
+        revokedTokens: tokensPruned,
       };
       ctx.log(
         `Pruned ${Object.values(stats).reduce((sum, value) => sum + value, 0).toLocaleString()} rows` +

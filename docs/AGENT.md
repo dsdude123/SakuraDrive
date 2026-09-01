@@ -51,6 +51,25 @@ administrative rights, and SYSTEM is used so the task keeps running when you log
 
 Useful switches:
 
+## Uninstall
+
+```powershell
+& 'C:\Program Files\SakuraDrive Agent\Uninstall-SakuraDriveAgent.ps1'
+```
+
+It is installed alongside the agent so it is still there when the folder you ran the
+installer from is gone. `-WhatIf` shows what it would remove. Logs are kept by default;
+`-KeepLogs:$false` removes those too.
+
+Two things it deliberately does not do: the token stays valid until you revoke it under
+**Settings → Agents**, and the catalog is untouched — removing the thing that read a disk
+should never delete the record of what was on it.
+
+A revoked token disappears from the list after 30 days (`general.revokedTokenDays`),
+which is long enough to answer "was that host still reporting after I revoked it?".
+
+## Installer switches
+
 ```powershell
 -IntervalMinutes 30                          # default 15
 -InstallPath 'D:\Tools\Agent'

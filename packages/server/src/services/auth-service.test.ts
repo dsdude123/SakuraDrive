@@ -136,3 +136,45 @@ describe('agent tokens', () => {
     expect(auth.listAgentTokens()[0]!.revokedAt).not.toBeNull();
   });
 });
+
+describe('revoked token retention', () => {
+  const age = (id: number, days: number) => {
+    const at = new Date(Date.now() - days * 86_400_000).toISOString();
+    db.prepare('UPDATE agent_tokens SET revoked_at = ? WHERE id = ?').run(at, id);
+  };
+  const idOf = (name: string) => auth.listAgentTokens().find((token) => token.name === name)!.id;
+
+  it('deletes a revoked token once it is past the window', () => {
+    auth.createAgentToken('old');
+    age(idOf('old'), 40);
+    expect(auth.pruneRevokedTokens(30)).toBe(1);
+    expect(auth.listAgentTokens()).toHaveLength(0);
+  });
+
+  it('keeps a recently revoked one, so "was it still reporting?" stays answerable', () => {
+    auth.createAgentToken('recent');
+    age(idOf('recent'), 3);
+    expect(auth.pruneRevokedTokens(30)).toBe(0);
+    expect(auth.listAgentTokens()).toHaveLength(1);
+  });
+
+  // Housekeeping must never stop a working agent: that would look exactly like the
+  // agent breaking, and the cause would be invisible.
+  it('never touches an active token, however old', () => {
+    const plaintext = auth.createAgentToken('active');
+    db.prepare("UPDATE agent_tokens SET created_at = '2000-01-01T00:00:00.000Z'").run();
+    expect(auth.pruneRevokedTokens(1)).toBe(0);
+    expect(auth.verifyAgentToken(plaintext.token)).toBeTruthy();
+  });
+
+  it('prunes only the ones past the window when both kinds are present', () => {
+    auth.createAgentToken('old');
+    auth.createAgentToken('recent');
+    auth.createAgentToken('active');
+    age(idOf('old'), 60);
+    age(idOf('recent'), 2);
+
+    expect(auth.pruneRevokedTokens(30)).toBe(1);
+    expect(auth.listAgentTokens().map((token) => token.name).sort()).toEqual(['active', 'recent']);
+  });
+});

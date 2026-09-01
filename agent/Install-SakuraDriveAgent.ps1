@@ -90,6 +90,7 @@ if ($Uninstall) {
         }
     }
     Write-Host 'Uninstalled. The token remains valid until you revoke it in the web interface.'
+    Write-Host 'The catalog is untouched: removing the agent does not delete what it recorded.'
     return
 }
 
@@ -102,7 +103,9 @@ if ($IntervalMinutes -lt 1) { throw 'IntervalMinutes must be at least 1.' }
 if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
     New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
 
-    foreach ($file in @('SakuraDriveAgent.ps1', 'SakuraDrive.Agent.psm1')) {
+    # The uninstaller is installed too: it must still be there when the folder this
+    # installer was run from is long gone.
+    foreach ($file in @('SakuraDriveAgent.ps1', 'SakuraDrive.Agent.psm1', 'Uninstall-SakuraDriveAgent.ps1')) {
         $source = Join-Path $PSScriptRoot $file
         if (-not (Test-Path -LiteralPath $source)) { throw "Missing $file next to this installer." }
         Copy-Item -LiteralPath $source -Destination (Join-Path $InstallPath $file) -Force
@@ -168,6 +171,7 @@ if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
 
     Write-Host "Installed the agent into $InstallPath."
     Write-Host "Configuration: $configPath"
+    Write-Host "Uninstall:     $(Join-Path $InstallPath 'Uninstall-SakuraDriveAgent.ps1')"
     Write-Host '  Edit it and re-run with -KeepConfig to keep your changes across upgrades.'
     foreach ($tool in 'SmartctlPath', 'DpcmdPath', 'RxpccPath') {
         $value = $configuration[$tool]
