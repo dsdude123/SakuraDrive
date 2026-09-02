@@ -22,6 +22,7 @@ import { CatalogService } from './catalog-service.js';
 import { DiscordNotifier, type FetchLike } from './discord-notifier.js';
 import { ExportService } from './export-service.js';
 import { KopiaClient, createSpawnRunner, type KopiaRunner } from './kopia-client.js';
+import { RootDetectionService } from './root-detection.js';
 import { SettingsService } from './settings-service.js';
 
 export interface Services {
@@ -34,6 +35,7 @@ export interface Services {
   agents: AgentService;
   agentDist: AgentDistService;
   catalog: CatalogService;
+  rootDetection: RootDetectionService;
   agentJobs: AgentJobService;
   bitrot: BitrotService;
   backup: BackupService;
@@ -69,7 +71,8 @@ export function createServices(options: CreateServicesOptions): Services {
   const settings = new SettingsService(db);
   const alerts = new AlertService(db);
   const auth = new AuthService(db);
-  const agents = new AgentService({ db, settings, alerts, logger });
+  const rootDetection = new RootDetectionService(db, settings);
+  const agents = new AgentService({ db, settings, alerts, logger, detection: rootDetection });
   const agentDist = new AgentDistService({
     directory: config.agentDistDir,
     protocolVersion: AGENT_PROTOCOL_VERSION,
@@ -163,6 +166,7 @@ export function createServices(options: CreateServicesOptions): Services {
     agents,
     agentDist,
     catalog,
+    rootDetection,
     bitrot,
     backup,
     exports,

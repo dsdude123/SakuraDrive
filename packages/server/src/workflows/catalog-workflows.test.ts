@@ -214,12 +214,28 @@ describe('catalog scan', () => {
     expect(stats.bytes).toBe(11);
   });
 
-  it('does nothing when no roots are configured', async () => {
+  /**
+   * This used to assert `completed`, which is how a scan with nothing configured came
+   * to finish in 15ms with a green tick -- indistinguishable, to someone who had just
+   * pressed "run now", from a scan that worked. The run really did nothing, so it
+   * should say so.
+   */
+  it('fails loudly rather than finishing green when no roots are configured', async () => {
     settings.update({ schedule: { heavyIo: fullSchedule() }, catalog: { roots: [] } });
     const run = await manager.start('catalog.scan', { force: true });
     await manager.drain();
-    expect(manager.run(run.id)!.state).toBe('completed');
+
+    const finished = manager.run(run.id)!;
+    expect(finished.state).toBe('failed');
+    expect(finished.error).toContain('No catalog roots are configured');
+    // And nothing was touched on the way to saying so.
     expect(catalog.totals().files).toBe(0);
+  });
+
+  // The scheduler must not keep starting a run it knows will fail.
+  it('tells the scheduler there is no work when no roots are configured', () => {
+    settings.update({ catalog: { roots: [] } });
+    expect(manager.definition('catalog.scan')!.hasWork()).toBe(false);
   });
 
   it('records created, modified and deleted differences between runs', async () => {

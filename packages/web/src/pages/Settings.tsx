@@ -286,6 +286,34 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
     }
   };
 
+  const detect = useQuery<{
+    available: number;
+    alreadyConfigured: number;
+    skippedMissing: number;
+    names: string[];
+  }>('/api/catalog/roots/detect');
+
+  const runDetect = async () => {
+    const result = await mutation.run<{ added: Array<{ name: string }>; skippedMissing: number }>(
+      '/api/catalog/roots/detect',
+    );
+    if (!result) {
+      if (mutation.error) toast.push(mutation.error, 'error');
+      return;
+    }
+    if (result.added.length === 0) {
+      toast.push('Every disk the agent reported already has a root.', 'success');
+    } else {
+      toast.push(`Added ${result.added.length} roots: ${result.added.map((r) => r.name).join(', ')}`, 'success');
+    }
+    if (result.skippedMissing > 0) {
+      toast.push(`${result.skippedMissing} disks DrivePool reports as missing were left out.`, 'error');
+    }
+    detect.refresh();
+    // The roots were written server-side, so the draft in this form is now behind.
+    window.location.reload();
+  };
+
   const addRoot = () => {
     patch((next) => {
       next.catalog.roots.push({
@@ -309,19 +337,34 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
 
   return (
     <div className="stack">
+      {draft.catalog.roots.length > 0 && detect.data && detect.data.available > 0 && (
+        <Banner
+          tone="warning"
+          title={`${detect.data.available} pool ${detect.data.available === 1 ? 'disk has' : 'disks have'} no catalog root`}
+        >
+          <div>{detect.data.names.join(', ')}</div>
+          <button className="small primary" style={{ marginTop: 8 }} onClick={() => void runDetect()} disabled={mutation.busy}>
+            Add {detect.data.available === 1 ? 'it' : 'them'}
+          </button>
+        </Banner>
+      )}
+
       <Card title="Root kinds">
         <dl className="definitions">
-          <dt>pool</dt>
-          <dd>The DrivePool virtual drive.</dd>
           <dt>poolpart</dt>
           <dd>
-            One disk&apos;s <code>PoolPart.*</code> folder. Needed for the per-disk
-            disaster-recovery report.
+            One member disk&apos;s <code>PoolPart.*</code> folder. This is what you want:
+            one per disk in the pool. Duplication puts copies on different physical disks,
+            so only reading them separately can say how many disks a file survives losing.
           </dd>
           <dt>disk</dt>
-          <dd>Any other volume.</dd>
+          <dd>A volume that is not in a pool.</dd>
+          <dt>pool</dt>
+          <dd>
+            Rarely needed. The pool view is built from its parts, so adding the virtual
+            drive as well would catalogue every file a second time.
+          </dd>
         </dl>
-        <p className="hint">Give a pool and its parts the same pool id to link them.</p>
       </Card>
 
       {(orphaned.data?.roots.length ?? 0) > 0 && (
@@ -349,8 +392,21 @@ function RootsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.El
       )}
 
       {draft.catalog.roots.length === 0 && (
-        <EmptyState title="No roots configured" action={<button className="primary" onClick={addRoot}>Add a root</button>}>
-          Bind-mount your pool into the container (see docker-compose.yml) and add it here.
+        <EmptyState
+          title="No roots configured"
+          action={
+            detect.data && detect.data.available > 0 ? (
+              <button className="primary" onClick={() => void runDetect()} disabled={mutation.busy}>
+                Add the {detect.data.available} disks the agent found
+              </button>
+            ) : (
+              <button className="primary" onClick={addRoot}>Add a root</button>
+            )
+          }
+        >
+          {detect.data && detect.data.available > 0
+            ? 'One root per pool member disk. Nothing to type: the agent already reported them.'
+            : 'Nothing to add yet. Once an agent reports, its pool members appear here.'}
         </EmptyState>
       )}
 

@@ -448,13 +448,31 @@ export class CatalogService {
           .map((root) => root.poolId as string),
       ),
     ];
+    // What the agent reported the pool is called. A pool id is a GUID, so without this
+    // the interface labels a pool "Pool d304fce8-5935-..." while the agent has been
+    // reporting "DrivePool (J:)" all along.
+    const reported = new Map(
+      this.db
+        .prepare<[], { pool_id: string; name: string | null; drive_letter: string | null }>(
+          'SELECT pool_id, name, drive_letter FROM pools',
+        )
+        .all()
+        .map((row) => [row.pool_id, row]),
+    );
+
     return poolIds.map((poolId) => {
-      // Prefer a name the operator gave a `pool` root for the same pool.
+      // A `pool` root is the operator overriding the name; otherwise use the agent's.
       const named = roots.find((root) => root.kind === 'pool' && root.poolId === poolId);
+      const row = reported.get(poolId);
+      const fromAgent = row?.name
+        ? row.drive_letter
+          ? `${row.name} (${row.drive_letter}:)`
+          : row.name
+        : null;
       return {
         poolId,
         rootId: CatalogService.poolRootId(poolId),
-        name: named?.name ?? `Pool ${poolId}`,
+        name: named?.name ?? fromAgent ?? `Pool ${poolId}`,
         partRootIds: this.partRootIds(poolId),
       };
     });

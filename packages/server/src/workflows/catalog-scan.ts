@@ -78,8 +78,14 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
       const roots = settings.enabledRoots();
 
       if (roots.length === 0) {
-        ctx.log('No catalog roots are configured — nothing to scan.');
-        return { state: 'completed' };
+        // Failing rather than completing. A run that finished in 15ms with a green tick
+        // is indistinguishable from a scan that worked, and someone who just pressed
+        // "run now" is owed the reason nothing happened. `hasWork` already keeps the
+        // scheduler from starting this, so only a manual trigger reaches it.
+        throw new Error(
+          'No catalog roots are configured, so there was nothing to scan. Settings then Catalog roots ' +
+            'can detect them from what the agent has already reported.',
+        );
       }
 
       for (; cursor.rootIndex < roots.length; cursor.rootIndex += 1) {

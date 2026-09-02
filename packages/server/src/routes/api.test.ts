@@ -392,6 +392,126 @@ describe('agent distribution', () => {
   });
 });
 
+/**
+ * Configuring the catalog from what the agent already knows.
+ *
+ * The agent reports every pool and every member disk on every cycle, so requiring an
+ * operator to then add one root per disk by hand -- picking each out of a dropdown of
+ * that same data -- is work the machine can do. On a fourteen-disk pool it is thirteen
+ * rounds of clicking that answer a question nobody was asking.
+ */
+describe('detecting catalog roots', () => {
+  let token: string;
+
+  const reportWithPool = () => ({
+    ...buildAgentReport(),
+    pools: [
+      {
+        poolId: 'hdd-guid',
+        name: 'DrivePool',
+        driveLetter: 'J',
+        sizeBytes: 95_500_000_000_000,
+        freeBytes: 4_000_000_000_000,
+        duplicatedBytes: null,
+        unduplicatedBytes: null,
+        parts: [
+          {
+            partId: 'p1',
+            name: 'DRIVEPOOL4',
+            volumeId: null,
+            volumeLabel: 'DRIVEPOOL4',
+            driveLetter: null,
+            path: '\\\\?\\Volume{aaaa}\\PoolPart.hdd',
+            sizeBytes: 14_000_000_000_000,
+            freeBytes: 1_000_000_000_000,
+            usedBytes: 13_000_000_000_000,
+            deviceId: '\\\\.\\PHYSICALDRIVE3',
+            missing: false,
+          },
+          {
+            partId: 'p2',
+            name: 'DRIVEPOOL9',
+            volumeId: null,
+            volumeLabel: 'DRIVEPOOL9',
+            driveLetter: null,
+            path: '\\\\?\\Volume{bbbb}\\PoolPart.hdd',
+            sizeBytes: 14_000_000_000_000,
+            freeBytes: 2_000_000_000_000,
+            usedBytes: 12_000_000_000_000,
+            deviceId: '\\\\.\\PHYSICALDRIVE4',
+            missing: false,
+          },
+        ],
+      },
+    ],
+  });
+
+  beforeEach(async () => {
+    await h.signIn();
+    const created = await request(h, {
+      method: 'POST',
+      url: '/api/agents/tokens',
+      payload: { name: 'NAS-01' },
+    });
+    token = (json(created).token as unknown as { token: string }).token;
+  });
+
+  const report = async () =>
+    h.app.inject({
+      method: 'POST',
+      url: '/api/agent/report',
+      headers: { authorization: `Bearer ${token}` },
+      payload: reportWithPool(),
+    });
+
+  // The whole point: a fresh install needs no clicking at all.
+  it('configures the pool by itself on the first report', async () => {
+    expect(h.services.settings.get().catalog.roots).toHaveLength(0);
+
+    const response = await report();
+    expect(response.statusCode).toBe(200);
+
+    const roots = h.services.settings.get().catalog.roots;
+    expect(roots).toHaveLength(2);
+    expect(roots.map((root) => root.name).sort()).toEqual(['DRIVEPOOL4', 'DRIVEPOOL9']);
+    expect(roots.every((root) => root.kind === 'poolpart')).toBe(true);
+    expect(roots.every((root) => root.poolId === 'hdd-guid')).toBe(true);
+
+    // And says so, rather than reconfiguring the catalog silently.
+    expect((json(response).warnings as unknown as string[]).join(' ')).toContain('catalog root');
+  });
+
+  it('does not keep re-adding them on every later report', async () => {
+    await report();
+    await report();
+    await report();
+    expect(h.services.settings.get().catalog.roots).toHaveLength(2);
+  });
+
+  it('offers what is missing, and adds it when asked', async () => {
+    await report();
+    // Simulate an operator having removed one.
+    const roots = h.services.settings.get().catalog.roots;
+    h.services.settings.update({ catalog: { roots: [roots[0]!] } });
+
+    const preview = json(await request(h, { method: 'GET', url: '/api/catalog/roots/detect' }));
+    expect(preview.available).toBe(1);
+    expect(preview.alreadyConfigured).toBe(1);
+
+    const applied = json(await request(h, { method: 'POST', url: '/api/catalog/roots/detect' }));
+    expect((applied.added as unknown as unknown[])).toHaveLength(1);
+    expect(h.services.settings.get().catalog.roots).toHaveLength(2);
+  });
+
+  it('names the pool the way the agent reported it, not by its GUID', async () => {
+    await report();
+    const pools = json(await request(h, { method: 'GET', url: '/api/catalog/roots' }));
+    const names = (pools.pools as unknown as Array<{ name: string }>).map((pool) => pool.name);
+    expect(names).toContain('DrivePool (J:)');
+    expect(names.join(' ')).not.toContain('hdd-guid');
+  });
+});
+
 describe('alerts', () => {
   beforeEach(async () => {
     await h.signIn();

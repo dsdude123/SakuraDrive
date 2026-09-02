@@ -13,7 +13,7 @@ import type { Services } from '../services/container.js';
 import { errorMessage, parseBody, parseQuery } from './helpers.js';
 
 export function registerSettingsRoutes(app: FastifyInstance, services: Services): void {
-  const { settings, catalog, notifier, kopia, backup, db } = services;
+  const { settings, catalog, notifier, kopia, backup, db, rootDetection } = services;
 
   app.get('/api/settings', async () => {
     const config = settings.get();
@@ -107,6 +107,37 @@ export function registerSettingsRoutes(app: FastifyInstance, services: Services)
    * and the agent forwards them with every poll, which is what makes a letterless disk
    * addressable at all.
    */
+  /**
+   * Add a root for every pool member the agent has reported that does not have one.
+   *
+   * The same data the picker offers, applied in one go: on a seventeen-disk pool the
+   * difference between this and the picker is sixteen rounds of clicking.
+   */
+  app.post('/api/catalog/roots/detect', async () => {
+    const result = rootDetection.apply();
+    return {
+      added: result.added.map((root) => ({
+        id: root.id,
+        name: root.name,
+        poolId: root.poolId,
+        hostPath: root.hostPath,
+      })),
+      alreadyConfigured: result.alreadyConfigured,
+      skippedMissing: result.skippedMissing,
+    };
+  });
+
+  /** What detection would add, so the button can say so before it is pressed. */
+  app.get('/api/catalog/roots/detect', async () => {
+    const result = rootDetection.preview();
+    return {
+      available: result.added.length,
+      alreadyConfigured: result.alreadyConfigured,
+      skippedMissing: result.skippedMissing,
+      names: result.added.map((root) => root.name),
+    };
+  });
+
   app.get('/api/catalog/known-paths', async () => {
     const parts = db
       .prepare<[], {

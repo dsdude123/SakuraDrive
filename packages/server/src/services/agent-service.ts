@@ -21,6 +21,7 @@ import {
 import { fromDbBool, fromJson, nowIso, toDbBool, toJson, type Db } from '../db/index.js';
 import type { Logger } from '../logger.js';
 import type { AlertService } from './alert-service.js';
+import type { RootDetectionService } from './root-detection.js';
 import type { SettingsService } from './settings-service.js';
 
 /** A health finding plus the alert bookkeeping the ingest path needs. */
@@ -36,6 +37,7 @@ export interface AgentServiceOptions {
   settings: SettingsService;
   alerts: AlertService;
   logger: Logger;
+  detection?: RootDetectionService;
 }
 
 interface DriveRow {
@@ -73,12 +75,15 @@ export class AgentService {
   private readonly settings: SettingsService;
   private readonly alerts: AlertService;
   private readonly logger: Logger;
+  /** Adopts the pool as catalog roots on a fresh install. Absent in tests that do not care. */
+  private readonly detection: RootDetectionService | null;
 
   constructor(options: AgentServiceOptions) {
     this.db = options.db;
     this.settings = options.settings;
     this.alerts = options.alerts;
     this.logger = options.logger;
+    this.detection = options.detection ?? null;
   }
 
   /** Store a report and evaluate every health rule it makes possible. */
@@ -100,6 +105,22 @@ export class AgentService {
     this.storePrimoCache(report, receivedAt);
     if (this.settings.get().duplication.acceptAgentRules) {
       this.syncDuplicationRules(report);
+    }
+
+    // The first report is the moment everything needed to configure the catalog exists:
+    // the agent has just said which pools there are and which disks are in them. On a
+    // fresh install there is nothing to lose by acting on that, and the alternative is
+    // an operator adding a root per disk by hand from exactly this data.
+    const adopted = this.detection?.adoptIfUnconfigured();
+    if (adopted) {
+      this.logger.info(
+        { roots: adopted.added.length },
+        'adopted catalog roots from the pool the agent reported',
+      );
+      warnings.push(
+        `Configured ${adopted.added.length} catalog root${adopted.added.length === 1 ? '' : 's'} ` +
+          'from the pool members you reported. Review them under Settings then Catalog roots.',
+      );
     }
 
     const activeKeys = new Set<string>();

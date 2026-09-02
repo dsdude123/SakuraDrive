@@ -178,6 +178,32 @@ then note it: the agent currently passes through the type from `--scan-open`, so
 scan is wrong for your controller the drive is skipped and the reason appears under
 **Settings → Agents**.
 
+## Catalog roots
+
+There is normally nothing to configure. The agent reports every pool and every member
+disk on each cycle, and on a fresh install the server turns that into one catalog root
+per member disk the first time a report arrives. Seventeen disks, no clicking.
+
+**Settings → Catalog roots** is where to check the result, and where to change it:
+
+- One `poolpart` root per **member disk**, never the pooled drive. Duplication puts
+  copies on different physical disks, so only reading the members separately can say how
+  many disks a file survives losing. A root for `J:` as well would catalogue everything
+  twice.
+- A disk added to the pool later shows up as a banner offering to add it.
+- A disk DrivePool reports as missing is never adopted: a scan of a disk that is not
+  there fails, and on an existing root the sweep afterwards would read every file on it
+  as deleted.
+
+Everything on a root except its path has a working default. Worth changing:
+
+| Setting | When |
+| --- | --- |
+| Exclude globs | A scratch or download folder you do not want catalogued |
+| Hash this root | Off for a scratch disk: it stays catalogued but is never read for bit rot |
+| Min/max hash size | Skip hashing files above or below a size |
+| Agent hostname | Only when several agents report and one disk is visible to just one of them |
+
 ## Pool disks without drive letters
 
 An array with more disks than there are drive letters mounts its members without one.
