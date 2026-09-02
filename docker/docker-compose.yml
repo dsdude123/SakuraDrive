@@ -13,6 +13,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     image: sakuradrive:latest
+    # This image is built here, not pulled: it exists on this host and nowhere else.
+    # Saying so keeps `docker compose pull` -- which is what Portainer's stack update
+    # runs first -- from looking for it in a registry and failing before it can build.
+    pull_policy: build
     container_name: sakuradrive
     restart: unless-stopped
 
