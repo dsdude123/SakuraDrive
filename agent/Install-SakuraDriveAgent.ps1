@@ -32,6 +32,10 @@
 .PARAMETER RxpccPath
     Full path to PrimoCache's rxpcc.exe. Blank means search.
 
+.PARAMETER FirstRunTimeoutSeconds
+    How long to wait for the confirmation run before reporting that it is still going.
+    The first pass reads SMART for every disk, so a large array takes minutes.
+
 .PARAMETER KeepConfig
     Re-register the task without touching agent.config.json. Use this after editing the
     configuration by hand, so an upgrade does not overwrite it.
@@ -51,6 +55,7 @@ param(
     [string] $Token,
     [string] $InstallPath = 'C:\Program Files\SakuraDrive Agent',
     [int]    $IntervalMinutes = 15,
+    [int]    $FirstRunTimeoutSeconds = 120,
     [string] $TaskName = 'SakuraDrive Agent',
     [string] $SmartctlPath = '',
     [string] $DpcmdPath = '',
@@ -94,6 +99,11 @@ if ($Uninstall) {
     return
 }
 
+# Hoisted so the confirmation run at the end can name the log even when the install
+# block below was skipped, as -WhatIf skips it.
+$logDirectory = 'C:\ProgramData\SakuraDrive'
+$logPath = Join-Path $logDirectory 'agent.log'
+
 if (-not $ServerUrl) { throw 'ServerUrl is required, for example -ServerUrl http://nas.local:8080' }
 if (-not $Token) { throw 'Token is required. Create one under Settings then Agents in the web interface.' }
 if ($IntervalMinutes -lt 1) { throw 'IntervalMinutes must be at least 1.' }
@@ -119,7 +129,6 @@ if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
         Copy-Item -LiteralPath $source -Destination $destination -Force
     }
 
-    $logDirectory = 'C:\ProgramData\SakuraDrive'
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 
     $configPath = Join-Path $InstallPath 'agent.config.json'
@@ -147,7 +156,8 @@ if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
             $configuration[$tool] = $PSBoundParameters[$tool]
         }
     }
-    if (-not $configuration.LogPath) { $configuration.LogPath = Join-Path $logDirectory 'agent.log' }
+    if (-not $configuration.LogPath) { $configuration.LogPath = $logPath }
+    $logPath = $configuration.LogPath
 
     # Fail here rather than fifteen minutes later in a log nobody is watching.
     $problems = Test-AgentConfig -Config $configuration
@@ -239,13 +249,36 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
 # ------------------------------------------------------------------ first run
 
 Write-Host ''
+if (-not $PSCmdlet.ShouldProcess($TaskName, 'Run once to confirm it reaches the server')) { return }
+
 Write-Host 'Running once now to confirm the agent can reach the server...'
 Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 5
+
+# Poll rather than sleeping a fixed five seconds. The first pass reads SMART for every
+# disk and probes every volume with dpcmd, which on a large array takes minutes -- so a
+# fixed wait reported "still running" (267009) as though it were a failure code, right
+# next to the words "0 means success".
+$deadline = (Get-Date).AddSeconds($FirstRunTimeoutSeconds)
+do {
+    Start-Sleep -Seconds 3
+    $registered = Get-ScheduledTask -TaskName $TaskName
+} while ($registered.State -eq 'Running' -and (Get-Date) -lt $deadline)
 
 $task = Get-ScheduledTaskInfo -TaskName $TaskName
-$registered = Get-ScheduledTask -TaskName $TaskName
-Write-Host "Last result: $($task.LastTaskResult) (0 means success)"
+$outcome = Get-ScheduledTaskResultText -Code $task.LastTaskResult
+
+if ($registered.State -eq 'Running') {
+    Write-Host "First run: still going after $FirstRunTimeoutSeconds seconds, which is normal on a large array."
+    Write-Host "  Watch it: Get-Content '$logPath' -Tail 20 -Wait"
+}
+elseif ($outcome.ok) {
+    Write-Host "First run: $($outcome.text)"
+}
+else {
+    Write-Warning "First run: $($outcome.text)"
+    Write-Warning "  The log is $logPath"
+}
+
 Write-Host "Runs as: $($registered.Principal.UserId) ($($registered.Principal.RunLevel))"
 Write-Host "Triggers: $($registered.Triggers.Count) (one at boot, one repeating every $IntervalMinutes minutes)"
 Write-Host "Survives reboot and sign-out: yes - the task runs as SYSTEM and starts at boot."

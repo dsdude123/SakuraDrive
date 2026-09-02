@@ -528,3 +528,61 @@ Describe 'The update check runs even when the cycle fails' {
         $wrapping.Count | Should -BeGreaterThan 0
     }
 }
+
+<#
+    Reading a scheduled task's last result.
+
+    267009 is "still running", and the installer printed it under the heading
+    "0 means success" -- so a perfectly healthy install looked like a failure on a real
+    host. On a large array the first pass reads SMART for every disk and takes minutes,
+    which makes that the normal outcome of an install rather than an edge case.
+#>
+Describe 'What a scheduled task result code means' {
+    It 'reports a clean exit' {
+        $result = Get-ScheduledTaskResultText -Code 0
+        $result.ok | Should -BeTrue
+        $result.running | Should -BeFalse
+        $result.text | Should -Match 'cleanly'
+    }
+
+    It 'reports 267009 as still running, not as a failure' {
+        $result = Get-ScheduledTaskResultText -Code 267009
+        $result.ok | Should -BeTrue
+        $result.running | Should -BeTrue
+        $result.text | Should -Match 'still running'
+    }
+
+    It 'treats waiting for its next run as fine' {
+        (Get-ScheduledTaskResultText -Code 267008).ok | Should -BeTrue
+        (Get-ScheduledTaskResultText -Code 267011).ok | Should -BeTrue
+    }
+
+    # The agent's own exit codes, so the installer can say which of the two went wrong
+    # instead of printing a bare number.
+    It 'separates a bad configuration from an unreachable server' {
+        $config = Get-ScheduledTaskResultText -Code 1
+        $config.ok | Should -BeFalse
+        $config.text | Should -Match 'configuration'
+
+        $server = Get-ScheduledTaskResultText -Code 2
+        $server.ok | Should -BeFalse
+        $server.text | Should -Match 'report'
+    }
+
+    It 'names the states that need someone to do something' {
+        (Get-ScheduledTaskResultText -Code 267010).text | Should -Match 'disabled'
+        (Get-ScheduledTaskResultText -Code 267014).text | Should -Match 'stopped'
+        (Get-ScheduledTaskResultText -Code 2147942402).text | Should -Match 'not found'
+        (Get-ScheduledTaskResultText -Code 2147942405).text | Should -Match 'Access denied'
+    }
+
+    It 'falls back to the number in hex rather than pretending to know' {
+        $result = Get-ScheduledTaskResultText -Code 3221225477
+        $result.ok | Should -BeFalse
+        $result.text | Should -Match '0xC0000005'
+    }
+
+    It 'treats a missing code as a clean exit rather than throwing' {
+        (Get-ScheduledTaskResultText -Code $null).ok | Should -BeTrue
+    }
+}

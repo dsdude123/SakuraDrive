@@ -1495,6 +1495,50 @@ function Get-CatalogFileHash {
 
 #endregion
 
+#region Scheduled task --------------------------------------------------------
+
+function Get-ScheduledTaskResultText {
+    <#
+    .SYNOPSIS
+        What a scheduled task's last result code actually means.
+    .DESCRIPTION
+        Task Scheduler reports "still running" as 267009, and printing that next to
+        "0 means success" reads like a failure when it means the task is doing exactly
+        what it was asked to. On a large array the first run walks every disk and takes
+        minutes, so that is the normal outcome of an install, not an edge case.
+
+        Returns whether it is fine, whether it is still going, and a sentence to print.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowNull()] $Code
+    )
+
+    $value = 0
+    if ($null -ne $Code) { $value = [int64]$Code }
+
+    switch ($value) {
+        0 { return [ordered]@{ ok = $true; running = $false; text = 'the agent ran and exited cleanly.' } }
+        1 { return [ordered]@{ ok = $false; running = $false; text = 'the agent rejected its configuration. Check the log.' } }
+        2 { return [ordered]@{ ok = $false; running = $false; text = 'the agent could not post its report. Check the server URL, the token and the log.' } }
+        267008 { return [ordered]@{ ok = $true; running = $false; text = 'ready to run at its next scheduled time.' } }
+        267009 { return [ordered]@{ ok = $true; running = $true; text = 'still running. The first pass reads SMART for every disk, which takes a while on a large array.' } }
+        267010 { return [ordered]@{ ok = $false; running = $false; text = 'the task is disabled. Enable it in Task Scheduler.' } }
+        267011 { return [ordered]@{ ok = $true; running = $false; text = 'it has not run yet.' } }
+        267014 { return [ordered]@{ ok = $false; running = $false; text = 'the task was stopped before it finished.' } }
+        2147942402 { return [ordered]@{ ok = $false; running = $false; text = 'the file was not found. The task points at a script that is not there.' } }
+        2147942405 { return [ordered]@{ ok = $false; running = $false; text = 'access denied. The task account cannot read the installed files.' } }
+    }
+
+    [ordered]@{
+        ok      = $false
+        running = $false
+        text    = ("exit code {0} (0x{1:X8}). Check the log." -f $value, $value)
+    }
+}
+
+#endregion
+
 #region Job protocol ----------------------------------------------------------
 
 function Get-AgentJobFromClaim {
@@ -1940,6 +1984,7 @@ Export-ModuleMember -Function @(
     'Test-PathAgainstGlob'
     'Get-CatalogBatch'
     'Get-CatalogFileHash'
+    'Get-ScheduledTaskResultText'
     'Get-AgentJobFromClaim'
     'Test-AgentJobContinue'
     'Get-AgentDistributionFile'

@@ -397,6 +397,21 @@ Everything the agent calls sits under `/api/agent/` and takes the same bearer to
 Scheduler, then `C:\ProgramData\SakuraDrive\agent.log`. A `401` means the token is wrong
 or was revoked.
 
+**The install said `Last result: 267009`.** That is Task Scheduler for "still
+running", not a failure. The first pass reads SMART for every disk and probes every
+volume with dpcmd, which takes minutes on a large array. The installer waits for it and
+says so in plain words; an older one printed the raw code under "0 means success".
+
+| Code | Means |
+| --- | --- |
+| `0` | The agent ran and exited cleanly |
+| `1` | The agent rejected its configuration |
+| `2` | The agent could not post its report |
+| `267008` / `267011` | Waiting for its next scheduled run |
+| `267009` | Still running |
+| `267010` | The task is disabled |
+| `267014` | The task was stopped before it finished |
+
 **The agent reports but there is no SMART data.** Install smartmontools, then re-run with
 `-DryRun` and read the `errors` array.
 
