@@ -6,3 +6,7 @@ node_modules
 data
 *.log
 .env*
+
+# The agent tests need Pester and fixtures that are not shipped; the server never
+# serves them, so keep them out of the image entirely.
+agent/tests

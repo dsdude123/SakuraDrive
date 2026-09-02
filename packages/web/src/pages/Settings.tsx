@@ -1522,9 +1522,41 @@ function ExportTab({
 
 /* ------------------------------------------------------------------- agents */
 
+interface AgentDistView {
+  available: boolean;
+  reason?: string;
+  version?: string;
+  agentVersion?: string;
+  bootstrapFile?: string;
+  files?: Array<{ path: string; bytes: number }>;
+  totalBytes?: number;
+}
+
+/**
+ * The command an operator pastes into an elevated prompt on the host.
+ *
+ * One download, then the script it fetched does the rest against hashes the server
+ * published. Deliberately not `irm | iex`: nothing runs before it has been checked.
+ */
+export function installCommand(origin: string, bootstrapFile: string, token: string | null): string {
+  const lines = [
+    `$Server = '${origin}'; $Token = '${token ?? 'PASTE-TOKEN-HERE'}'`,
+    // Windows PowerShell 5.1 does not negotiate TLS 1.2 by default, so an https server
+    // is simply unreachable without this.
+    ...(origin.startsWith('https:')
+      ? ['[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12']
+      : []),
+    `$b = Join-Path $env:TEMP '${bootstrapFile}'`,
+    `Invoke-WebRequest -UseBasicParsing -Uri "$Server/api/agent/dist/file?path=${bootstrapFile}" -Headers @{ Authorization = "Bearer $Token" } -OutFile $b`,
+    '& $b -ServerUrl $Server -Token $Token',
+  ];
+  return lines.join('\n');
+}
+
 function AgentsTab(): JSX.Element {
   const agents = useQuery<{ agents: AgentSummary[] }>('/api/agents', { pollMs: 20_000 });
   const tokens = useQuery<{ tokens: AgentToken[] }>('/api/agents/tokens');
+  const dist = useQuery<AgentDistView>('/api/agents/dist');
   const mutation = useMutation();
   const toast = useToast();
   const [name, setName] = useState('NAS host');
@@ -1545,21 +1577,45 @@ function AgentsTab(): JSX.Element {
     tokens.refresh();
   };
 
+  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+  const command = installCommand(origin, dist.data?.bootstrapFile ?? 'Bootstrap-SakuraDriveAgent.ps1', created);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      toast.push('Command copied', 'success');
+    } catch {
+      toast.push('Could not copy. Select the command and copy it by hand.', 'error');
+    }
+  };
+
   return (
     <div className="stack">
       <Card flush title="Reporting agents">
         {(agents.data?.agents.length ?? 0) === 0 ? (
           <EmptyState title="No agent has reported yet">
-            Create a token below, then run <code>Install-SakuraDriveAgent.ps1</code> on the host.
+            Create a token, then run the install command on the host.
           </EmptyState>
         ) : (
-          <Table headers={['Host', 'Version', 'Protocol', '#Reports', 'Last report', 'Status']}>
+          <Table headers={['Host', 'Version', 'Distribution', 'Protocol', '#Reports', 'Last report', 'Status']}>
             {agents.data!.agents.map((agent) => (
               <tr key={agent.id}>
                 <td>
                   <strong>{agent.hostname}</strong>
                 </td>
                 <td className="mono">{agent.agentVersion}</td>
+                <td className="mono nowrap">
+                  {agent.distributionVersion ? (
+                    <>
+                      {agent.distributionVersion.slice(0, 8)}{' '}
+                      {dist.data?.version && agent.distributionVersion !== dist.data.version && (
+                        <Badge tone="warning">updating</Badge>
+                      )}
+                    </>
+                  ) : (
+                    <span className="faint">installed by hand</span>
+                  )}
+                </td>
                 <td className="num">{agent.protocolVersion}</td>
                 <td className="num">{agent.reportCount.toLocaleString()}</td>
                 <td className="nowrap muted">{formatRelative(agent.lastReportAt)}</td>
@@ -1585,29 +1641,64 @@ function AgentsTab(): JSX.Element {
         )}
       </Card>
 
-      <Card title="Agent tokens">
-        <div className="toolbar">
-          <input
-            className="grow"
-            type="text"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Token name"
-          />
-          <button className="primary" onClick={() => void createToken()} disabled={mutation.busy}>
-            Create token
-          </button>
-        </div>
-
-        {created && (
-          <Banner tone="warning" title="Copy this token now — it is shown only once">
-            <code className="mono" style={{ wordBreak: 'break-all' }}>
-              {created}
-            </code>
+      <Card
+        title="Install on a host"
+        actions={
+          dist.data?.available ? (
+            <span className="faint mono" style={{ fontSize: 11 }}>
+              {dist.data.agentVersion} / {dist.data.version?.slice(0, 8)} &middot; {dist.data.files?.length} files
+              &middot; {formatBytes(dist.data.totalBytes ?? 0)}
+            </span>
+          ) : null
+        }
+      >
+        {dist.data && !dist.data.available ? (
+          <Banner tone="warning" title="This server cannot install agents">
+            {dist.data.reason}
           </Banner>
-        )}
+        ) : (
+          <>
+            <div className="toolbar">
+              <input
+                className="grow"
+                type="text"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="Token name"
+              />
+              <button className="primary" onClick={() => void createToken()} disabled={mutation.busy}>
+                Create token
+              </button>
+            </div>
 
-        <div style={{ marginTop: 14 }}>
+            {created && (
+              <Banner tone="warning" title="Copy this token now — it is shown only once">
+                <code className="mono" style={{ wordBreak: 'break-all' }}>
+                  {created}
+                </code>
+              </Banner>
+            )}
+
+            <p className="muted" style={{ margin: '12px 0 6px' }}>
+              Run in an <strong>elevated</strong> Windows PowerShell prompt on the host.
+              {!created && ' Create a token above and it appears in the command.'}
+            </p>
+            <pre className="command">{command}</pre>
+            <div className="toolbar" style={{ marginTop: 8 }}>
+              <button className="small" onClick={() => void copy()}>
+                Copy command
+              </button>
+              <span className="spacer" />
+              <span className="faint" style={{ fontSize: 11 }}>
+                Agents update themselves from this server. Re-run the command to repair one.
+              </span>
+            </div>
+          </>
+        )}
+      </Card>
+
+      <Card title="Agent tokens">
+        <div>
           {(tokens.data?.tokens.length ?? 0) === 0 ? (
             <EmptyState title="No tokens yet" />
           ) : (

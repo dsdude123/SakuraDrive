@@ -264,6 +264,11 @@ export const collectorErrorSchema = z.object({
 export const agentReportSchema = z.object({
   protocolVersion: z.number().int().positive().default(AGENT_PROTOCOL_VERSION),
   agentVersion: z.string().default('unknown'),
+  /**
+   * The distribution the host is running: the content hash the server handed out.
+   * Absent when the agent was installed by copying files rather than from the server.
+   */
+  distributionVersion: z.string().default(''),
   hostname: nonEmpty,
   /** ISO-8601 timestamp from the host. The server also records its own receive time. */
   collectedAt: z.string(),
@@ -422,3 +427,29 @@ export function deviceKey(input: {
   const deviceId = (input.deviceId ?? '').trim();
   return deviceId ? `dev:${deviceId.toUpperCase()}` : 'dev:unknown';
 }
+
+/* ------------------------------------------------------- agent distribution */
+
+/**
+ * One file the server will hand to an agent.
+ *
+ * The hash is the point: the agent verifies every downloaded byte before it puts the
+ * file anywhere near an installation, so a truncated transfer or a proxy that decided
+ * to be helpful shows up as a refused update rather than a broken host.
+ */
+export const agentDistFileSchema = z.object({
+  path: z.string().min(1),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  bytes: z.number().int().nonnegative(),
+});
+export type AgentDistFile = z.infer<typeof agentDistFileSchema>;
+
+export const agentDistManifestSchema = z.object({
+  /** Derived from the file hashes. Compared for equality, never for order. */
+  version: z.string().min(1),
+  agentVersion: z.string().default('unknown'),
+  protocolVersion: z.number().int().positive().default(AGENT_PROTOCOL_VERSION),
+  generatedAt: z.string(),
+  files: z.array(agentDistFileSchema),
+});
+export type AgentDistManifest = z.infer<typeof agentDistManifestSchema>;

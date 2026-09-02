@@ -11,6 +11,7 @@
   "CollectDrivePool": true,
   "CollectPrimoCache": true,
   "CollectCatalogJobs": true,
+  "SelfUpdate": true,
   "PerformanceSamples": 3,
   "SkipCertificateCheck": false,
   "TimeoutSeconds": 120,

@@ -941,3 +941,21 @@ textarea {
     margin-bottom: 8px;
   }
 }
+
+/* --------------------------------------------------------- command block */
+
+/* A command meant to be selected and pasted into an elevated prompt. Wraps rather
+   than scrolls: a command that runs off the edge gets copied half-finished. */
+.command {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}

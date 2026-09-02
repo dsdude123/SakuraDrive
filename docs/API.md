@@ -34,6 +34,12 @@ matching HTTP status.
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/api/agent/report` | Bearer token. Body is `agentReportSchema` |
+| POST | `/api/agent/jobs/claim` | Bearer token. Returns a job, or 204 when there is none |
+| POST | `/api/agent/jobs/:id/batch` | Bearer token. Results, and whether to keep going |
+| POST | `/api/agent/jobs/:id/finish` | Bearer token. Final state and cursor |
+| GET | `/api/agent/dist` | Bearer token. The agent manifest: version, and every file with its SHA-256 |
+| GET | `/api/agent/dist/file?path=…` | Bearer token. One file as bytes; only names in the manifest are served |
+| GET | `/api/agents/dist` | What the interface renders the install command from |
 | GET | `/api/agents/jobs` | What the agent is running, waiting on, and just finished |
 | POST | `/api/agents/jobs/:id/cancel` | Ask a running job to stop at its next batch, or drop a queued one |
 | GET | `/api/agents` | Reporting agents and their freshness |

@@ -81,6 +81,7 @@ export function buildAgentReport(overrides: Partial<AgentReport> = {}): AgentRep
   return {
     protocolVersion: 1,
     agentVersion: '1.0.0',
+    distributionVersion: '',
     hostname: 'NAS-01',
     collectedAt: new Date().toISOString(),
     intervalSeconds: 900,

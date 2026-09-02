@@ -79,12 +79,18 @@ COPY --from=build /app/packages/server/package.json ./packages/server/package.js
 COPY --from=build /app/packages/server/dist ./packages/server/dist
 COPY --from=build /app/packages/web/dist ./public
 
+# The Windows agent's source, served to agents over their own authenticated endpoint.
+# Shipping it here is what lets a host update itself: an agent fix reaches the machine
+# by deploying this image rather than by copying scripts onto Windows by hand.
+COPY agent/ ./agent/
+
 # Present only when the image was built with INSTALL_KOPIA=true.
 COPY --from=kopia /out/ /usr/local/bin/
 
 ENV NODE_ENV=production \
     SAKURADRIVE_DATA_DIR=/data \
     SAKURADRIVE_WEB_ROOT=/app/public \
+    SAKURADRIVE_AGENT_DIST_DIR=/app/agent \
     PORT=8080 \
     TZ=UTC
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { fullSchedule } from '@sakuradrive/shared';
 import { buildAgentReport, smartAttribute } from '../test/helpers.js';
@@ -219,6 +220,175 @@ describe('agent reporting', () => {
     });
     expect(response.statusCode).toBe(200);
     expect((json(response).warnings as unknown as string[])[0]).toContain('protocol');
+  });
+});
+
+/**
+ * The agent is shipped by the server it reports to.
+ *
+ * Every fix to the agent so far has meant copying files onto a Windows box by hand, so
+ * the image carries the agent source and hands it out over the same token the agent
+ * already has. These tests care about two things: that the token is genuinely required,
+ * and that only files in the manifest can be fetched.
+ */
+describe('agent distribution', () => {
+  let token: string;
+
+  beforeEach(async () => {
+    await h.signIn();
+    const response = await request(h, {
+      method: 'POST',
+      url: '/api/agents/tokens',
+      payload: { name: 'NAS-01' },
+    });
+    token = (json(response).token as unknown as { token: string }).token;
+  });
+
+  const manifest = async () => {
+    const response = await h.app.inject({
+      method: 'GET',
+      url: '/api/agent/dist',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(200);
+    return json(response) as unknown as {
+      version: string;
+      agentVersion: string;
+      files: Array<{ path: string; sha256: string; bytes: number }>;
+    };
+  };
+
+  it('lists the agent files with a version and a hash for each', async () => {
+    const body = await manifest();
+    expect(body.version).toMatch(/^[0-9a-f]{12}$/);
+    expect(body.files.map((file) => file.path)).toContain('SakuraDriveAgent.ps1');
+    expect(body.files.map((file) => file.path)).toContain('Bootstrap-SakuraDriveAgent.ps1');
+    for (const file of body.files) {
+      expect(file.sha256, file.path).toMatch(/^[0-9a-f]{64}$/);
+      expect(file.bytes, file.path).toBeGreaterThan(0);
+    }
+  });
+
+  // A script with a server URL baked into it is not something to hand to anyone who
+  // can reach the port.
+  it('will not hand out the agent without a token', async () => {
+    for (const url of ['/api/agent/dist', '/api/agent/dist/file?path=SakuraDriveAgent.ps1']) {
+      const response = await h.app.inject({ method: 'GET', url });
+      expect(response.statusCode, url).toBe(401);
+    }
+  });
+
+  it('will not hand out the agent with a revoked token', async () => {
+    const tokens = json(await request(h, { method: 'GET', url: '/api/agents/tokens' }));
+    const id = (tokens.tokens as unknown as Array<{ id: number }>)[0]!.id;
+    await request(h, { method: 'DELETE', url: `/api/agents/tokens/${id}` });
+
+    const response = await h.app.inject({
+      method: 'GET',
+      url: '/api/agent/dist',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
+  // The agent refuses to install anything whose hash does not match, so the bytes it
+  // gets have to be the bytes that were hashed.
+  it('serves bytes that hash to what the manifest promised', async () => {
+    const body = await manifest();
+    for (const file of body.files) {
+      const response = await h.app.inject({
+        method: 'GET',
+        url: `/api/agent/dist/file?path=${encodeURIComponent(file.path)}`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(response.statusCode, file.path).toBe(200);
+      const actual = createHash('sha256').update(response.rawPayload).digest('hex');
+      expect(actual, file.path).toBe(file.sha256);
+      expect(response.headers['x-sakuradrive-sha256'], file.path).toBe(file.sha256);
+    }
+  });
+
+  it.each([
+    '../package.json',
+    '..%2Fpackage.json',
+    '/etc/passwd',
+    'tests/Agent.Tests.ps1',
+    'agent.config.json',
+  ])('refuses to serve %s', async (requested) => {
+    const response = await h.app.inject({
+      method: 'GET',
+      url: `/api/agent/dist/file?path=${encodeURIComponent(requested)}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('says so plainly when the image was built without the agent source', async () => {
+    const bare = await createAppHarness({ agentDistDir: '/nonexistent/agent' });
+    try {
+      await bare.signIn();
+      const created = await request(bare, {
+        method: 'POST',
+        url: '/api/agents/tokens',
+        payload: { name: 'NAS-01' },
+      });
+      const bareToken = (json(created).token as unknown as { token: string }).token;
+
+      const response = await bare.app.inject({
+        method: 'GET',
+        url: '/api/agent/dist',
+        headers: { authorization: `Bearer ${bareToken}` },
+      });
+      expect(response.statusCode).toBe(503);
+
+      const view = json(await request(bare, { method: 'GET', url: '/api/agents/dist' }));
+      expect(view.available).toBe(false);
+      expect(view.reason as unknown as string).toContain('without the agent source');
+    } finally {
+      await bare.close();
+    }
+  });
+
+  // What the Agents tab renders the install command from.
+  it('describes the distribution to the interface, behind a session', async () => {
+    const anonymous = await h.app.inject({ method: 'GET', url: '/api/agents/dist' });
+    expect(anonymous.statusCode).toBe(401);
+
+    const body = json(await request(h, { method: 'GET', url: '/api/agents/dist' }));
+    expect(body.available).toBe(true);
+    expect(body.bootstrapFile as unknown as string).toBe('Bootstrap-SakuraDriveAgent.ps1');
+    expect(body.version as unknown as string).toMatch(/^[0-9a-f]{12}$/);
+    expect(body.totalBytes as unknown as number).toBeGreaterThan(0);
+  });
+
+  // Which hosts picked up a fix, without logging into Windows to find out.
+  it('records the distribution a host reports it is running', async () => {
+    await h.app.inject({
+      method: 'POST',
+      url: '/api/agent/report',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { ...buildAgentReport(), distributionVersion: 'abc123def456' },
+    });
+
+    const agents = json(await request(h, { method: 'GET', url: '/api/agents' }));
+    expect((agents.agents as unknown as Array<{ distributionVersion: string }>)[0]!.distributionVersion).toBe(
+      'abc123def456',
+    );
+  });
+
+  // An agent installed by copying files does not know its distribution, and that is
+  // not an error -- it works out what it is running on its first update check.
+  it('accepts a report from an agent that does not know its distribution', async () => {
+    const response = await h.app.inject({
+      method: 'POST',
+      url: '/api/agent/report',
+      headers: { authorization: `Bearer ${token}` },
+      payload: buildAgentReport(),
+    });
+    expect(response.statusCode).toBe(200);
+
+    const agents = json(await request(h, { method: 'GET', url: '/api/agents' }));
+    expect((agents.agents as unknown as Array<{ distributionVersion: string }>)[0]!.distributionVersion).toBe('');
   });
 });
 

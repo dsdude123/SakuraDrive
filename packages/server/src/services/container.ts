@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { AGENT_PROTOCOL_VERSION } from '@sakuradrive/shared';
 import type { ServerConfig } from '../config.js';
 import { openDatabase, type Db } from '../db/index.js';
 import { createLogger, createSilentLogger, type Logger } from '../logger.js';
@@ -10,6 +11,7 @@ import { createDuplicationWorkflow } from '../workflows/catalog-duplication.js';
 import { WorkflowManager } from '../workflows/engine.js';
 import { createExportBackupWorkflow } from '../workflows/export-backup.js';
 import { createMaintenanceWorkflow } from '../workflows/maintenance-prune.js';
+import { AgentDistService } from './agent-dist.js';
 import { AgentService } from './agent-service.js';
 import { AgentJobService } from './agent-job-service.js';
 import { AlertService } from './alert-service.js';
@@ -30,6 +32,7 @@ export interface Services {
   alerts: AlertService;
   auth: AuthService;
   agents: AgentService;
+  agentDist: AgentDistService;
   catalog: CatalogService;
   agentJobs: AgentJobService;
   bitrot: BitrotService;
@@ -67,6 +70,10 @@ export function createServices(options: CreateServicesOptions): Services {
   const alerts = new AlertService(db);
   const auth = new AuthService(db);
   const agents = new AgentService({ db, settings, alerts, logger });
+  const agentDist = new AgentDistService({
+    directory: config.agentDistDir,
+    protocolVersion: AGENT_PROTOCOL_VERSION,
+  });
   const catalog = new CatalogService(db, settings);
   const bitrot = new BitrotService(db, alerts);
   const agentJobs = new AgentJobService(db);
@@ -154,6 +161,7 @@ export function createServices(options: CreateServicesOptions): Services {
     alerts,
     auth,
     agents,
+    agentDist,
     catalog,
     bitrot,
     backup,

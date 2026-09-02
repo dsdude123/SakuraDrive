@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
 import { vi } from 'vitest';
 import { buildApp } from '../app.js';
@@ -23,7 +25,16 @@ export interface HarnessOptions {
   kopiaRunner?: KopiaRunner;
   disableAuth?: boolean;
   now?: () => Date;
+  /** Point the distribution endpoints somewhere else, or at nothing at all. */
+  agentDistDir?: string;
 }
+
+/**
+ * The repository's agent directory, which is what a built image carries at /app/agent.
+ * Resolved from this file rather than the working directory so the distribution tests
+ * behave the same whether vitest was started from the repository root or this package.
+ */
+const REPO_AGENT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../agent');
 
 /** A fully wired app against an in-memory database and a throwaway data directory. */
 export async function createAppHarness(options: HarnessOptions = {}): Promise<AppHarness> {
@@ -34,6 +45,7 @@ export async function createAppHarness(options: HarnessOptions = {}): Promise<Ap
     webRoot: `${temp.path}/public`,
     disableBackgroundJobs: true,
     disableAuth: options.disableAuth ?? false,
+    agentDistDir: options.agentDistDir ?? REPO_AGENT_DIR,
     version: 'test',
   });
 

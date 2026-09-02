@@ -15,6 +15,11 @@ export interface ServerConfig {
   databasePath: string;
   /** Directory containing the built web UI, served as static files. */
   webRoot: string;
+  /**
+   * Directory holding the Windows agent source that this server hands out.
+   * Absent in an image built without it; the agent then simply never updates itself.
+   */
+  agentDistDir: string;
   host: string;
   port: number;
   logLevel: string;
@@ -50,6 +55,9 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     dataDir,
     databasePath: path.join(dataDir, 'sakuradrive.sqlite'),
     webRoot: path.resolve(envString('SAKURADRIVE_WEB_ROOT', path.join(process.cwd(), 'public'))),
+    agentDistDir: path.resolve(
+      envString('SAKURADRIVE_AGENT_DIST_DIR', path.join(process.cwd(), 'agent')),
+    ),
     host: envString('SAKURADRIVE_HOST', '0.0.0.0'),
     port: envInt('PORT', 8080),
     logLevel: envString('SAKURADRIVE_LOG_LEVEL', 'info'),

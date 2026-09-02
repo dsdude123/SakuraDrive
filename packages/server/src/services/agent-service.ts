@@ -139,10 +139,11 @@ export class AgentService {
   private upsertAgent(report: AgentReport, receivedAt: string): number {
     this.db
       .prepare(
-        `INSERT INTO agents (hostname, agent_version, protocol_version, first_seen_at, last_report_at, report_count, last_errors)
-         VALUES (?, ?, ?, ?, ?, 1, ?)
+        `INSERT INTO agents (hostname, agent_version, distribution_version, protocol_version, first_seen_at, last_report_at, report_count, last_errors)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?)
          ON CONFLICT(hostname) DO UPDATE SET
            agent_version = excluded.agent_version,
+           distribution_version = excluded.distribution_version,
            protocol_version = excluded.protocol_version,
            last_report_at = excluded.last_report_at,
            report_count = agents.report_count + 1,
@@ -151,6 +152,9 @@ export class AgentService {
       .run(
         report.hostname,
         report.agentVersion,
+        // Absent from an agent older than the distribution endpoints, and from any
+        // caller that skipped the schema. Neither is a reason to drop a report.
+        report.distributionVersion ?? '',
         report.protocolVersion,
         receivedAt,
         receivedAt,
@@ -866,7 +870,8 @@ export class AgentService {
     const staleMinutes = this.settings.get().smart.agentStaleMinutes;
     return this.db
       .prepare<[], {
-        id: number; hostname: string; agent_version: string; protocol_version: number;
+        id: number; hostname: string; agent_version: string; distribution_version: string;
+        protocol_version: number;
         last_report_at: string | null; report_count: number; last_errors: string;
       }>('SELECT * FROM agents ORDER BY hostname')
       .all()
@@ -878,6 +883,7 @@ export class AgentService {
           id: row.id,
           hostname: row.hostname,
           agentVersion: row.agent_version,
+          distributionVersion: row.distribution_version,
           protocolVersion: row.protocol_version,
           lastReportAt: row.last_report_at,
           lastReportAgeSeconds: ageSeconds,

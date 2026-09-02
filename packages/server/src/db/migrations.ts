@@ -461,6 +461,18 @@ export const MIGRATIONS: Migration[] = [
     CREATE INDEX agent_jobs_root ON agent_jobs(root_id, created_at DESC);
     `,
   },
+  {
+    version: 3,
+    name: 'agent-distribution-version',
+    up: `
+    -- Which set of agent files a host is actually running.
+    --
+    -- agent_version is the number written into the module by hand and rarely changes;
+    -- this is the content hash the server handed out, so "did that fix reach the host?"
+    -- is answerable without logging into Windows.
+    ALTER TABLE agents ADD COLUMN distribution_version TEXT NOT NULL DEFAULT '';
+    `,
+  },
 ];
 
 export function currentSchemaVersion(): number {

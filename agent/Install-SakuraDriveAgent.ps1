@@ -103,12 +103,20 @@ if ($IntervalMinutes -lt 1) { throw 'IntervalMinutes must be at least 1.' }
 if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
     New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
 
-    # The uninstaller is installed too: it must still be there when the folder this
-    # installer was run from is long gone.
-    foreach ($file in @('SakuraDriveAgent.ps1', 'SakuraDrive.Agent.psm1', 'Uninstall-SakuraDriveAgent.ps1')) {
-        $source = Join-Path $PSScriptRoot $file
+    # Import from beside this script, not from the installation: the list of files to
+    # install has to come from the version being installed rather than the one being
+    # replaced, or a new file would never arrive on a host that already has an agent.
+    Import-Module (Join-Path $PSScriptRoot 'SakuraDrive.Agent.psm1') -Force
+
+    # The whole distribution, including the uninstaller and the bootstrap script: both
+    # have to still be there when the folder this was run from is long gone.
+    foreach ($file in Get-AgentDistributionFile) {
+        $relative = $file.Replace('/', '\')
+        $source = Join-Path $PSScriptRoot $relative
         if (-not (Test-Path -LiteralPath $source)) { throw "Missing $file next to this installer." }
-        Copy-Item -LiteralPath $source -Destination (Join-Path $InstallPath $file) -Force
+        $destination = Join-Path $InstallPath $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $destination -Force
     }
 
     $logDirectory = 'C:\ProgramData\SakuraDrive'
@@ -120,7 +128,6 @@ if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
     # A hand-written copy drifts: this one had lost RxpccPath and CollectCatalogJobs,
     # so those keys were absent from every installed configuration and nobody could
     # tell they were settable.
-    Import-Module (Join-Path $InstallPath 'SakuraDrive.Agent.psm1') -Force
     $existing = $null
     if ($KeepConfig -and (Test-Path -LiteralPath $configPath)) {
         $existing = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
@@ -168,6 +175,12 @@ if ($PSCmdlet.ShouldProcess($InstallPath, 'Install agent files')) {
                     $account, 'FullControl', 'Allow')))
     }
     Set-Acl -LiteralPath $configPath -AclObject $acl
+
+    # An installation whose files were replaced by hand carries a stale version here.
+    # Clearing it makes the agent re-check against the server on its first run instead
+    # of believing a version it is no longer running.
+    $statePath = Join-Path $InstallPath 'update-state.json'
+    if (Test-Path -LiteralPath $statePath) { Remove-Item -LiteralPath $statePath -Force }
 
     Write-Host "Installed the agent into $InstallPath."
     Write-Host "Configuration: $configPath"
@@ -239,5 +252,6 @@ Write-Host "Survives reboot and sign-out: yes - the task runs as SYSTEM and star
 Write-Host ''
 Write-Host 'Next steps:'
 Write-Host '  1. Open the SakuraDrive web interface and check Settings then Agents for this host.'
+Write-Host '     The agent keeps itself current from there: deploying a new server updates this host.'
 Write-Host '  2. For full SMART attributes, install smartmontools: https://www.smartmontools.org'
 Write-Host "  3. Logs are written to C:\ProgramData\SakuraDrive\agent.log"

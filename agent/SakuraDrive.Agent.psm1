@@ -57,6 +57,10 @@ function Get-DefaultAgentConfig {
         # Take catalog scan and hash jobs for roots the container cannot read. Turn off
         # only if you want the agent to report health and nothing else.
         CollectCatalogJobs   = $true
+        # Replace the agent with whatever the server is shipping when the two differ.
+        # Every file is hash-checked and parsed before it is installed, and a version
+        # that fails twice puts the previous one back on its own.
+        SelfUpdate           = $true
         # Seconds of performance-counter sampling per report.
         PerformanceSamples   = 3
         # Skip TLS validation. Only for a self-signed certificate on a trusted LAN.
@@ -1491,6 +1495,359 @@ function Get-CatalogFileHash {
 
 #endregion
 
+#region Job protocol ----------------------------------------------------------
+
+function Get-AgentJobFromClaim {
+    <#
+    .SYNOPSIS
+        The job in a claim response, or $null when the server has no work.
+    .DESCRIPTION
+        "No work" comes back as 204 No Content, and Invoke-RestMethod turns that into an
+        empty string rather than $null. Reading .job off it under Set-StrictMode throws,
+        which failed the whole cycle every time there was nothing to do -- so the shape
+        of a response is decided here, where it can be tested, rather than inline.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()] $Response
+    )
+
+    if ($null -eq $Response) { return $null }
+    if (-not $Response.PSObject.Properties['job']) { return $null }
+    $Response.job
+}
+
+function Test-AgentJobContinue {
+    <#
+    .SYNOPSIS
+        Whether the server wants the agent to keep going after a batch.
+    .DESCRIPTION
+        The I/O window lives on the server; the agent just does as it is told. Anything
+        that is not an explicit yes means stop, because stopping is free: the cursor went
+        up with the batch, so the next window resumes where this one left off.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()] $Response
+    )
+
+    if ($null -eq $Response) { return $false }
+    if (-not $Response.PSObject.Properties['continue']) { return $false }
+    [bool]$Response.continue
+}
+
+#endregion
+
+#region Self update -----------------------------------------------------------
+
+function Get-AgentDistributionFile {
+    <#
+    .SYNOPSIS
+        The files that make up an installation, relative to the install directory.
+    .DESCRIPTION
+        One list, used by the installer to decide what to copy and by the updater to
+        decide what to replace. The server ships the same set; a test compares the two
+        so a new file cannot arrive on one side only.
+    #>
+    [CmdletBinding()]
+    param()
+
+    @(
+        'SakuraDriveAgent.ps1'
+        'SakuraDrive.Agent.psm1'
+        'Install-SakuraDriveAgent.ps1'
+        'Uninstall-SakuraDriveAgent.ps1'
+        'Bootstrap-SakuraDriveAgent.ps1'
+        'agent.config.example.json'
+        'tools/New-ContractFixture.ps1'
+        'tools/Set-PoolDiskMountPoints.ps1'
+    )
+}
+
+function Test-AgentScriptSyntax {
+    <#
+    .SYNOPSIS
+        Parse a PowerShell file without running it, returning the errors found.
+    .DESCRIPTION
+        The failure this exists for has already happened once: a file that decodes
+        differently on the host than it did here produces a parse error, and a parse
+        error in the module means the agent cannot even reach its own rollback code.
+        So a downloaded file is parsed before it is allowed to replace a working one,
+        and a version that cannot be parsed is never installed at all.
+
+        Returns an empty array for a file that parses, so an empty result means good.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    $problems = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $problems.Add("$Path is missing.")
+        return , $problems.ToArray()
+    }
+
+    $tokens = $null
+    $errors = $null
+    try {
+        [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path -LiteralPath $Path).ProviderPath, [ref]$tokens, [ref]$errors)
+    }
+    catch {
+        $problems.Add("$Path could not be parsed: $($_.Exception.Message)")
+        return , $problems.ToArray()
+    }
+
+    foreach ($parseError in @($errors)) {
+        $problems.Add("$([System.IO.Path]::GetFileName($Path)) line $($parseError.Extent.StartLineNumber): $($parseError.Message)")
+    }
+    , $problems.ToArray()
+}
+
+function Get-AgentFileHash {
+    <#
+    .SYNOPSIS
+        Lowercase SHA-256 of a file, or an empty string when it is not there.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Test-AgentDistribution {
+    <#
+    .SYNOPSIS
+        Check a directory against a manifest, returning the problems found.
+    .DESCRIPTION
+        Used on a freshly downloaded staging directory before anything is swapped in,
+        and on an existing installation to work out whether it is already current.
+
+        Every file must be present, hash exactly, and - for anything PowerShell will
+        have to run - parse. A directory that clears all three is safe to install; one
+        that does not is left alone and the agent keeps running what it has.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Directory,
+        [Parameter(Mandatory)] $Manifest
+    )
+
+    $problems = New-Object System.Collections.Generic.List[string]
+    $files = @()
+    if ($null -ne $Manifest -and $Manifest.PSObject.Properties['files']) { $files = @($Manifest.files) }
+    if ($files.Count -eq 0) {
+        $problems.Add('The manifest lists no files.')
+        return , $problems.ToArray()
+    }
+
+    foreach ($file in $files) {
+        $relative = ([string]$file.path).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        $full = Join-Path $Directory $relative
+
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+            $problems.Add("$($file.path) is missing.")
+            continue
+        }
+
+        $actual = Get-AgentFileHash -Path $full
+        $expected = ([string]$file.sha256).ToLowerInvariant()
+        if ($actual -ne $expected) {
+            $problems.Add("$($file.path) does not match the manifest (expected $expected, got $actual).")
+            continue
+        }
+
+        if ($full -match '\.psm?1$') {
+            foreach ($problem in (Test-AgentScriptSyntax -Path $full)) { $problems.Add($problem) }
+        }
+    }
+
+    , $problems.ToArray()
+}
+
+function New-AgentUpdateState {
+    <#
+    .SYNOPSIS
+        The record of what version is installed and whether it has proved itself.
+    #>
+    [CmdletBinding()]
+    param(
+        [string] $Version = '',
+        [string] $AgentVersion = '',
+        [ValidateSet('confirmed', 'pending')] [string] $Stage = 'confirmed',
+        [int] $Attempts = 0,
+        [string] $PreviousVersion = '',
+        [string] $BlockedVersion = '',
+        [string] $BlockedReason = ''
+    )
+
+    [ordered]@{
+        version         = $Version
+        agentVersion    = $AgentVersion
+        stage           = $Stage
+        attempts        = $Attempts
+        previousVersion = $PreviousVersion
+        # A version that failed twice and was rolled back. Not tried again, otherwise
+        # the host would update, break, roll back and update again every interval.
+        blockedVersion  = $BlockedVersion
+        blockedReason   = $BlockedReason
+        updatedAt       = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+}
+
+function Read-AgentUpdateState {
+    <#
+    .SYNOPSIS
+        The update state beside an installation, or $null when there is none.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $InstallPath
+    )
+
+    $path = Join-Path $InstallPath 'update-state.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw
+        if (-not $raw.Trim()) { return $null }
+        $parsed = $raw | ConvertFrom-Json
+    }
+    catch {
+        # A truncated state file must not stop the agent: treat it as unknown, which
+        # makes the next check reconcile against the manifest and write a good one.
+        return $null
+    }
+
+    $state = New-AgentUpdateState
+    foreach ($key in @($state.Keys)) {
+        if ($parsed.PSObject.Properties[$key]) { $state[$key] = $parsed.$key }
+    }
+    $state
+}
+
+function Write-AgentUpdateState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $InstallPath,
+        [Parameter(Mandatory)] $State
+    )
+
+    $State['updatedAt'] = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $path = Join-Path $InstallPath 'update-state.json'
+    $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding ascii
+    $State
+}
+
+function Resolve-AgentUpdateOutcome {
+    <#
+    .SYNOPSIS
+        What to do about the state left behind by the last update.
+    .DESCRIPTION
+        A new version is on probation until a run gets far enough to post a report.
+        'verify' means it is still on probation and this run counts as an attempt;
+        'rollback' means it has had its chances and the previous files go back.
+
+        Pure, so the rule that decides whether a host reverts itself is testable
+        without installing anything.
+    #>
+    [CmdletBinding()]
+    param(
+        $State,
+        [int] $MaxAttempts = 2
+    )
+
+    if ($null -eq $State) { return 'unknown' }
+    if ($State -isnot [System.Collections.IDictionary]) { return 'unknown' }
+
+    $stage = [string]$State['stage']
+    if ($stage -ne 'pending') { return 'ok' }
+
+    $attempts = 0
+    if ($null -ne $State['attempts']) { $attempts = [int]$State['attempts'] }
+    if ($attempts -ge $MaxAttempts) { return 'rollback' }
+    'verify'
+}
+
+function Save-AgentUpdate {
+    <#
+    .SYNOPSIS
+        Put a verified staging directory into place, keeping what it replaced.
+    .DESCRIPTION
+        The previous files are copied aside first, so a version that turns out to be
+        broken can be put back without reaching the server - which matters, because
+        "cannot reach the server" is one of the ways an update goes wrong.
+
+        Only the files in the manifest are touched. agent.config.json, the log and
+        anything else beside the agent are left exactly as they were.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)] [string] $InstallPath,
+        [Parameter(Mandatory)] [string] $StagingPath,
+        [Parameter(Mandatory)] $Manifest
+    )
+
+    $previousPath = Join-Path $InstallPath '.previous'
+    if (-not $PSCmdlet.ShouldProcess($InstallPath, 'Replace the agent files')) { return $false }
+
+    if (Test-Path -LiteralPath $previousPath) { Remove-Item -LiteralPath $previousPath -Recurse -Force }
+    New-Item -ItemType Directory -Path $previousPath -Force | Out-Null
+
+    foreach ($file in @($Manifest.files)) {
+        $relative = ([string]$file.path).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        $current = Join-Path $InstallPath $relative
+        if (-not (Test-Path -LiteralPath $current -PathType Leaf)) { continue }
+        $destination = Join-Path $previousPath $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $current -Destination $destination -Force
+    }
+
+    foreach ($file in @($Manifest.files)) {
+        $relative = ([string]$file.path).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        $staged = Join-Path $StagingPath $relative
+        $destination = Join-Path $InstallPath $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $staged -Destination $destination -Force
+    }
+
+    $true
+}
+
+function Undo-AgentUpdate {
+    <#
+    .SYNOPSIS
+        Put back the files an update replaced.
+    .DESCRIPTION
+        Restores whatever is in .previous, whether or not it matches any manifest: the
+        point is to get back to the code that was working, and the server's opinion is
+        not available in the situation this is for.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)] [string] $InstallPath
+    )
+
+    $previousPath = Join-Path $InstallPath '.previous'
+    if (-not (Test-Path -LiteralPath $previousPath -PathType Container)) { return $false }
+    if (-not $PSCmdlet.ShouldProcess($InstallPath, 'Restore the previous agent files')) { return $false }
+
+    $restored = 0
+    foreach ($item in Get-ChildItem -LiteralPath $previousPath -Recurse -File) {
+        $relative = $item.FullName.Substring($previousPath.Length).TrimStart('\', '/')
+        $destination = Join-Path $InstallPath $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $item.FullName -Destination $destination -Force
+        $restored++
+    }
+    $restored -gt 0
+}
+
+#endregion
+
 #region Report assembly -------------------------------------------------------
 
 function New-AgentReport {
@@ -1514,23 +1871,27 @@ function New-AgentReport {
         [array] $Duplication = @(),
         [array] $Performance = @(),
         $PrimoCache = $null,
-        [array] $Errors = @()
+        [array] $Errors = @(),
+        # The distribution the server handed out, so the interface can show which hosts
+        # picked up a fix without anyone logging into Windows to look.
+        [string] $DistributionVersion = ''
     )
 
     [ordered]@{
-        protocolVersion = $script:ProtocolVersion
-        agentVersion    = $script:AgentVersion
-        hostname        = if ($Hostname) { $Hostname } else { 'unknown-host' }
-        collectedAt     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
-        intervalSeconds = $IntervalSeconds
-        physicalDisks   = @($PhysicalDisks)
-        volumes         = @($Volumes)
-        smart           = @($Smart)
-        pools           = @($Pools)
-        duplication     = @($Duplication)
-        performance     = @($Performance)
-        primoCache      = $PrimoCache
-        errors          = @($Errors)
+        protocolVersion     = $script:ProtocolVersion
+        agentVersion        = $script:AgentVersion
+        distributionVersion = $DistributionVersion
+        hostname            = if ($Hostname) { $Hostname } else { 'unknown-host' }
+        collectedAt         = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+        intervalSeconds     = $IntervalSeconds
+        physicalDisks       = @($PhysicalDisks)
+        volumes             = @($Volumes)
+        smart               = @($Smart)
+        pools               = @($Pools)
+        duplication         = @($Duplication)
+        performance         = @($Performance)
+        primoCache          = $PrimoCache
+        errors              = @($Errors)
     }
 }
 
@@ -1579,6 +1940,18 @@ Export-ModuleMember -Function @(
     'Test-PathAgainstGlob'
     'Get-CatalogBatch'
     'Get-CatalogFileHash'
+    'Get-AgentJobFromClaim'
+    'Test-AgentJobContinue'
+    'Get-AgentDistributionFile'
+    'Test-AgentScriptSyntax'
+    'Get-AgentFileHash'
+    'Test-AgentDistribution'
+    'New-AgentUpdateState'
+    'Read-AgentUpdateState'
+    'Write-AgentUpdateState'
+    'Resolve-AgentUpdateOutcome'
+    'Save-AgentUpdate'
+    'Undo-AgentUpdate'
     'New-AgentReport'
     'New-CollectorError'
 )

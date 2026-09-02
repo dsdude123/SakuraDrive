@@ -334,6 +334,8 @@ export interface AgentSummary {
   id: number;
   hostname: string;
   agentVersion: string;
+  /** The content hash of the agent files this host is running; blank if unknown. */
+  distributionVersion: string;
   protocolVersion: number;
   lastReportAt: string | null;
   lastReportAgeSeconds: number | null;

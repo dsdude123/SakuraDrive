@@ -12,8 +12,11 @@ import type { Services } from '../services/container.js';
 import { applyAgentHashes } from '../services/hash-ingest.js';
 import { parseBody } from './helpers.js';
 
+/** The one file an operator downloads by hand; it fetches the rest. */
+const BOOTSTRAP_FILE = 'Bootstrap-SakuraDriveAgent.ps1';
+
 export function registerAgentRoutes(app: FastifyInstance, services: Services): void {
-  const { agents, agentJobs, auth, bitrot, catalog, db, settings, logger } = services;
+  const { agentDist, agents, agentJobs, auth, bitrot, catalog, db, settings, logger } = services;
 
   /** Bearer token, or null. The agent is a scheduled task: no cookie, no password. */
   const authenticate = (request: { headers: Record<string, unknown> }): string | null => {
@@ -63,6 +66,59 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
       alertsRaised: result.alertsRaised,
       warnings: [...warnings, ...result.warnings],
     };
+  });
+
+  /* ----------------------------------------------------- agent distribution */
+
+  /**
+   * What the agent should be running.
+   *
+   * The agent has needed a fix on the host several times now, and every one of those
+   * meant copying files onto a Windows box by hand. The image carries the agent source,
+   * so the server can simply say what the current set of files is and let the agent
+   * fetch what it does not already have.
+   *
+   * Behind the agent token like everything else under /api/agent: an installation
+   * script with a server URL baked into it is not something to hand to anyone who can
+   * reach the port.
+   */
+  app.get('/api/agent/dist', async (request, reply) => {
+    if (!authenticate(request)) {
+      return reply.code(401).send({ error: 'unauthorized', message: 'A valid agent token is required' });
+    }
+    const manifest = agentDist.manifest();
+    if (!manifest) {
+      return reply.code(503).send({
+        error: 'unavailable',
+        message: 'This server was built without the agent source, so it cannot distribute updates.',
+      });
+    }
+    return manifest;
+  });
+
+  /**
+   * One file from the distribution.
+   *
+   * The name is matched against the manifest rather than joined onto a directory, so
+   * `../` is not a special case to handle -- it is simply not a file in the manifest.
+   * Served as bytes so what the agent hashes is exactly what is on disk here.
+   */
+  app.get<{ Querystring: { path?: string } }>('/api/agent/dist/file', async (request, reply) => {
+    if (!authenticate(request)) {
+      return reply.code(401).send({ error: 'unauthorized', message: 'A valid agent token is required' });
+    }
+    const found = agentDist.read(request.query.path ?? '');
+    if (!found) {
+      return reply.code(404).send({
+        error: 'not_found',
+        message: 'That file is not part of the agent distribution',
+      });
+    }
+    return reply
+      .header('content-type', 'application/octet-stream')
+      .header('content-length', String(found.buffer.byteLength))
+      .header('x-sakuradrive-sha256', found.file.sha256)
+      .send(found.buffer);
   });
 
   /* ------------------------------------------------------------- agent jobs */
@@ -246,6 +302,29 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
   });
 
   app.get('/api/agents', async () => ({ agents: agents.listAgents() }));
+
+  /**
+   * The distribution as the interface needs it: the version, and enough to render the
+   * one command an operator has to paste into an elevated prompt on the host.
+   */
+  app.get('/api/agents/dist', async () => {
+    const manifest = agentDist.manifest();
+    if (!manifest) {
+      return {
+        available: false,
+        reason: 'This server was built without the agent source, so it cannot install or update agents.',
+      };
+    }
+    return {
+      available: true,
+      version: manifest.version,
+      agentVersion: manifest.agentVersion,
+      protocolVersion: manifest.protocolVersion,
+      bootstrapFile: BOOTSTRAP_FILE,
+      files: manifest.files.map((file) => ({ path: file.path, bytes: file.bytes })),
+      totalBytes: manifest.files.reduce((sum, file) => sum + file.bytes, 0),
+    };
+  });
 
   app.get('/api/agents/tokens', async () => ({ tokens: auth.listAgentTokens() }));
 

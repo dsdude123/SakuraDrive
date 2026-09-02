@@ -687,9 +687,10 @@ function Get-PrimoCacheInventory {
 #endregion
 
 function Invoke-AgentCycle {
-    param($Config)
+    param($Config, [string] $DistributionVersion = '', [array] $Notices = @())
 
     $errors = New-Object System.Collections.Generic.List[object]
+    foreach ($notice in @($Notices)) { $errors.Add($notice) }
 
     $physicalDisks = Get-PhysicalDiskInventory -Errors $errors
     $volumes = Get-VolumeInventory -Errors $errors
@@ -700,6 +701,7 @@ function Invoke-AgentCycle {
 
     New-AgentReport -Hostname $env:COMPUTERNAME `
         -IntervalSeconds ([int]$Config.IntervalSeconds) `
+        -DistributionVersion $DistributionVersion `
         -PhysicalDisks $physicalDisks `
         -Volumes $volumes `
         -Smart $smart `
@@ -808,7 +810,7 @@ function Invoke-CatalogScanJob {
             })
 
         if ($batch.finished) { break }
-        if (-not $response.continue) { $state = 'paused'; break }
+        if (-not (Test-AgentJobContinue -Response $response)) { $state = 'paused'; break }
     }
 
     Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/finish" -Body ([ordered]@{
@@ -849,7 +851,9 @@ function Invoke-CatalogHashJob {
                     dirsRemaining = ($files.Count - $hashed)
                 })
             $pending.Clear()
-            if (-not $response.continue -and $hashed -lt $files.Count) { $state = 'paused'; break }
+            if (-not (Test-AgentJobContinue -Response $response) -and $hashed -lt $files.Count) {
+                $state = 'paused'; break
+            }
         }
     }
 
@@ -881,7 +885,9 @@ function Invoke-AgentJobs {
     for ($taken = 0; $taken -lt $MaxJobs; $taken++) {
         try {
             $claim = Invoke-AgentApi -Config $Config -Path '/api/agent/jobs/claim' -Body ([ordered]@{
-                    hostname     = $env:COMPUTERNAME
+                    # The same fallback the report uses. A blank hostname is rejected by
+                    # the server, and "400 Bad Request" says nothing about why.
+                    hostname     = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'unknown-host' }
                     agentVersion = (Get-SakuraDriveAgentVersion)
                 })
         }
@@ -890,8 +896,8 @@ function Invoke-AgentJobs {
             return
         }
 
-        if ($null -eq $claim -or $null -eq $claim.job) { return }
-        $job = $claim.job
+        $job = Get-AgentJobFromClaim -Response $claim
+        if ($null -eq $job) { return }
         Write-AgentLog -Message "Starting $($job.type) for $($job.rootName) ($($job.hostPath))" -Config $Config
 
         try {
@@ -915,9 +921,231 @@ function Invoke-AgentJobs {
     }
 }
 
+#region Self update -----------------------------------------------------------
+
+function Get-AgentDistManifest {
+    <#
+    .SYNOPSIS
+        Ask the server what the agent should be.
+    #>
+    param($Config)
+
+    Invoke-AgentApi -Config $Config -Path '/api/agent/dist' -Method 'Get'
+}
+
+function Save-AgentDistFile {
+    <#
+    .SYNOPSIS
+        Download one file from the distribution to a local path.
+    .DESCRIPTION
+        Raw bytes: the server serves octet-stream and the caller hashes what lands on
+        disk, so a proxy that rewrites the body shows up as a refused update rather
+        than a broken installation.
+    #>
+    param($Config, [string] $RelativePath, [string] $Destination)
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
+
+    $encoded = [System.Uri]::EscapeDataString($RelativePath)
+    $parameters = @{
+        Uri             = "$(([string]$Config.ServerUrl).TrimEnd('/'))/api/agent/dist/file?path=$encoded"
+        Method          = 'Get'
+        Headers         = @{ Authorization = "Bearer $($Config.Token)" }
+        TimeoutSec      = [int]$Config.TimeoutSeconds
+        OutFile         = $Destination
+        UseBasicParsing = $true
+    }
+    if ($Config.SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 6) {
+        $parameters['SkipCertificateCheck'] = $true
+    }
+    Invoke-WebRequest @parameters | Out-Null
+}
+
+function Sync-AgentDistribution {
+    <#
+    .SYNOPSIS
+        Download a whole distribution into a staging directory and verify it.
+    .DESCRIPTION
+        Nothing touches the installation until every file has arrived, hashed correctly
+        and parsed. The staging directory is rebuilt from scratch each time so a half
+        finished attempt from a previous run cannot be mistaken for a complete one.
+
+        Returns the list of problems; empty means the staging directory is safe to
+        install.
+    #>
+    param($Config, $Manifest, [string] $StagingPath)
+
+    if (Test-Path -LiteralPath $StagingPath) { Remove-Item -LiteralPath $StagingPath -Recurse -Force }
+    New-Item -ItemType Directory -Path $StagingPath -Force | Out-Null
+
+    foreach ($file in @($Manifest.files)) {
+        $relative = ([string]$file.path).Replace('/', '\')
+        Save-AgentDistFile -Config $Config -RelativePath ([string]$file.path) `
+            -Destination (Join-Path $StagingPath $relative)
+    }
+
+    Test-AgentDistribution -Directory $StagingPath -Manifest $Manifest
+}
+
+function Resolve-AgentUpdateState {
+    <#
+    .SYNOPSIS
+        Settle what happened to the last update, before doing anything else.
+    .DESCRIPTION
+        A version installed by the previous run is on probation: it has to get as far
+        as posting a report before it counts as working. This runs at startup, so a
+        version that dies partway through gets a second chance and then gets reverted,
+        rather than leaving the host silently broken until somebody notices the
+        monitoring stopped.
+
+        Returns the state, which the rest of the run carries and updates.
+    #>
+    param($Config, [string] $InstallPath)
+
+    $state = Read-AgentUpdateState -InstallPath $InstallPath
+    switch (Resolve-AgentUpdateOutcome -State $state) {
+        'verify' {
+            $state['attempts'] = [int]$state['attempts'] + 1
+            Write-AgentLog -Config $Config -Level 'INFO' `
+                -Message "Running version $($state.version) on probation (attempt $($state.attempts))."
+            return (Write-AgentUpdateState -InstallPath $InstallPath -State $state)
+        }
+        'rollback' {
+            $failed = [string]$state['version']
+            Write-AgentLog -Config $Config -Level 'ERROR' `
+                -Message "Version $failed failed to complete a run twice; restoring $($state.previousVersion)."
+            if (Undo-AgentUpdate -InstallPath $InstallPath) {
+                $restored = New-AgentUpdateState -Version ([string]$state['previousVersion']) `
+                    -Stage 'confirmed' -BlockedVersion $failed `
+                    -BlockedReason "Version $failed did not complete a run after two attempts."
+                return (Write-AgentUpdateState -InstallPath $InstallPath -State $restored)
+            }
+            Write-AgentLog -Config $Config -Level 'ERROR' `
+                -Message 'There is nothing to roll back to. Reinstall the agent from the web interface.'
+            $state['stage'] = 'confirmed'
+            return (Write-AgentUpdateState -InstallPath $InstallPath -State $state)
+        }
+    }
+    $state
+}
+
+function Confirm-AgentVersion {
+    <#
+    .SYNOPSIS
+        Mark the running version as working. Called once a report has been accepted.
+    #>
+    param($Config, [string] $InstallPath, $State)
+
+    if ($null -eq $State) { return $null }
+    if ([string]$State['stage'] -ne 'pending') { return $State }
+
+    $State['stage'] = 'confirmed'
+    $State['attempts'] = 0
+    Write-AgentLog -Config $Config -Message "Version $($State.version) reported successfully; keeping it."
+    Write-AgentUpdateState -InstallPath $InstallPath -State $State
+}
+
+function Invoke-AgentSelfUpdate {
+    <#
+    .SYNOPSIS
+        Bring the agent up to whatever the server is shipping.
+    .DESCRIPTION
+        Runs at the end of a cycle, so a host that is about to update still reports its
+        disks first. Returns $true when the files were replaced, which means this
+        process is now running code that is no longer on disk and should exit: the
+        scheduled task starts the new version at the next interval.
+
+        Anything that goes wrong here is a warning, never a failure. A server that
+        cannot be reached, a hash that does not match, a file that will not parse - all
+        of them leave the working agent exactly as it was.
+    #>
+    param($Config, [string] $InstallPath, $State)
+
+    $manifest = $null
+    try {
+        $manifest = Get-AgentDistManifest -Config $Config
+    }
+    catch {
+        Write-AgentLog -Config $Config -Level 'WARN' `
+            -Message "Could not ask the server for the current agent: $($_.Exception.Message)"
+        return $false
+    }
+    if ($null -eq $manifest -or -not $manifest.PSObject.Properties['version']) { return $false }
+
+    $available = [string]$manifest.version
+    $installed = if ($null -ne $State) { [string]$State['version'] } else { '' }
+
+    if ($installed -eq $available) { return $false }
+
+    if ($null -ne $State -and [string]$State['blockedVersion'] -eq $available) {
+        # This exact version already broke this host once. Reporting it as a collector
+        # error puts it on the agents page instead of only in a log file nobody reads.
+        Write-AgentLog -Config $Config -Level 'WARN' `
+            -Message "Not installing $available again: $($State.blockedReason)"
+        return $false
+    }
+
+    # An installation done by copying files has no state file. Hash what is already
+    # there before downloading anything: usually it is already current and there is
+    # nothing to do but write the state down.
+    if (-not $installed) {
+        $problems = Test-AgentDistribution -Directory $InstallPath -Manifest $manifest
+        if ($problems.Count -eq 0) {
+            Write-AgentUpdateState -InstallPath $InstallPath -State (New-AgentUpdateState `
+                    -Version $available -AgentVersion ([string]$manifest.agentVersion) -Stage 'confirmed') | Out-Null
+            Write-AgentLog -Config $Config -Message "Agent files already match the server ($available)."
+            return $false
+        }
+    }
+
+    Write-AgentLog -Config $Config -Message "Updating the agent: $(if ($installed) { $installed } else { 'unknown' }) -> $available."
+
+    $stagingPath = Join-Path $InstallPath '.staging'
+    try {
+        $problems = Sync-AgentDistribution -Config $Config -Manifest $manifest -StagingPath $stagingPath
+    }
+    catch {
+        Write-AgentLog -Config $Config -Level 'WARN' `
+            -Message "Download failed, keeping the current agent: $($_.Exception.Message)"
+        return $false
+    }
+
+    if ($problems.Count -gt 0) {
+        # Refusing is the safe outcome: the agent that is running works, and the one
+        # that was offered demonstrably does not.
+        Write-AgentLog -Config $Config -Level 'ERROR' `
+            -Message "Refusing update $available - $($problems -join ' ')"
+        return $false
+    }
+
+    try {
+        if (-not (Save-AgentUpdate -InstallPath $InstallPath -StagingPath $stagingPath -Manifest $manifest)) {
+            return $false
+        }
+        Write-AgentUpdateState -InstallPath $InstallPath -State (New-AgentUpdateState `
+                -Version $available -AgentVersion ([string]$manifest.agentVersion) `
+                -Stage 'pending' -Attempts 0 -PreviousVersion $installed) | Out-Null
+    }
+    catch {
+        # Writing into Program Files needs the rights the scheduled task has and an
+        # interactive run may not. Say which, rather than dying halfway through a swap.
+        Write-AgentLog -Config $Config -Level 'ERROR' `
+            -Message "Could not install $available into ${InstallPath}: $($_.Exception.Message)"
+        return $false
+    }
+
+    try { Remove-Item -LiteralPath $stagingPath -Recurse -Force } catch { }
+
+    Write-AgentLog -Config $Config -Message "Installed $available. The next scheduled run uses it."
+    $true
+}
+
+#endregion
+
 # ---------------------------------------------------------------------------
 
 $config = Read-AgentConfig -Path $ConfigPath
+$installPath = $PSScriptRoot
 
 if (-not $DryRun) {
     $problems = Test-AgentConfig -Config $config
@@ -927,9 +1155,29 @@ if (-not $DryRun) {
     }
 }
 
+# Settle the last update before collecting anything. A version installed by the previous
+# run is on probation until it gets through a cycle, and one that cannot manage that
+# twice puts the old files back rather than leaving the host quietly unmonitored.
+$updateState = $null
+if (-not $DryRun) { $updateState = Resolve-AgentUpdateState -Config $config -InstallPath $installPath }
+
 do {
+    $cycleFailed = $false
     try {
-        $report = Invoke-AgentCycle -Config $config
+        $notices = @()
+        $distributionVersion = ''
+        if ($null -ne $updateState) {
+            $distributionVersion = [string]$updateState['version']
+            if ([string]$updateState['blockedVersion']) {
+                # Surface a rolled-back update where the operator already looks, rather
+                # than only in a log file on the Windows box.
+                $notices = @(New-CollectorError -Collector 'self-update' `
+                        -Message ([string]$updateState['blockedReason']) `
+                        -Detail "Deploy a different build, or delete update-state.json in $installPath to try again.")
+            }
+        }
+
+        $report = Invoke-AgentCycle -Config $config -DistributionVersion $distributionVersion -Notices $notices
 
         if ($DryRun) {
             $report | ConvertTo-Json -Depth 12
@@ -943,6 +1191,10 @@ do {
                 Write-AgentLog -Message $warning -Level 'WARN' -Config $config
             }
 
+            # Getting a report accepted is what "this version works" means. Anything
+            # earlier would confirm a build that starts and then falls over.
+            $updateState = Confirm-AgentVersion -Config $config -InstallPath $installPath -State $updateState
+
             # Then take whatever cataloguing work the server has for roots it cannot
             # read itself. Doing it after the report means the server always has fresh
             # pool membership before it decides what to ask for.
@@ -951,8 +1203,31 @@ do {
     }
     catch {
         Write-AgentLog -Message "Report failed: $($_.Exception.Message)" -Level 'ERROR' -Config $config
-        if (-not $Loop) { exit 2 }
+        $cycleFailed = $true
     }
 
+    <#
+        The update runs whether or not the cycle worked, and that ordering is the whole
+        point: an agent too broken to finish a cycle is exactly the one that most needs
+        the fix the server is already holding. Putting this inside the try above would
+        mean the first bug to throw before it locked the host onto that version for good.
+
+        After the report, though, so a host about to replace itself has said what it can.
+    #>
+    if (-not $DryRun -and $config.SelfUpdate) {
+        try {
+            if (Invoke-AgentSelfUpdate -Config $config -InstallPath $installPath -State $updateState) {
+                Write-AgentLog -Config $config `
+                    -Message 'Exiting so the scheduled task starts the new version.'
+                break
+            }
+        }
+        catch {
+            Write-AgentLog -Config $config -Level 'WARN' `
+                -Message "The update check failed: $($_.Exception.Message)"
+        }
+    }
+
+    if ($cycleFailed -and -not $Loop) { exit 2 }
     if ($Loop) { Start-Sleep -Seconds ([int]$config.IntervalSeconds) }
 } while ($Loop)

@@ -31,23 +31,69 @@ latency monitoring.
 
 ## Install
 
-1. In the web interface, go to **Settings → Agents** and create a token. It is shown
-   once.
-2. Copy the `agent` folder to the Windows host.
-3. From an **elevated** PowerShell prompt:
+The server ships the agent. Go to **Settings → Agents**, create a token, and paste the
+command it shows into an **elevated** Windows PowerShell prompt on the host:
+
+```powershell
+$Server = 'http://nas.local:8080'; $Token = '<the token>'
+$b = Join-Path $env:TEMP 'Bootstrap-SakuraDriveAgent.ps1'
+Invoke-WebRequest -UseBasicParsing -Uri "$Server/api/agent/dist/file?path=Bootstrap-SakuraDriveAgent.ps1" -Headers @{ Authorization = "Bearer $Token" } -OutFile $b
+& $b -ServerUrl $Server -Token $Token
+```
+
+That downloads one script, which then fetches the rest of the agent, checks every file
+against the SHA-256 the server published, parses the PowerShell before running any of it,
+and installs. It copies the agent to `C:\Program Files\SakuraDrive Agent`, writes its
+configuration with an ACL that only SYSTEM and Administrators can read (the token is a
+credential), registers a scheduled task running as SYSTEM every 15 minutes plus once at
+boot, and runs it once so you can confirm it worked.
+
+Elevation is required because reading SMART data and querying DrivePool both need
+administrative rights, and SYSTEM is used so the task keeps running when you log out.
+
+If the server is on `https` with a self-signed certificate, add `-SkipCertificateCheck`
+to the last line. On `https` at all, Windows PowerShell 5.1 needs
+`[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12` first;
+the interface includes that line when it applies.
+
+Running the command again repairs an installation. Add `-KeepConfig` to keep the existing
+`agent.config.json`.
+
+### Installing without the server
+
+Copy the `agent` folder to the host and run the installer directly:
 
 ```powershell
 cd C:\path\to\agent
 .\Install-SakuraDriveAgent.ps1 -ServerUrl http://nas.local:8080 -Token <the token>
 ```
 
-That copies the agent to `C:\Program Files\SakuraDrive Agent`, writes its configuration
-with an ACL that only SYSTEM and Administrators can read (the token is a credential),
-registers a scheduled task running as SYSTEM every 15 minutes plus once at boot, and runs
-it once so you can confirm it worked.
+The agent then works out on its first run that its files match what the server ships, and
+keeps itself current from then on.
 
-Elevation is required because reading SMART data and querying DrivePool both need
-administrative rights, and SYSTEM is used so the task keeps running when you log out.
+## Updating
+
+The agent replaces itself with whatever the server is shipping. Deploy a new image and
+every host picks it up within one interval; there is nothing to copy onto Windows.
+
+Each run asks `/api/agent/dist` for the current manifest and compares its version — a
+hash of the file hashes — with what is installed. When they differ it downloads to a
+staging directory, checks every file's SHA-256, parses every `.ps1` and `.psm1`, and only
+then swaps them in, keeping the replaced files in `.previous`. `agent.config.json`, the
+log and anything else beside the agent are left alone.
+
+Nothing about that is best-effort:
+
+- A hash that does not match, or a file that will not parse, means the update is refused
+  and the working agent keeps running. The refusal names the file and the line.
+- A version that installs but cannot get through two runs puts the previous files back on
+  its own, and is not offered again — the reason appears against the host under
+  **Settings → Agents**.
+- The update check runs even when the cycle before it failed. An agent too broken to
+  report is the one that most needs the fix the server is holding.
+
+`Settings → Agents` shows which distribution each host is running. Set
+`"SelfUpdate": false` in `agent.config.json` to pin a host to what it has.
 
 Useful switches:
 
@@ -80,6 +126,9 @@ which is long enough to answer "was that host still reporting after I revoked it
 -Uninstall                                   # removes the task and the installed files
 ```
 
+`Bootstrap-SakuraDriveAgent.ps1` takes the same switches and passes them through, plus
+`-SkipCertificateCheck` for a self-signed certificate.
+
 ## The configuration file
 
 `agent.config.json` lives next to the installed agent and is read on every run, so a
@@ -105,6 +154,7 @@ still matches, so it cannot go stale.
 | `SmartctlPath`, `DpcmdPath`, `RxpccPath` | Explicit tool paths. Blank means search |
 | `CollectSmart`, `CollectPerformance`, `CollectDrivePool`, `CollectPrimoCache` | Turn a collector off |
 | `CollectCatalogJobs` | Take catalog scan and hash work. Off means health reporting only |
+| `SelfUpdate` | Replace the agent with what the server ships. Off pins this host |
 | `DuplicationDepth` | How deep to probe DrivePool duplication. 3 suits a tiered layout |
 | `PerformanceSamples` | Seconds of performance-counter sampling per report |
 | `SkipCertificateCheck` | Only for a self-signed certificate on a trusted LAN |
@@ -268,6 +318,9 @@ report mixed sub-counts. With duplication set per tier, the default is more than
 | `IntervalSeconds` | 900 | Also set on the scheduled task by the installer |
 | `SmartctlPath` | auto | Explicit path to `smartctl.exe` |
 | `DpcmdPath` | auto | Explicit path to `dpcmd.exe` |
+| `RxpccPath` | auto | Explicit path to `rxpcc.exe` |
+| `CollectCatalogJobs` | true | Take catalog scan and hash work from the server |
+| `SelfUpdate` | true | Keep this host on whatever the server ships |
 | `DuplicationDepth` | 3 | Folder levels to probe for duplication settings |
 | `PerformanceSamples` | 3 | Seconds of performance-counter sampling per report |
 | `CollectSmart` / `CollectPerformance` / `CollectDrivePool` / `CollectPrimoCache` | true | Turn individual collectors off |
@@ -327,6 +380,15 @@ so an agent that could collect nothing still checks in and reports why.
 The schema is `agentReportSchema` in `packages/shared/src/agent-protocol.ts`, and
 `AGENT_PROTOCOL_VERSION` beside it. The server records the version each agent reports and
 warns — without rejecting the data — when it differs from its own.
+
+Everything the agent calls sits under `/api/agent/` and takes the same bearer token:
+
+| Endpoint | What it is for |
+| --- | --- |
+| `POST /api/agent/report` | The health report |
+| `POST /api/agent/jobs/claim`, `…/:id/batch`, `…/:id/finish` | Catalog work for roots the container cannot read |
+| `GET /api/agent/dist` | The manifest: a version, and every file with its SHA-256 |
+| `GET /api/agent/dist/file?path=…` | One file, as bytes. Only names in the manifest are served |
 
 ## Troubleshooting
 
