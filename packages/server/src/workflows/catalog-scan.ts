@@ -111,7 +111,7 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
           return { state: 'paused' };
         }
         if (outcome === 'completed') {
-          finishRoot(ctx, deps, root, runId, cursor, config);
+          await finishRoot(ctx, deps, root, runId, cursor, config);
         } else {
           // Failed or abandoned. Leave the catalog exactly as it was: a half-walked
           // tree read as deletions would be far worse than a scan that did not happen.
@@ -160,17 +160,17 @@ async function rebuildDirtyPools(
 }
 
 /** Everything a finished root needs, whoever walked it. */
-function finishRoot(
+async function finishRoot(
   ctx: WorkflowContext,
   deps: CatalogScanDeps,
   root: ScanRoot,
   runId: number,
   cursor: ScanCursor,
   config: ReturnType<SettingsService['get']>,
-): void {
+): Promise<void> {
   const { catalog } = deps;
   // The root was walked in full, so anything not seen really is gone.
-  const deleted = catalog.markMissingAsDeleted(runId, root.id);
+  const deleted = await catalog.markMissingAsDeletedYielding(runId, root.id);
   const stats = catalog.rootStats(root.id);
   catalog.updateRunStats(runId, {
     filesSeen: cursor.filesSeen,
@@ -181,7 +181,7 @@ function finishRoot(
     deleted,
     restored: cursor.restored,
   });
-  catalog.rebuildDirStats(root.id);
+  await catalog.rebuildDirStatsYielding(root.id);
   // The pool this disk belongs to is now stale, but rebuilding it here would mean one
   // full pass over every member disk per disk finished. Noted, and done once at the end.
   if (root.kind === 'poolpart' && root.poolId && !cursor.dirtyPools.includes(root.poolId)) {

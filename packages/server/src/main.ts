@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createServices, startBackgroundJobs } from './services/container.js';
@@ -8,8 +9,25 @@ async function main(): Promise<void> {
   const services = createServices({ config });
   const { logger } = services;
 
+  // Sizes on disk, because "why is everything slow" has been unanswerable from the log
+  // so far and a database that has outgrown its cache is the first thing to rule out.
+  const sizeOf = (file: string): number => {
+    try {
+      return statSync(file).size;
+    } catch {
+      return 0;
+    }
+  };
+  const mb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
   logger.info(
-    { dataDir: config.dataDir, port: config.port, version: config.version },
+    {
+      dataDir: config.dataDir,
+      port: config.port,
+      version: config.version,
+      database: mb(sizeOf(config.databasePath)),
+      writeAheadLog: mb(sizeOf(`${config.databasePath}-wal`)),
+    },
     'starting SakuraDrive',
   );
 
@@ -18,7 +36,6 @@ async function main(): Promise<void> {
   }
 
   const app = await buildApp(services);
-  startBackgroundJobs(services);
 
   // Give in-flight workflows a chance to checkpoint before the container dies.
   let shuttingDown = false;
@@ -41,6 +58,11 @@ async function main(): Promise<void> {
 
   await app.listen({ host: config.host, port: config.port });
   logger.info(`SakuraDrive is listening on http://${config.host}:${config.port}`);
+
+  // Only now. Workflows do heavy synchronous work, and starting them before the
+  // listener meant a busy one could stop the server ever coming up -- which reads from
+  // outside as a dead container rather than a busy one, health check included.
+  startBackgroundJobs(services);
 }
 
 main().catch((error) => {

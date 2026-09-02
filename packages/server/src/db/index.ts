@@ -46,6 +46,19 @@ export function openDatabase({ file, readonly = false }: OpenDatabaseOptions): D
       and worth repeating after a scan has poured in a few million rows.
     */
     db.pragma('optimize');
+
+    /*
+      Fold the write-ahead log back into the database.
+
+      WAL only shrinks when a checkpoint completes, and a checkpoint cannot complete
+      while anything is reading. A server that is being polled while it writes can go a
+      very long time without one, and every read then has to search a log that keeps
+      growing -- which makes everything slower, including signing in, and survives a
+      restart because the file is still there. Startup is the one moment nothing else
+      is using the database, so it is the one moment this always works.
+    */
+    const walPages = (db.pragma('wal_checkpoint(TRUNCATE)', { simple: false }) as unknown[])[0];
+    void walPages;
     applyMigrations(db);
   }
   return db;

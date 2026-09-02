@@ -399,14 +399,41 @@ export class CatalogService {
    * lose. The scan workflow enforces that.
    */
   markMissingAsDeleted(runId: number, rootId: string): number {
+    return this.sweepMissing(runId, rootId, null);
+  }
+
+  /**
+   * The deletion sweep, in batches, letting the process breathe between them.
+   *
+   * A disk that dropped out means every file on it is missing at once, so this is not
+   * a rare small update -- it is potentially the whole root in one transaction.
+   */
+  async markMissingAsDeletedYielding(
+    runId: number,
+    rootId: string,
+    chunkSize = 5_000,
+  ): Promise<number> {
+    let total = 0;
+    for (;;) {
+      const swept = this.sweepMissing(runId, rootId, chunkSize);
+      total += swept;
+      if (swept === 0) break;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return total;
+  }
+
+  /** One pass of the sweep. `limit` of null means "everything, in one transaction". */
+  private sweepMissing(runId: number, rootId: string, limit: number | null): number {
     this.invalidateStats();
     const now = nowIso();
     const missing = this.db
-      .prepare<[string, number], { id: number; rel_path: string; size_bytes: number; mtime_ms: number }>(
+      .prepare<unknown[], { id: number; rel_path: string; size_bytes: number; mtime_ms: number }>(
         `SELECT id, rel_path, size_bytes, mtime_ms FROM files
-          WHERE root_id = ? AND deleted_at IS NULL AND (last_run_id IS NULL OR last_run_id != ?)`,
+          WHERE root_id = ? AND deleted_at IS NULL AND (last_run_id IS NULL OR last_run_id != ?)
+          ${limit === null ? '' : 'LIMIT ?'}`,
       )
-      .all(rootId, runId);
+      .all(...(limit === null ? [rootId, runId] : [rootId, runId, limit]));
     if (missing.length === 0) return 0;
 
     const markDeleted = this.db.prepare('UPDATE files SET deleted_at = ? WHERE id = ?');
@@ -425,6 +452,45 @@ export class CatalogService {
   }
 
   /** Re-apply duplication rules to every catalogued file in a root. */
+  /** Recompute duplication levels a page at a time, yielding between pages. */
+  async refreshDuplicationLevelsYielding(
+    rootId: string,
+    rules: readonly DuplicationRule[],
+    defaultLevel: number,
+    chunkSize = 20_000,
+  ): Promise<number> {
+    this.invalidateStats();
+    const resolver = createDuplicationResolver(rules, defaultLevel);
+    const statement = this.db.prepare<[string, number, number], {
+      id: number; rel_path: string; duplication_level: number;
+    }>(
+      `SELECT id, rel_path, duplication_level FROM files
+        WHERE root_id = ? AND deleted_at IS NULL AND id > ?
+        ORDER BY id LIMIT ?`,
+    );
+    const update = this.db.prepare('UPDATE files SET duplication_level = ? WHERE id = ?');
+
+    let changed = 0;
+    let afterId = 0;
+    for (;;) {
+      const rows = statement.all(rootId, afterId, chunkSize);
+      if (rows.length === 0) break;
+      this.db.transaction(() => {
+        for (const row of rows) {
+          const level = resolver(row.rel_path);
+          if (level !== row.duplication_level) {
+            update.run(level, row.id);
+            changed += 1;
+          }
+        }
+      })();
+      if (rows.length < chunkSize) break;
+      afterId = rows[rows.length - 1]!.id;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return changed;
+  }
+
   refreshDuplicationLevels(rootId: string, rules: readonly DuplicationRule[], defaultLevel: number): number {
     const resolver = createDuplicationResolver(rules, defaultLevel);
     const rows = this.db
@@ -929,6 +995,45 @@ export class CatalogService {
    * directory upward, which is far cheaper than recursive SQL and keeps the treemap
    * instant regardless of catalog size.
    */
+  /**
+   * The per-root rollup, rebuilt without holding the process.
+   *
+   * Same shape as the pool version and for the same reason: reading every row of a
+   * root and folding it into directory totals is seconds of work on a large disk, and
+   * doing it in one go stops the server answering anything at all -- including the
+   * health check, which is how a container that is merely busy gets reported as dead.
+   */
+  async rebuildDirStatsYielding(rootId: string, chunkSize = 20_000): Promise<number> {
+    this.invalidateStats();
+    const statement = this.db.prepare<[string, number, number], {
+      id: number; rel_path: string; size_bytes: number; duplication_level: number;
+    }>(
+      `SELECT id, rel_path, size_bytes, duplication_level
+         FROM files WHERE root_id = ? AND deleted_at IS NULL AND id > ?
+        ORDER BY id LIMIT ?`,
+    );
+
+    const nodes = newDirNodes();
+    let afterId = 0;
+    for (;;) {
+      const rows = statement.all(rootId, afterId, chunkSize);
+      if (rows.length === 0) break;
+      this.accumulateDirNodes(
+        nodes,
+        rows.map((row) => ({
+          relPath: row.rel_path,
+          sizeBytes: row.size_bytes,
+          effectiveBytes: row.size_bytes * Math.max(1, row.duplication_level),
+        })),
+      );
+      if (rows.length < chunkSize) break;
+      afterId = rows[rows.length - 1]!.id;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    return this.finaliseDirStats(rootId, nodes);
+  }
+
   rebuildDirStats(rootId: string): number {
     this.invalidateStats();
     const rows = this.db

@@ -53,14 +53,17 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
           unit: 'roots',
           message: `Recomputing duplication for ${root.name}`,
         });
-        updated += catalog.refreshDuplicationLevels(
+        // Yielding, both of them: fourteen roots of synchronous work is minutes on a
+        // real pool, and this workflow does not respect the I/O window, so it can do
+        // that at any hour. Nothing is served while it runs.
+        updated += await catalog.refreshDuplicationLevelsYielding(
           root.id,
           config.duplication.rules.filter(
             (rule) => rule.poolId === null || root.poolId === null || rule.poolId === root.poolId,
           ),
           config.duplication.defaultLevel,
         );
-        catalog.rebuildDirStats(root.id);
+        await catalog.rebuildDirStatsYielding(root.id);
         // Not the pool: rebuilding it groups every row on every member disk, so doing
         // it per root means one full pass over the whole pool per member. Once, below.
         if (root.kind === 'poolpart' && root.poolId) dirtyPools.add(root.poolId);
