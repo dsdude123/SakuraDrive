@@ -6,17 +6,24 @@
 #
 # Windows drives appear inside WSL2 under /mnt/<letter>. Every pool mount is read-only
 # on purpose: SakuraDrive never writes to your data.
+#
+# The image is pulled, not built here. CI builds it, smoke-tests it and pushes it to
+# GHCR, so updating is a pull and a restart — which is the operation Portainer's stack
+# update actually performs. To build from source instead, add the override:
+#
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.build.yml \
+#     up -d --build
+#
+# The package is private, like the repository. Portainer needs a registry credential
+# for ghcr.io before it can pull; see docs/DEPLOY.md.
 
 services:
   sakuradrive:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: sakuradrive:latest
-    # This image is built here, not pulled: it exists on this host and nowhere else.
-    # Saying so keeps `docker compose pull` -- which is what Portainer's stack update
-    # runs first -- from looking for it in a registry and failing before it can build.
-    pull_policy: build
+    # Pin to a commit with SAKURADRIVE_TAG=sha-abc1234 when rolling back.
+    image: ghcr.io/dsdude123/sakuradrive:${SAKURADRIVE_TAG:-latest}
+    # Always ask the registry. Silently running a stale image while wondering why a fix
+    # did not land is the failure this is here to prevent.
+    pull_policy: always
     container_name: sakuradrive
     restart: unless-stopped
 

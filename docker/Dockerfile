@@ -61,6 +61,11 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm-slim AS runtime
 
+# Stamped by CI with the commit that built the image, so /api/health answers "which
+# build is this?" -- the same question the agent's distribution version answers for the
+# Windows side. Defaults to the package version for a local build.
+ARG SAKURADRIVE_VERSION=0.1.0
+
 LABEL org.opencontainers.image.title="SakuraDrive" \
       org.opencontainers.image.description="NAS monitoring, cataloguing and disaster-recovery tooling for StableBit DrivePool" \
       org.opencontainers.image.source="https://github.com/dsdude123/sakuradrive"
@@ -91,6 +96,7 @@ ENV NODE_ENV=production \
     SAKURADRIVE_DATA_DIR=/data \
     SAKURADRIVE_WEB_ROOT=/app/public \
     SAKURADRIVE_AGENT_DIST_DIR=/app/agent \
+    SAKURADRIVE_VERSION=${SAKURADRIVE_VERSION} \
     PORT=8080 \
     TZ=UTC
 

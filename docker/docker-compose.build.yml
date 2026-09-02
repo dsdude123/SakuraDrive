@@ -1,0 +1,22 @@
+# Build the image from this checkout instead of pulling it.
+#
+# For working on SakuraDrive, or for a host that cannot reach GHCR. Layered over the
+# main file, which otherwise pulls what CI published:
+#
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.build.yml \
+#     up -d --build
+#
+# The image keeps the registry name so the two paths produce one container, not two.
+
+services:
+  sakuradrive:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        # CI stamps the commit here. A local build says so plainly rather than claiming
+        # to be a release: /api/health reports whatever this is.
+        SAKURADRIVE_VERSION: local
+    # This image exists on this host and nowhere else, so never look for it in a
+    # registry -- that lookup is what fails, before anything can be built.
+    pull_policy: build

@@ -73,8 +73,9 @@ keeps itself current from then on.
 
 ## Updating
 
-The agent replaces itself with whatever the server is shipping. Deploy a new image and
-every host picks it up within one interval; there is nothing to copy onto Windows.
+The agent replaces itself with whatever the server is shipping. Deploy a new image (see
+[deploying](DEPLOY.md)) and every host picks it up within one interval; there is nothing
+to copy onto Windows.
 
 Each run asks `/api/agent/dist` for the current manifest and compares its version — a
 hash of the file hashes — with what is installed. When they differ it downloads to a

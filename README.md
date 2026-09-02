@@ -31,7 +31,13 @@ cd sakuradrive/docker
 cp .env.example .env          # optional: port, timezone, log level
 
 # Edit docker-compose.yml so the bind mounts match your drive letters.
-docker compose up -d --build
+docker compose up -d
+```
+
+That pulls the image CI published. To build it from this checkout instead:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 Open `http://<host>:8080`, create the account it asks for, then:
@@ -39,8 +45,10 @@ Open `http://<host>:8080`, create the account it asks for, then:
 1. **Settings → Catalog roots** — add the pool **member disks**, not the pooled drive.
    `/mnt/d` inside WSL2 is Windows `D:`. Press *Check mount* on each one; it tells you
    straight away whether the container can actually see the path.
-2. **Settings → Agents** — create a token, then run the installer on the Windows host
-   (see [docs/AGENT.md](docs/AGENT.md)). Without it there is no SMART data.
+2. **Settings → Agents** — create a token and paste the command it shows into an
+   elevated PowerShell prompt on the Windows host (see [docs/AGENT.md](docs/AGENT.md)).
+   Without it there is no SMART data. That is the only time you touch the host: the
+   agent updates itself from the server after that.
 3. **Schedule** — paint the hours when heavy I/O is acceptable. The default is
    01:00–07:00 on weeknights and 01:00–10:00 at weekends.
 4. **Settings → Backup & export** — point at a folder your host already backs up.
@@ -174,8 +182,9 @@ pwsh -Command "Invoke-Pester -Path agent/tests -Output Detailed"     # 78 tests
 | `packages/server` | Fastify API, SQLite persistence, workflow engine, collectors |
 | `packages/web` | React interface |
 | `agent` | PowerShell agent, installer and Pester tests |
-| `docker` | Dockerfile and compose file |
+| `docker` | Dockerfile and compose files |
 
 Further reading: [architecture](docs/ARCHITECTURE.md) ·
-[agent setup](docs/AGENT.md) · [disaster recovery](docs/DISASTER-RECOVERY.md) ·
+[deploying](docs/DEPLOY.md) · [agent setup](docs/AGENT.md) ·
+[disaster recovery](docs/DISASTER-RECOVERY.md) ·
 [backup expectations](docs/BACKUP-EXPECTATIONS.md) · [API reference](docs/API.md)
