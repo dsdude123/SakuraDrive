@@ -103,6 +103,7 @@ export class CatalogService {
     string,
     { at: number; value: ReturnType<CatalogService['computeRootStats']> }
   >();
+  private totalsCache: { at: number; value: ReturnType<CatalogService['computeTotals']> } | null = null;
 
   constructor(
     private readonly db: Db,
@@ -1223,6 +1224,7 @@ export class CatalogService {
 
   /** Drop memoised stats, so a caller that just wrote sees its own change. */
   invalidateStats(rootId?: string): void {
+    this.totalsCache = null;
     if (rootId === undefined) this.statsCache.clear();
     else this.statsCache.delete(rootId);
   }
@@ -1267,7 +1269,65 @@ export class CatalogService {
     };
   }
 
+  /**
+   * Catalog-wide totals, for the dashboard.
+   *
+   * Read from the directory rollups, not by scanning the files table. The dashboard is
+   * the first thing loaded and is polled, and this used to add up every row of a
+   * multi-gigabyte table to do it -- eighty-five seconds on a database living on a
+   * drvfs mount, during which the process served nothing at all.
+   *
+   * The rollups already hold each root's totals in one row, so this is a handful of
+   * rows however large the catalog is.
+   */
   totals(): { files: number; bytes: number; effectiveBytes: number; hashedFiles: number } {
+    const cached = this.totalsCache;
+    const now = this.clock();
+    if (cached && now - cached.at < STATS_CACHE_MS) return cached.value;
+
+    const value = this.computeTotals();
+    this.totalsCache = { at: now, value };
+    return value;
+  }
+
+  private computeTotals(): { files: number; bytes: number; effectiveBytes: number; hashedFiles: number } {
+    const rootIds = this.settings
+      .get()
+      .catalog.roots.filter((root) => root.enabled)
+      .map((root) => root.id);
+
+    if (rootIds.length > 0) {
+      const placeholders = rootIds.map(() => '?').join(', ');
+      const rolled = this.db
+        .prepare<unknown[], { files: number; bytes: number; effective_bytes: number; roots: number }>(
+          `SELECT COALESCE(SUM(total_files), 0)           AS files,
+                  COALESCE(SUM(total_bytes), 0)           AS bytes,
+                  COALESCE(SUM(total_effective_bytes), 0) AS effective_bytes,
+                  COUNT(*)                                AS roots
+             FROM dir_stats WHERE dir_key = '' AND root_id IN (${placeholders})`,
+        )
+        .get(...rootIds);
+
+      if (rolled && rolled.roots > 0) {
+        return {
+          files: rolled.files,
+          bytes: rolled.bytes,
+          effectiveBytes: rolled.effective_bytes,
+          // Not in the rollups, because a hash lands without one being rebuilt. The
+          // partial index makes this a walk of the hashed rows rather than of all of
+          // them, which early in a catalog's life is almost none of it.
+          hashedFiles:
+            this.db
+              .prepare<[], { n: number }>(
+                'SELECT COUNT(*) AS n FROM files WHERE deleted_at IS NULL AND hash IS NOT NULL',
+              )
+              .get()?.n ?? 0,
+        };
+      }
+    }
+
+    // No rollups yet -- nothing has finished a scan. Falling back to the table is
+    // right here and cheap, because there is little in it.
     const row = this.db
       .prepare<[], { files: number; bytes: number; effective_bytes: number; hashed: number }>(
         `SELECT COUNT(*) AS files,

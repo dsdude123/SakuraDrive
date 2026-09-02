@@ -810,3 +810,119 @@ describe('rebuilding a pool without holding the process', () => {
     database.close();
   });
 });
+
+/**
+ * The dashboard's catalog totals.
+ *
+ * This added up every row of the files table, which on a multi-gigabyte catalog on
+ * slow storage took eighty-five seconds -- and the dashboard is the first thing loaded
+ * and is then polled. It reads the directory rollups instead, which hold each root's
+ * totals in a single row, so it costs the same whatever the catalog weighs.
+ */
+describe('catalog totals', () => {
+  const part = (id: string) => ({
+    id,
+    name: id.toUpperCase(),
+    kind: 'poolpart' as const,
+    poolId: 'hdd',
+    agentHostname: '',
+    hostPath: `\\\\?\\Volume{${id}}\\PoolPart.hdd`,
+    driveLabel: id.toUpperCase(),
+    enabled: true,
+    hashEnabled: true,
+    includeGlobs: [],
+    excludeGlobs: [],
+    minHashSizeBytes: 0,
+    maxHashSizeBytes: 0,
+  });
+
+  const scanTotals = (database: Db) =>
+    database
+      .prepare(
+        `SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes), 0) AS bytes,
+                COALESCE(SUM(size_bytes * duplication_level), 0) AS effectiveBytes,
+                SUM(CASE WHEN hash IS NOT NULL THEN 1 ELSE 0 END) AS hashedFiles
+           FROM files WHERE deleted_at IS NULL`,
+      )
+      .get();
+
+  const seeded = () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config);
+    config.update({ catalog: { roots: ['d1', 'd2'].map(part) } });
+    for (const id of ['d1', 'd2']) {
+      const root = config.get().catalog.roots.find((r) => r.id === id)!;
+      const runId = service.beginRun(id, 1);
+      service.recordAgentFiles(runId, root, [
+        { relPath: 'Media/a.mkv', sizeBytes: 10, mtimeMs: 1, ctimeMs: 1 },
+        { relPath: 'Media/Deep/b.mkv', sizeBytes: 20, mtimeMs: 1, ctimeMs: 1 },
+      ]);
+      service.finishRun(runId, 'completed');
+      service.rebuildDirStats(id);
+    }
+    return { database, config, service };
+  };
+
+  it('agrees exactly with adding up the table', () => {
+    const { database, service } = seeded();
+    const totals = service.totals();
+    expect(totals).toEqual(scanTotals(database));
+    database.close();
+  });
+
+  it('counts hashed files even though the rollups do not hold them', () => {
+    const { database, service } = seeded();
+    database.prepare("UPDATE files SET hash = 'abc' WHERE rel_path = 'Media/a.mkv'").run();
+    service.invalidateStats();
+    expect(service.totals().hashedFiles).toBe(2);
+    expect(service.totals()).toEqual(scanTotals(database));
+    database.close();
+  });
+
+  // Before any scan has finished there are no rollups to read, and answering zero
+  // would be worse than the scan this exists to avoid.
+  it('falls back to the table when nothing has been rolled up yet', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config);
+    config.update({ catalog: { roots: [part('d1')] } });
+    const root = config.get().catalog.roots[0]!;
+    const runId = service.beginRun('d1', 1);
+    service.recordAgentFiles(runId, root, [
+      { relPath: 'Media/a.mkv', sizeBytes: 10, mtimeMs: 1, ctimeMs: 1 },
+    ]);
+    service.finishRun(runId, 'completed');
+
+    expect(service.totals().files).toBe(1);
+    expect(service.totals()).toEqual(scanTotals(database));
+    database.close();
+  });
+
+  it('leaves a disabled root out, as the rest of the interface does', () => {
+    const { database, config, service } = seeded();
+    const roots = config.get().catalog.roots.map((r) => ({ ...r, enabled: r.id === 'd1' }));
+    config.update({ catalog: { roots } });
+    service.invalidateStats();
+    expect(service.totals().files).toBe(2);
+    database.close();
+  });
+
+  // The dashboard polls, so a repeat must not repeat the work -- but a write has to
+  // be visible immediately, or a finished scan reports pre-scan numbers.
+  it('is memoised, and a write clears it', () => {
+    const { database, config, service } = seeded();
+    expect(service.totals().files).toBe(4);
+
+    const root = config.get().catalog.roots[0]!;
+    const runId = service.beginRun('d1', 2);
+    service.recordAgentFiles(runId, root, [
+      { relPath: 'Media/c.mkv', sizeBytes: 30, mtimeMs: 1, ctimeMs: 1 },
+    ]);
+    service.finishRun(runId, 'completed');
+    service.rebuildDirStats('d1');
+
+    expect(service.totals().files).toBe(5);
+    database.close();
+  });
+});

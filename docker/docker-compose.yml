@@ -39,9 +39,18 @@ services:
       SAKURADRIVE_DISABLE_AUTH: ${SAKURADRIVE_DISABLE_AUTH:-false}
 
     volumes:
-      # Database, generated export bundles and the Kopia cache. Follows the same
-      # Tier2/Docker convention as the other stacks.
-      - /mnt/m/Tier2/Docker/sakuradrive_data:/data
+      # Database, generated export bundles and the Kopia cache.
+      #
+      # A named volume, which lives on the WSL2 VM's own filesystem, NOT a path under
+      # /mnt. Everything under /mnt is a Windows drive reached through drvfs, and SQLite
+      # on drvfs is punishing: every page the cache misses is a round trip out to the
+      # Windows filesystem. The catalog of a real pool is gigabytes, so that is most
+      # reads -- adding up the dashboard's totals took eighty-five seconds on a drvfs
+      # mount and a millisecond off it.
+      #
+      # Nothing irreplaceable lives here. The catalog is rebuilt by a scan, and export
+      # bundles are copied out to the bind mount below, which is what reaches Backblaze.
+      - sakuradrive_data:/data
 
       # ------------------------------------------------------------------
       # No pool disks are mounted here, and none need to be.
@@ -67,3 +76,7 @@ services:
       # whole point: the catalog has to survive the machine that holds it.
       # ------------------------------------------------------------------
       - /mnt/d/SakuraDriveExports:/backup/sakuradrive
+
+volumes:
+  # On the WSL2 VM's own disk. See the note above: the database must not sit on drvfs.
+  sakuradrive_data:

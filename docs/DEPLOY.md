@@ -89,6 +89,46 @@ The override adds the `build:` section and sets `pull_policy: build`, so Compose
 looks for the image in a registry. It keeps the registry image name, so the two paths
 produce one container rather than two.
 
+## Where the database lives
+
+On the WSL2 VM's own filesystem, as a named Docker volume — **never** under `/mnt`.
+
+Everything under `/mnt` is a Windows drive reached through drvfs, and SQLite on drvfs
+is punishing: every page the cache misses is a round trip out to the Windows
+filesystem. A real pool's catalog is gigabytes, so that is most reads. Adding up the
+dashboard's totals took **85 seconds** on a drvfs mount and a millisecond off it.
+
+Nothing irreplaceable is in there. The catalog is rebuilt by a scan, and export bundles
+are copied out to the bind mount that reaches Backblaze.
+
+### Moving an existing installation off drvfs
+
+If `/data` is currently a bind mount under `/mnt`, copy it across once:
+
+```bash
+cd ~/SakuraDrive/docker
+docker compose down
+
+# Create the volume and copy the old data in.
+docker volume create docker_sakuradrive_data
+docker run --rm \
+  -v /mnt/m/Tier2/Docker/sakuradrive_data:/from:ro \
+  -v docker_sakuradrive_data:/to \
+  alpine sh -c 'cp -a /from/. /to/'
+
+docker compose up -d
+```
+
+The old directory is left untouched, so you can put the bind mount back if you want to.
+Check it worked — the startup line reports the database size:
+
+```bash
+docker logs sakuradrive 2>&1 | head -1
+```
+
+Starting fresh instead is also fine: delete nothing, let the agent re-scan, and the
+catalog rebuilds. Only the change history and dismissed bit-rot findings are lost.
+
 ## After deploying
 
 Nothing on the Windows host. The agent asks `/api/agent/dist` on its next run,

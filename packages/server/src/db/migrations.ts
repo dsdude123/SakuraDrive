@@ -492,6 +492,16 @@ export const MIGRATIONS: Migration[] = [
     );
     `,
   },
+  {
+    version: 5,
+    name: 'hashed-file-index',
+    up: `
+    -- Counting hashed files was a walk of every row. Partial, so it holds only the
+    -- files that have actually been hashed -- which early on is almost none of them,
+    -- and never more than the catalog itself.
+    CREATE INDEX files_hashed ON files(root_id) WHERE deleted_at IS NULL AND hash IS NOT NULL;
+    `,
+  },
 ];
 
 export function currentSchemaVersion(): number {
