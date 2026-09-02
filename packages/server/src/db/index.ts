@@ -30,7 +30,12 @@ export function openDatabase({ file, readonly = false }: OpenDatabaseOptions): D
     db.pragma('foreign_keys = ON');
     db.pragma('busy_timeout = 15000');
     // 64 MiB page cache and a generous mmap keep catalog scans off the disk.
-    db.pragma('cache_size = -65536');
+    // 64 MB was chosen when the catalog was a few thousand rows. A real pool is
+    // gigabytes, and a cache that small means most index lookups reach the disk --
+    // which, with a synchronous driver, is the whole process waiting. Override with
+    // SAKURADRIVE_CACHE_MB on a host that cannot spare it.
+    const cacheMb = Number(process.env.SAKURADRIVE_CACHE_MB) || 256;
+    db.pragma(`cache_size = -${Math.max(16, Math.floor(cacheMb)) * 1024}`);
     db.pragma('mmap_size = 268435456');
     db.pragma('temp_store = MEMORY');
     /*

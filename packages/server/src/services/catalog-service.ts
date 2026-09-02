@@ -236,6 +236,36 @@ export class CatalogService {
   }
 
   /**
+   * Ingest a batch of agent files without holding the process.
+   *
+   * The agent bounds a batch per directory, not per file, so one folder holding tens
+   * of thousands of files arrives as a single batch -- and writing it as one
+   * transaction against a multi-gigabyte catalog blocked the server for tens of
+   * seconds at a time. This is the endpoint the agent hits constantly, so that is not
+   * an occasional stall: it is the server being unavailable most of the time.
+   *
+   * Written in pages so a large batch costs the same per page as a small one. Each
+   * page is still its own transaction, which is what makes it safe to stop between
+   * them: a page is either recorded or it is not, and the scan is idempotent, so a
+   * batch interrupted half way is re-sent and re-applied without harm.
+   */
+  async recordAgentFilesYielding(
+    runId: number,
+    root: ScanRoot,
+    entries: readonly { relPath: string; sizeBytes: number; mtimeMs: number; ctimeMs?: number }[],
+    chunkSize = 1_000,
+  ): Promise<number> {
+    let recorded = 0;
+    for (let offset = 0; offset < entries.length; offset += chunkSize) {
+      recorded += this.recordAgentFiles(runId, root, entries.slice(offset, offset + chunkSize));
+      if (offset + chunkSize < entries.length) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+    return recorded;
+  }
+
+  /**
    * Record hashes the agent computed.
    *
    * Size and mtime are re-stated by the agent as of the moment it read the file, and

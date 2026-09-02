@@ -182,7 +182,7 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
 
     let accepted = 0;
     if (job.type === 'catalog.scan' && body.entries.length > 0 && job.catalogRunId !== null) {
-      accepted = catalog.recordAgentFiles(job.catalogRunId, root, body.entries);
+      accepted = await catalog.recordAgentFilesYielding(job.catalogRunId, root, body.entries);
     } else if (job.type === 'catalog.hash' && body.hashes.length > 0) {
       // Bit rot is decided here, not on the agent: the agent reads bytes, it does not
       // hold opinions about what they mean.

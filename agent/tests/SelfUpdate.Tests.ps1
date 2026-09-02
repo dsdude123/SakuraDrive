@@ -786,3 +786,65 @@ Describe 'Deciding when to report again mid-scan' {
             -Now $script:Noon.AddHours(-1) | Should -BeFalse
     }
 }
+
+<#
+    Bounding a batch by files, not by directories.
+
+    BatchSize was only checked between directories, so a folder holding tens of
+    thousands of files came back as one batch however small BatchSize was. The server
+    then wrote that as a single transaction against a multi-gigabyte catalog and
+    answered nothing else for tens of seconds -- and this is the endpoint the agent
+    hits constantly, so it was not an occasional stall.
+#>
+Describe 'Bounding a catalog batch' {
+    BeforeAll {
+        $script:Root = Join-Path ([System.IO.Path]::GetTempPath()) ("batch-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $script:Root 'Big') -Force | Out-Null
+        # One directory with far more files than a batch should carry.
+        foreach ($i in 1..50) {
+            Set-Content -LiteralPath (Join-Path $script:Root "Big/file-$i.mkv") -Value 'x' -Encoding ascii
+        }
+    }
+    AfterAll { Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'never returns more files than asked for' {
+        $batch = Get-CatalogBatch -RootPath $script:Root -Worklist @('') -BatchSize 10
+        $batch.files.Count | Should -BeLessOrEqual 10
+    }
+
+    It 'comes back to the rest of the directory rather than dropping it' {
+        $worklist = @('')
+        $seen = New-Object System.Collections.Generic.List[string]
+        for ($round = 0; $round -lt 40; $round++) {
+            $batch = Get-CatalogBatch -RootPath $script:Root -Worklist $worklist -BatchSize 10
+            $batch.files.Count | Should -BeLessOrEqual 10
+            foreach ($f in $batch.files) { $seen.Add($f.relPath) }
+            $worklist = @($batch.worklist)
+            if ($batch.finished) { break }
+        }
+
+        # Every file exactly once: no duplicates from resuming, none lost.
+        $seen.Count | Should -Be 50
+        ($seen | Sort-Object -Unique).Count | Should -Be 50
+    }
+
+    # The resume marker is encoded after a pipe, which Windows does not allow in a
+    # name, so it can never be mistaken for part of a real path.
+    It 'reaches the same set of files whatever the batch size' {
+        $reference = $null
+        foreach ($size in 1, 3, 7, 10, 50, 500) {
+            $worklist = @('')
+            $seen = New-Object System.Collections.Generic.List[string]
+            for ($round = 0; $round -lt 200; $round++) {
+                $batch = Get-CatalogBatch -RootPath $script:Root -Worklist $worklist -BatchSize $size
+                foreach ($f in $batch.files) { $seen.Add($f.relPath) }
+                $worklist = @($batch.worklist)
+                if ($batch.finished) { break }
+            }
+            $sorted = @($seen | Sort-Object)
+            if ($null -eq $reference) { $reference = $sorted }
+            ($sorted -join '|') | Should -Be ($reference -join '|') -Because "batch size $size must see the same files"
+            $sorted.Count | Should -Be 50
+        }
+    }
+}

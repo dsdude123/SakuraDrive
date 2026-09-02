@@ -1394,6 +1394,21 @@ function Get-CatalogBatch {
         $relDir = $pending[$pending.Count - 1]
         $pending.RemoveAt($pending.Count - 1)
 
+        # A directory too big for one batch is queued back with how far it got, encoded
+        # after a pipe -- a character Windows does not allow in a name, so it cannot be
+        # part of a real path. Without this, BatchSize was only honoured between
+        # directories: one folder holding tens of thousands of files became one batch,
+        # and the server wrote it as one transaction while answering nothing else.
+        $skip = 0
+        $cut = $relDir.LastIndexOf('|')
+        if ($cut -ge 0) {
+            $parsed = 0
+            if ([int]::TryParse($relDir.Substring($cut + 1), [ref] $parsed)) {
+                $skip = $parsed
+                $relDir = $relDir.Substring(0, $cut)
+            }
+        }
+
         $absolute = if ($relDir) { Join-Path $root ($relDir -replace '/', '\') } else { $root }
         $dirsDone++
 
@@ -1405,7 +1420,17 @@ function Get-CatalogBatch {
             continue
         }
 
+        $index = -1
         foreach ($entry in $entries) {
+            $index++
+            # Already sent in an earlier batch from this same directory.
+            if ($index -lt $skip) { continue }
+            if ($files.Count -ge $BatchSize) {
+                # Come back to the rest of this directory rather than sending it all.
+                $pending.Add("$relDir|$index")
+                break
+            }
+
             $name = [System.IO.Path]::GetFileName($entry)
             $rel = if ($relDir) { "$relDir/$name" } else { $name }
 
