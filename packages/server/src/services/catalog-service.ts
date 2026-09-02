@@ -68,10 +68,20 @@ interface FileRow {
  * treating `Media/A.mkv` and `media/a.mkv` as two files would produce phantom
  * created/deleted pairs on every scan.
  */
+/** How long memoised root statistics stay usable. */
+const STATS_CACHE_MS = 5_000;
+
 export class CatalogService {
+  private readonly statsCache = new Map<
+    string,
+    { at: number; value: ReturnType<CatalogService['computeRootStats']> }
+  >();
+
   constructor(
     private readonly db: Db,
     private readonly settings: SettingsService,
+    /** Injected in tests so cache expiry can be exercised without waiting. */
+    private readonly clock: () => number = () => Date.now(),
   ) {}
 
   /* ------------------------------------------------------------------ runs */
@@ -94,6 +104,7 @@ export class CatalogService {
   }
 
   finishRun(runId: number, state: 'completed' | 'failed' | 'cancelled', error?: string): void {
+    this.invalidateStats();
     this.db
       .prepare('UPDATE catalog_runs SET state = ?, finished_at = ?, error = ? WHERE id = ?')
       .run(state, nowIso(), error ?? null, runId);
@@ -169,6 +180,7 @@ export class CatalogService {
     root: ScanRoot,
     entries: readonly { relPath: string; sizeBytes: number; mtimeMs: number; ctimeMs?: number }[],
   ): number {
+    this.invalidateStats();
     if (entries.length === 0) return 0;
     const config = this.settings.get();
     const duplicationFor = createDuplicationResolver(
@@ -213,6 +225,7 @@ export class CatalogService {
     }[],
     algorithm = 'sha256',
   ): number {
+    this.invalidateStats();
     let recorded = 0;
     this.db.transaction(() => {
       for (const result of results) {
@@ -359,6 +372,7 @@ export class CatalogService {
    * lose. The scan workflow enforces that.
    */
   markMissingAsDeleted(runId: number, rootId: string): number {
+    this.invalidateStats();
     const now = nowIso();
     const missing = this.db
       .prepare<[string, number], { id: number; rel_path: string; size_bytes: number; mtime_ms: number }>(
@@ -608,6 +622,7 @@ export class CatalogService {
    * genuinely spends, rather than what the duplication rule asks for.
    */
   rebuildPoolDirStats(poolId: string): number {
+    this.invalidateStats();
     const query = this.poolFileRows(poolId);
     const rootId = CatalogService.poolRootId(poolId);
     if (!query) {
@@ -621,6 +636,11 @@ export class CatalogService {
       )
       .all(...query.params);
 
+    // The one place this is worth paying for. Counting paths with no surviving copy
+    // means grouping every row on every member disk; doing it here, once per rebuild,
+    // is the difference between that and doing it on every page load.
+    this.writePoolSummary(poolId);
+
     return this.writeDirStats(
       rootId,
       rows.map((row) => ({
@@ -629,6 +649,48 @@ export class CatalogService {
         effectiveBytes: row.size_bytes * Math.max(1, row.copies),
       })),
     );
+  }
+
+  /** Count the paths this pool has lost every copy of, and store it. */
+  private writePoolSummary(poolId: string): void {
+    const rootIds = this.partRootIds(poolId);
+    if (rootIds.length === 0) {
+      this.db.prepare('DELETE FROM pool_summary WHERE pool_id = ?').run(poolId);
+      return;
+    }
+
+    const placeholders = rootIds.map(() => '?').join(', ');
+    const row = this.db
+      .prepare<unknown[], { deleted: number; hashed: number }>(
+        `SELECT
+           COUNT(*) AS deleted,
+           0 AS hashed
+         FROM (SELECT path_key FROM files WHERE root_id IN (${placeholders})
+                GROUP BY path_key
+               HAVING SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END) = 0)`,
+      )
+      .get(...rootIds);
+
+    // Distinct paths with a hash, not a sum across disks: two copies of one file are
+    // one hashed file as far as the pool is concerned.
+    const hashed =
+      this.db
+        .prepare<unknown[], { n: number }>(
+          `SELECT COUNT(DISTINCT path_key) AS n FROM files
+            WHERE root_id IN (${placeholders}) AND deleted_at IS NULL AND hash IS NOT NULL`,
+        )
+        .get(...rootIds)?.n ?? 0;
+
+    this.db
+      .prepare(
+        `INSERT INTO pool_summary (pool_id, deleted_files, hashed_files, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(pool_id) DO UPDATE SET
+           deleted_files = excluded.deleted_files,
+           hashed_files = excluded.hashed_files,
+           updated_at = excluded.updated_at`,
+      )
+      .run(poolId, row?.deleted ?? 0, hashed, nowIso());
   }
 
   /** Rebuild every virtual pool whose membership includes this root. */
@@ -657,13 +719,18 @@ export class CatalogService {
         GROUP BY path_key
         HAVING SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END) = 0`;
 
-    const rows = this.db
-      .prepare<unknown[], { rel_path: string; size_bytes: number; deleted_at: string | null }>(
-        `SELECT MIN(rel_path) AS rel_path, MAX(size_bytes) AS size_bytes, MAX(deleted_at) AS deleted_at
-           FROM files WHERE ${condition}
-          ORDER BY size_bytes DESC LIMIT ? OFFSET ?`,
-      )
-      .all(...rootIds, limit, offset);
+    // Asking for no rows should not run the query that finds them: the caller wants
+    // the count, and this grouping is over every row on every member disk.
+    const rows =
+      limit <= 0
+        ? []
+        : this.db
+            .prepare<unknown[], { rel_path: string; size_bytes: number; deleted_at: string | null }>(
+              `SELECT MIN(rel_path) AS rel_path, MAX(size_bytes) AS size_bytes, MAX(deleted_at) AS deleted_at
+                 FROM files WHERE ${condition}
+                ORDER BY size_bytes DESC LIMIT ? OFFSET ?`,
+            )
+            .all(...rootIds, limit, offset);
 
     const total =
       this.db
@@ -690,6 +757,7 @@ export class CatalogService {
    * instant regardless of catalog size.
    */
   rebuildDirStats(rootId: string): number {
+    this.invalidateStats();
     const rows = this.db
       .prepare<[string], { rel_path: string; size_bytes: number; duplication_level: number }>(
         `SELECT rel_path, size_bytes, duplication_level
@@ -822,6 +890,36 @@ export class CatalogService {
     deletedFiles: number;
     lastScanAt: string | null;
   } {
+    // Briefly memoised, because the interface asks for this constantly: every load of
+    // Settings, Storage and Catalog wants it for every root, and those pages poll. The
+    // query is a scan of the root's files, and better-sqlite3 is synchronous, so each
+    // one is time the server spends serving nobody -- agent traffic included.
+    //
+    // Every write clears this, so a caller sees its own change; the window is a
+    // backstop for anything that reaches the database another way.
+    const cached = this.statsCache.get(rootId);
+    const now = this.clock();
+    if (cached && now - cached.at < STATS_CACHE_MS) return cached.value;
+
+    const value = this.computeRootStats(rootId);
+    this.statsCache.set(rootId, { at: now, value });
+    return value;
+  }
+
+  /** Drop memoised stats, so a caller that just wrote sees its own change. */
+  invalidateStats(rootId?: string): void {
+    if (rootId === undefined) this.statsCache.clear();
+    else this.statsCache.delete(rootId);
+  }
+
+  private computeRootStats(rootId: string): {
+    files: number;
+    bytes: number;
+    effectiveBytes: number;
+    hashedFiles: number;
+    deletedFiles: number;
+    lastScanAt: string | null;
+  } {
     const poolId = CatalogService.parsePoolRootId(rootId);
     if (poolId !== null) return this.poolStats(poolId);
 
@@ -883,23 +981,37 @@ export class CatalogService {
       .get(rootId);
 
     const partRoots = this.partRootIds(poolId);
-    let hashedFiles = 0;
+    const summary = this.db
+      .prepare<[string], { deleted_files: number; hashed_files: number }>(
+        'SELECT deleted_files, hashed_files FROM pool_summary WHERE pool_id = ?',
+      )
+      .get(poolId);
+
+    // The pool is only as current as its least recently scanned member disk. One query
+    // rather than recomputing every member's full stats, which is the work the caller
+    // has usually just done itself.
     let lastScanAt: string | null = null;
-    for (const partRoot of partRoots) {
-      const stats = this.rootStats(partRoot);
-      hashedFiles += stats.hashedFiles;
-      // The pool is only as current as its least recently scanned member disk.
-      if (stats.lastScanAt && (lastScanAt === null || stats.lastScanAt < lastScanAt)) {
-        lastScanAt = stats.lastScanAt;
-      }
+    if (partRoots.length > 0) {
+      const placeholders = partRoots.map(() => '?').join(', ');
+      lastScanAt =
+        this.db
+          .prepare<unknown[], { oldest: string | null }>(
+            `SELECT MIN(latest) AS oldest FROM (
+               SELECT MAX(finished_at) AS latest FROM catalog_runs
+                WHERE root_id IN (${placeholders}) AND state = 'completed'
+                GROUP BY root_id)`,
+          )
+          .get(...partRoots)?.oldest ?? null;
     }
 
     return {
       files: row?.total_files ?? 0,
       bytes: row?.total_bytes ?? 0,
       effectiveBytes: row?.total_effective_bytes ?? 0,
-      hashedFiles,
-      deletedFiles: this.poolMissingFiles(poolId, 0, 0).total,
+      // Read, not recomputed: these used to group every row on every member disk on
+      // every call, which blocked the server -- synchronously -- for as long as it took.
+      hashedFiles: summary?.hashed_files ?? 0,
+      deletedFiles: summary?.deleted_files ?? 0,
       lastScanAt: partRoots.length > 0 ? lastScanAt : null,
     };
   }
@@ -1557,6 +1669,7 @@ export class CatalogService {
 
   /** Remove every catalog row for a root — used when a root is deleted from settings. */
   purgeRoot(rootId: string): number {
+    this.invalidateStats();
     return this.db.transaction(() => {
       this.db.prepare('DELETE FROM dir_stats WHERE root_id = ?').run(rootId);
       this.db.prepare('DELETE FROM bitrot_findings WHERE root_id = ?').run(rootId);

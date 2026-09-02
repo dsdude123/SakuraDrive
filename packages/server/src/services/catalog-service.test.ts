@@ -504,3 +504,184 @@ describe('purgeRoot', () => {
     ).toBe(0);
   });
 });
+
+/**
+ * What the interface costs the server to draw.
+ *
+ * better-sqlite3 is synchronous, so every query here is time the process spends serving
+ * nobody -- not other pages, not the health check, and not the agent posting batches.
+ * A catalog that had just been populated made the whole thing nearly unusable, and the
+ * cause was two aggregates over every row on every member disk, run per page load.
+ */
+describe('the cost of root statistics', () => {
+  const part = (id: string) => ({
+    id,
+    name: id.toUpperCase(),
+    kind: 'poolpart' as const,
+    poolId: 'hdd',
+    agentHostname: '',
+    hostPath: `\\\\?\\Volume{${id}}\\PoolPart.hdd`,
+    driveLabel: id.toUpperCase(),
+    enabled: true,
+    hashEnabled: true,
+    includeGlobs: [],
+    excludeGlobs: [],
+    minHashSizeBytes: 0,
+    maxHashSizeBytes: 0,
+  });
+
+  const seed = (service: CatalogService, settings: SettingsService, disks: string[]) => {
+    settings.update({ catalog: { roots: disks.map(part) } });
+    for (const id of disks) {
+      const root = settings.get().catalog.roots.find((r) => r.id === id)!;
+      const runId = service.beginRun(id, 1);
+      service.recordAgentFiles(runId, root, [
+        { relPath: 'Media/a.mkv', sizeBytes: 10, mtimeMs: 1, ctimeMs: 1 },
+        { relPath: 'Media/b.mkv', sizeBytes: 20, mtimeMs: 1, ctimeMs: 1 },
+      ]);
+      service.finishRun(runId, 'completed');
+      service.rebuildDirStats(id);
+    }
+    service.rebuildPoolDirStats('hdd');
+  };
+
+  it('counts what the pool has lost every copy of', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config);
+    seed(service, config, ['d1', 'd2']);
+
+    expect(service.rootStats('pool:hdd').deletedFiles).toBe(0);
+
+    // Gone from one disk only: the pool still serves it.
+    const d1 = config.get().catalog.roots.find((r) => r.id === 'd1')!;
+    const runId = service.beginRun('d1', 1);
+    service.recordAgentFiles(runId, d1, [
+      { relPath: 'Media/a.mkv', sizeBytes: 10, mtimeMs: 1, ctimeMs: 1 },
+    ]);
+    service.markMissingAsDeleted(runId, 'd1');
+    service.finishRun(runId, 'completed');
+    service.rebuildPoolDirStats('hdd');
+    service.invalidateStats();
+    expect(service.rootStats('pool:hdd').deletedFiles).toBe(0);
+
+    // Gone from the second disk too: now the pool has lost it.
+    const d2 = config.get().catalog.roots.find((r) => r.id === 'd2')!;
+    const runId2 = service.beginRun('d2', 1);
+    service.recordAgentFiles(runId2, d2, [
+      { relPath: 'Media/a.mkv', sizeBytes: 10, mtimeMs: 1, ctimeMs: 1 },
+    ]);
+    service.markMissingAsDeleted(runId2, 'd2');
+    service.finishRun(runId2, 'completed');
+    service.rebuildPoolDirStats('hdd');
+    service.invalidateStats();
+    expect(service.rootStats('pool:hdd').deletedFiles).toBe(1);
+    database.close();
+  });
+
+  // Two copies of one file are one hashed file as far as the pool is concerned.
+  it('counts a hashed file once, not once per disk holding it', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config);
+    seed(service, config, ['d1', 'd2']);
+
+    for (const id of ['d1', 'd2']) {
+      const row = database
+        .prepare<[string], { id: number }>(
+          "SELECT id FROM files WHERE root_id = ? AND rel_path = 'Media/a.mkv'",
+        )
+        .get(id)!;
+      database.prepare('UPDATE files SET hash = ? WHERE id = ?').run('abc', row.id);
+    }
+    service.rebuildPoolDirStats('hdd');
+    service.invalidateStats();
+
+    expect(service.rootStats('pool:hdd').hashedFiles).toBe(1);
+    database.close();
+  });
+
+  it('reports the pool as only as current as its stalest member', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config);
+    seed(service, config, ['d1', 'd2']);
+
+    const stats = service.rootStats('pool:hdd');
+    const members = ['d1', 'd2'].map((id) => service.rootStats(id).lastScanAt);
+    expect(stats.lastScanAt).toBe(members.slice().sort()[0]);
+    database.close();
+  });
+
+  // The interface polls, so a repeated call must not repeat the work.
+  it('serves a repeated call from memory', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config, () => 1_000_000);
+    seed(service, config, ['d1']);
+
+    expect(service.rootStats('d1').files).toBe(2);
+
+    // Behind the memo, so this is invisible until something invalidates it.
+    database.prepare("DELETE FROM files WHERE root_id = 'd1'").run();
+    expect(service.rootStats('d1').files).toBe(2);
+
+    service.invalidateStats();
+    expect(service.rootStats('d1').files).toBe(0);
+    database.close();
+  });
+
+  /**
+   * The memo is an optimisation, never a source of wrong answers: a scan that has just
+   * finished must not report the numbers from before it ran.
+   */
+  it('shows a write immediately, without waiting for the window', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    // A clock that never advances, so only invalidation can refresh the answer.
+    const service = new CatalogService(database, config, () => 1_000_000);
+    seed(service, config, ['d1']);
+    expect(service.rootStats('d1').files).toBe(2);
+
+    const root = config.get().catalog.roots[0]!;
+    const runId = service.beginRun('d1', 1);
+    service.recordAgentFiles(runId, root, [
+      { relPath: 'Media/c.mkv', sizeBytes: 30, mtimeMs: 1, ctimeMs: 1 },
+    ]);
+    expect(service.rootStats('d1').files).toBe(3);
+
+    service.finishRun(runId, 'completed');
+    expect(service.rootStats('d1').files).toBe(3);
+    database.close();
+  });
+
+  // The window is the backstop for anything that reaches the database another way.
+  it('refreshes on its own once the window passes', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    let now = 1_000_000;
+    const service = new CatalogService(database, config, () => now);
+    seed(service, config, ['d1']);
+    expect(service.rootStats('d1').files).toBe(2);
+
+    database.prepare("DELETE FROM files WHERE root_id = 'd1'").run();
+    expect(service.rootStats('d1').files).toBe(2);
+
+    now += 6_000;
+    expect(service.rootStats('d1').files).toBe(0);
+    database.close();
+  });
+
+  // Asking for the count should not also run the query that finds the rows.
+  it('does not fetch rows when none were asked for', () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config);
+    seed(service, config, ['d1', 'd2']);
+
+    const result = service.poolMissingFiles('hdd', 0, 0);
+    expect(result.files).toEqual([]);
+    expect(result.total).toBe(0);
+    database.close();
+  });
+});

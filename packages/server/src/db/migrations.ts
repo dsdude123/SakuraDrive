@@ -473,6 +473,25 @@ export const MIGRATIONS: Migration[] = [
     ALTER TABLE agents ADD COLUMN distribution_version TEXT NOT NULL DEFAULT '';
     `,
   },
+  {
+    version: 4,
+    name: 'pool-summary',
+    up: `
+    -- Summary numbers for a virtual pool that are too expensive to compute on demand.
+    --
+    -- "How many files has this pool lost entirely" means grouping every row on every
+    -- member disk by path and asking whether any copy survives. That was being run on
+    -- every load of Settings, Storage and Catalog -- and because better-sqlite3 is
+    -- synchronous, it blocked the whole server while it ran, agent traffic included.
+    -- It is computed once when the pool rollups are rebuilt and read from here instead.
+    CREATE TABLE pool_summary (
+      pool_id       TEXT PRIMARY KEY,
+      deleted_files INTEGER NOT NULL DEFAULT 0,
+      hashed_files  INTEGER NOT NULL DEFAULT 0,
+      updated_at    TEXT NOT NULL
+    );
+    `,
+  },
 ];
 
 export function currentSchemaVersion(): number {

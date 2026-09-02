@@ -26,6 +26,14 @@ interface ScanCursor {
   restored: number;
   /** Roots fully walked in this run; used so deletions are only applied to those. */
   finishedRoots: string[];
+  /**
+   * Pools whose member disks changed and whose combined view is now stale.
+   *
+   * Collected rather than rebuilt as each disk finishes: a pool rebuild groups every
+   * row on every member disk, so doing it once per disk meant fourteen full passes
+   * over the whole pool per scan -- each one blocking the server while it ran.
+   */
+  dirtyPools: string[];
 }
 
 /** Fresh cursor. A factory, not a constant: the arrays must not be shared between runs. */
@@ -41,6 +49,7 @@ function emptyCursor(): ScanCursor {
     modified: 0,
     restored: 0,
     finishedRoots: [],
+    dirtyPools: [],
   };
 }
 
@@ -95,6 +104,9 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
 
         const outcome = await runAgentScan(ctx, { deps, root, runId, cursor });
         if (outcome === 'paused') {
+          // Once per window rather than once per disk, and never left stale across a
+          // pause: a window can close for the night.
+          rebuildDirtyPools(ctx, deps, cursor);
           ctx.setCursor(cursor);
           return { state: 'paused' };
         }
@@ -109,12 +121,30 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
         ctx.setCursor(cursor);
       }
 
+      rebuildDirtyPools(ctx, deps, cursor);
+
       return {
         state: 'completed',
         stats: { rootsScanned: cursor.finishedRoots.length },
       };
     },
   };
+}
+
+/**
+ * Rebuild the combined view of every pool a finished disk belongs to.
+ *
+ * A pool rebuild groups every row on every member disk, so it is worth doing exactly
+ * once for a batch of finished disks rather than once each. Clears the list, so a
+ * resumed run does not repeat work it already did.
+ */
+function rebuildDirtyPools(ctx: WorkflowContext, deps: CatalogScanDeps, cursor: ScanCursor): void {
+  const pools = cursor.dirtyPools.splice(0);
+  for (const poolId of pools) {
+    const started = Date.now();
+    const rows = deps.catalog.rebuildPoolDirStats(poolId);
+    ctx.log(`Rebuilt the combined view of pool ${poolId} (${rows} paths, ${Date.now() - started} ms)`);
+  }
 }
 
 /** Everything a finished root needs, whoever walked it. */
@@ -140,8 +170,11 @@ function finishRoot(
     restored: cursor.restored,
   });
   catalog.rebuildDirStats(root.id);
-  // A member disk changed, so the pool view built from it is now stale.
-  catalog.rebuildPoolsContaining(root.id);
+  // The pool this disk belongs to is now stale, but rebuilding it here would mean one
+  // full pass over every member disk per disk finished. Noted, and done once at the end.
+  if (root.kind === 'poolpart' && root.poolId && !cursor.dirtyPools.includes(root.poolId)) {
+    cursor.dirtyPools.push(root.poolId);
+  }
   catalog.finishRun(runId, 'completed');
 
   ctx.log(
