@@ -194,6 +194,17 @@ async function runAgentScan(
       includeGlobs: root.includeGlobs,
       excludeGlobs: [...config.catalog.globalExcludeGlobs, ...root.excludeGlobs],
       followSymlinks: config.catalog.followSymlinks,
+      /**
+       * How many files this root held before the scan started, which is the only
+       * honest basis for a percentage.
+       *
+       * A walk discovers directories as it goes, so `done / (done + remaining)` is a
+       * ratio against a total that does not exist yet: the pending worklist only holds
+       * what has been found and not yet visited, which stays small, so the fraction
+       * sits near 100% from the first minute and means nothing. Zero on a first scan,
+       * and the interface shows no percentage at all rather than inventing one.
+       */
+      expectedFiles: catalog.rootStats(root.id).files,
     },
     ...(cursor.worklist.length > 0 ? { cursor: { worklist: cursor.worklist } } : {}),
   });

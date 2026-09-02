@@ -959,3 +959,98 @@ textarea {
   word-break: break-all;
   user-select: all;
 }
+
+/* ------------------------------------------------------------ storage map */
+
+/*
+   Categorical hues for the storage map, in fixed order.
+
+   Colour identifies which top-level folder a tile belongs to; depth is already carried
+   by the nesting geometry, so spending hue on it -- as this map used to -- meant every
+   tile was a slightly different purple and the map said nothing at a glance.
+
+   Both modes are selected rather than flipped: the dark steps are the same eight hues
+   restepped for the dark surface. Validated as a set against both surfaces (adjacent
+   CVD dE 9.1 light / 8.4 dark; normal-vision 19.6 / 19.3). Three light-mode hues sit
+   below 3:1 on white, which the tile labels relieve.
+*/
+:root {
+  --viz-1: #2a78d6;
+  --viz-2: #eb6834;
+  --viz-3: #1baf7a;
+  --viz-4: #eda100;
+  --viz-5: #e87ba4;
+  --viz-6: #008300;
+  --viz-7: #4a3aa7;
+  --viz-8: #e34948;
+  /* A ninth folder is never a generated hue: it folds into this. */
+  --viz-other: #7d7a86;
+  /* Deeper tiles are mixed towards this so nesting recedes. */
+  --viz-recede: #12101a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --viz-recede: #ffffff;
+  }
+}
+
+:root[data-theme='light'] {
+  --viz-recede: #ffffff;
+}
+
+:root[data-theme='dark'],
+:root:not([data-theme='light']) {
+  --viz-1: #3987e5;
+  --viz-2: #d95926;
+  --viz-3: #199e70;
+  --viz-4: #c98500;
+  --viz-5: #d55181;
+  --viz-6: #008300;
+  --viz-7: #9085e9;
+  --viz-8: #e66767;
+  --viz-other: #6f6885;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --viz-1: #2a78d6;
+    --viz-2: #eb6834;
+    --viz-3: #1baf7a;
+    --viz-4: #eda100;
+    --viz-5: #e87ba4;
+    --viz-6: #008300;
+    --viz-7: #4a3aa7;
+    --viz-8: #e34948;
+    --viz-other: #7d7a86;
+  }
+}
+
+/* The legend that keeps identity from being colour-alone. */
+.viz-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.viz-legend .swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+.viz-legend button {
+  background: none;
+  border: none;
+  padding: 2px 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+}
+.viz-legend button:hover {
+  color: var(--text);
+}

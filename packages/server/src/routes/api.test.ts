@@ -512,6 +512,160 @@ describe('detecting catalog roots', () => {
   });
 });
 
+/**
+ * What a running job can honestly say about its own progress.
+ *
+ * A walk discovers directories as it goes, so `done / (done + remaining)` is a ratio
+ * against a total that does not exist yet -- the pending worklist only holds what has
+ * been found and not visited, which stays small, so the fraction pinned near 100% from
+ * the first minute and meant nothing.
+ */
+describe('scan progress', () => {
+  const ROOT = {
+    id: 'r1',
+    name: 'DRIVEPOOL10',
+    kind: 'poolpart' as const,
+    poolId: 'hdd',
+    agentHostname: '',
+    hostPath: '\\\\?\\Volume{aaaa}\\PoolPart.hdd',
+    driveLabel: 'DRIVEPOOL10',
+    enabled: true,
+    hashEnabled: true,
+    includeGlobs: [],
+    excludeGlobs: [],
+    minHashSizeBytes: 0,
+    maxHashSizeBytes: 0,
+  };
+
+  beforeEach(async () => {
+    await h.signIn();
+    h.services.settings.update({
+      catalog: {
+        roots: [ROOT],
+        // No agent will claim this job, so give the run a short leash: the test only
+        // cares what the workflow put in the payload.
+        agentPollMs: 200,
+        agentClaimTimeoutSeconds: 5,
+      },
+    });
+  });
+
+  const queuedJob = async () => {
+    h.services.workflows.start('catalog.scan', { force: true });
+    // The job is enqueued synchronously as the run starts.
+    for (let attempt = 0; attempt < 20 && h.services.agentJobs.list(10).length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const body = json(await request(h, { method: 'GET', url: '/api/agents/jobs' }));
+    const all = [
+      ...(body.queued as unknown as unknown[]),
+      ...(body.active as unknown as unknown[]),
+    ] as Array<{ expectedFiles: number; rootName: string }>;
+
+    // The run is now waiting for an agent that will never claim it, and would sit there
+    // until the claim timeout. Stop it so the harness can shut down.
+    h.services.workflows.stopAll('test');
+    await h.services.workflows.drain();
+    return all[0];
+  };
+
+  // Nothing to compare against, so the interface is told to show movement instead.
+  it('expects nothing on a first scan', async () => {
+    const job = await queuedJob();
+    expect(job).toBeDefined();
+    expect(job!.expectedFiles).toBe(0);
+  }, 20_000);
+
+  // A rescan does have a basis: what the root held last time.
+  it('expects what the root held last time on a rescan', async () => {
+    const runId = h.services.catalog.beginRun(ROOT.id, 1);
+    h.services.catalog.recordAgentFiles(runId, ROOT, [
+      { relPath: 'Media/a.mkv', sizeBytes: 10, mtimeMs: 1, ctimeMs: 1 },
+      { relPath: 'Media/b.mkv', sizeBytes: 20, mtimeMs: 1, ctimeMs: 1 },
+      { relPath: 'Backups/c.bak', sizeBytes: 30, mtimeMs: 1, ctimeMs: 1 },
+    ]);
+    h.services.catalog.finishRun(runId, 'completed');
+
+    const job = await queuedJob();
+    expect(job!.expectedFiles).toBe(3);
+  }, 20_000);
+});
+
+/**
+ * The pool as one tree.
+ *
+ * A pool is a view over its member disks rather than a scanned root, and the storage
+ * map accepts its synthetic id exactly like a real root's -- the interface simply never
+ * offered it, so "where has the space gone" could only be asked one disk at a time.
+ */
+describe('the pool storage map', () => {
+  const part = (id: string, label: string) => ({
+    id,
+    name: label,
+    kind: 'poolpart' as const,
+    poolId: 'hdd',
+    agentHostname: '',
+    hostPath: `\\\\?\\Volume{${id}}\\PoolPart.hdd`,
+    driveLabel: label,
+    enabled: true,
+    hashEnabled: true,
+    includeGlobs: [],
+    excludeGlobs: [],
+    minHashSizeBytes: 0,
+    maxHashSizeBytes: 0,
+  });
+
+  beforeEach(async () => {
+    await h.signIn();
+    const roots = [part('d1', 'DRIVEPOOL1'), part('d2', 'DRIVEPOOL2')];
+    h.services.settings.update({ catalog: { roots } });
+
+    // The same file on both disks: one logical file, two physical copies.
+    for (const root of roots) {
+      const runId = h.services.catalog.beginRun(root.id, 1);
+      h.services.catalog.recordAgentFiles(runId, root, [
+        { relPath: 'Media/shared.mkv', sizeBytes: 100, mtimeMs: 1, ctimeMs: 1 },
+      ]);
+      h.services.catalog.finishRun(runId, 'completed');
+      // The scan workflow does this after a clean finish; these rows were written
+      // straight into the catalog, so do it by hand.
+      h.services.catalog.rebuildDirStats(root.id);
+    }
+    h.services.catalog.rebuildPoolDirStats('hdd');
+  });
+
+  it('offers the pool alongside its member disks', async () => {
+    const body = json(await request(h, { method: 'GET', url: '/api/catalog/roots' }));
+    const pools = body.pools as unknown as Array<{ id: string; partRootIds: string[] }>;
+    expect(pools).toHaveLength(1);
+    expect(pools[0]!.id).toBe('pool:hdd');
+    expect(pools[0]!.partRootIds.sort()).toEqual(['d1', 'd2']);
+  });
+
+  // The whole point of a pool view: the file is one file, not two.
+  it('draws the pool as one tree, not the disks concatenated', async () => {
+    const body = json(
+      await request(h, {
+        method: 'GET',
+        url: '/api/storage/treemap?rootId=pool%3Ahdd&path=&width=800&height=600&depth=1',
+      }),
+    );
+    const nodes = body.nodes as unknown as Array<{ name: string; parentId: string | null }>;
+    const tops = nodes.filter((node) => node.parentId === null);
+    expect(tops.map((node) => node.name)).toEqual(['Media']);
+  });
+
+  it('serves a member disk on its own too', async () => {
+    const body = json(
+      await request(h, {
+        method: 'GET',
+        url: '/api/storage/treemap?rootId=d1&path=&width=800&height=600&depth=1',
+      }),
+    );
+    expect((body.nodes as unknown as unknown[]).length).toBeGreaterThan(0);
+  });
+});
+
 describe('alerts', () => {
   beforeEach(async () => {
     await h.signIn();

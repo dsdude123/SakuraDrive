@@ -243,6 +243,10 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
         dirsDone?: number;
         dirsRemaining?: number;
       };
+      // What this root held before the scan started. Zero on a first scan, and the
+      // interface then shows movement rather than a percentage: a walk discovers
+      // directories as it goes, so there is no total to be a fraction of yet.
+      const expectedFiles = Number((job.payload as { expectedFiles?: number }).expectedFiles ?? 0);
       const startedAt = job.claimedAt ?? job.createdAt;
       const elapsedMs = (job.finishedAt ? Date.parse(job.finishedAt) : now) - Date.parse(startedAt);
       const filesSeen = stats.filesSeen ?? stats.dirsDone ?? 0;
@@ -270,6 +274,7 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
         bytesSeen: stats.bytesSeen ?? 0,
         dirsDone: stats.dirsDone ?? 0,
         dirsRemaining: stats.dirsRemaining ?? 0,
+        expectedFiles,
         filesPerSecond: elapsedMs > 1000 ? (filesSeen / elapsedMs) * 1000 : null,
       };
     };

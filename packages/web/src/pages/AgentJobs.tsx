@@ -26,6 +26,8 @@ interface AgentJob {
   bytesSeen: number;
   dirsDone: number;
   dirsRemaining: number;
+  /** Files this root held before the scan began; 0 on a first scan. */
+  expectedFiles: number;
   filesPerSecond: number | null;
 }
 
@@ -143,15 +145,21 @@ export function AgentJobsPage(): JSX.Element {
                       {job.hostPath}
                     </div>
 
+                    {/*
+                      Files against what the root held last time, not directories
+                      against a total the walk has not discovered yet. A first scan has
+                      nothing to compare against and gets movement instead of a number.
+                    */}
                     <ProgressBar
                       progress={{
-                        done: job.dirsDone,
-                        total: job.dirsRemaining > 0 ? job.dirsDone + job.dirsRemaining : null,
-                        unit: 'directories',
-                        message: `${formatCount(job.filesSeen)} files · ${formatBytes(job.bytesSeen)}`,
+                        done: job.filesSeen,
+                        total: job.expectedFiles > 0 ? job.expectedFiles : null,
+                        unit: 'files',
+                        message: `${formatCount(job.dirsDone)} directories · ${formatBytes(job.bytesSeen)}`,
                         bytes: job.bytesSeen,
                       }}
-                      indeterminate={job.dirsRemaining === 0}
+                      indeterminate={job.expectedFiles === 0}
+                      estimated
                     />
 
                     <div className="faint" style={{ fontSize: 12 }}>
