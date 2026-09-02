@@ -32,6 +32,11 @@
 .PARAMETER RxpccPath
     Full path to PrimoCache's rxpcc.exe. Blank means search.
 
+.PARAMETER MaxRunHours
+    Stop the task if a run exceeds this many hours. 0, the default, means no limit:
+    a catalog scan is ended by the server closing the I/O window, not by a clock, and
+    a limit short enough to matter cuts the scan off mid-batch.
+
 .PARAMETER FirstRunTimeoutSeconds
     How long to wait for the confirmation run before reporting that it is still going.
     The first pass reads SMART for every disk, so a large array takes minutes.
@@ -56,6 +61,7 @@ param(
     [string] $InstallPath = 'C:\Program Files\SakuraDrive Agent',
     [int]    $IntervalMinutes = 15,
     [int]    $FirstRunTimeoutSeconds = 120,
+    [int]    $MaxRunHours = 0,
     [string] $TaskName = 'SakuraDrive Agent',
     [string] $SmartctlPath = '',
     [string] $DpcmdPath = '',
@@ -228,12 +234,21 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
     # StartWhenAvailable catches up a run the machine slept through; RestartCount
     # retries a run that failed outright rather than leaving monitoring dark until the
     # next interval; IgnoreNew stops a slow run from stacking on top of itself.
+    #
+    # No execution time limit, and that is deliberate. A run is not one report: after
+    # reporting, the agent takes catalog work, and walking a 95 TB pool runs for hours.
+    # What ends it is the server closing the I/O window, which arrives in the reply to a
+    # batch and stops the walk at a directory boundary with a cursor. A clock in Task
+    # Scheduler knows nothing about that window and kills the process mid-batch instead.
+    # This used to be IntervalMinutes * 2 -- thirty minutes -- which cut every real scan
+    # short. TimeSpan::Zero is how Task Scheduler spells "no limit".
+    $runLimit = if ($MaxRunHours -gt 0) { New-TimeSpan -Hours $MaxRunHours } else { [TimeSpan]::Zero }
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable `
         -MultipleInstances IgnoreNew `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes ([Math]::Max(10, $IntervalMinutes * 2)))
+        -ExecutionTimeLimit $runLimit
 
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
@@ -281,6 +296,7 @@ else {
 
 Write-Host "Runs as: $($registered.Principal.UserId) ($($registered.Principal.RunLevel))"
 Write-Host "Triggers: $($registered.Triggers.Count) (one at boot, one repeating every $IntervalMinutes minutes)"
+Write-Host ("Run time limit: {0}" -f $(if ($MaxRunHours -gt 0) { "$MaxRunHours hours" } else { 'none - a catalog scan runs until the I/O window closes' }))
 Write-Host "Survives reboot and sign-out: yes - the task runs as SYSTEM and starts at boot."
 Write-Host ''
 Write-Host 'Next steps:'

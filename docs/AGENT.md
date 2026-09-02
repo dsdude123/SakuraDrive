@@ -123,9 +123,34 @@ which is long enough to answer "was that host still reporting after I revoked it
 -SmartctlPath 'C:\Tools\smartctl.exe'        # blank = search the usual places
 -DpcmdPath    'C:\Tools\dpcmd.exe'
 -RxpccPath    'C:\Tools\rxpcc.exe'
+-MaxRunHours 12                              # default 0, meaning no limit
 -KeepConfig                                  # re-register the task, keep agent.config.json
 -Uninstall                                   # removes the task and the installed files
 ```
+
+### The scheduled task has no run limit, on purpose
+
+A run is not one report. After reporting, the agent takes catalog work, and walking a
+95 TB pool runs for hours. What ends it is the server closing the I/O window, which
+arrives in the reply to a batch and stops the walk at a directory boundary with a
+cursor — so it resumes next window rather than restarting.
+
+A clock in Task Scheduler knows nothing about that window. "Stop the task if it runs
+longer than" set to anything short kills the process mid-batch instead. The installer
+used to set it to twice the report interval, thirty minutes by default, which cut every
+real scan short.
+
+The agent clears such a limit from its own task when it finds one, using
+`Set-ScheduledTask` — which edits the stored definition without disturbing the running
+instance. That is how the fix reaches a host installed before it existed, since an
+update replaces files but deliberately never re-registers the task. Set
+`RepairScheduledTask` to `false` if you want your own limit, or pass `-MaxRunHours` at
+install time.
+
+Because a scan can now run for hours and `MultipleInstances IgnoreNew` drops the
+repeating trigger while it does, the agent reports health between batches once an
+interval has passed. SMART data stays current through an overnight scan rather than
+going dark until it finishes.
 
 `Bootstrap-SakuraDriveAgent.ps1` takes the same switches and passes them through, plus
 `-SkipCertificateCheck` for a self-signed certificate.
@@ -156,6 +181,7 @@ still matches, so it cannot go stale.
 | `CollectSmart`, `CollectPerformance`, `CollectDrivePool`, `CollectPrimoCache` | Turn a collector off |
 | `CollectCatalogJobs` | Take catalog scan and hash work. Off means health reporting only |
 | `SelfUpdate` | Replace the agent with what the server ships. Off pins this host |
+| `RepairScheduledTask` | Clear a task run limit that would kill a scan. Off if you set one on purpose |
 | `DuplicationDepth` | How deep to probe DrivePool duplication. 3 suits a tiered layout |
 | `PerformanceSamples` | Seconds of performance-counter sampling per report |
 | `SkipCertificateCheck` | Only for a self-signed certificate on a trusted LAN |
@@ -348,6 +374,7 @@ report mixed sub-counts. With duplication set per tier, the default is more than
 | `RxpccPath` | auto | Explicit path to `rxpcc.exe` |
 | `CollectCatalogJobs` | true | Take catalog scan and hash work from the server |
 | `SelfUpdate` | true | Keep this host on whatever the server ships |
+| `RepairScheduledTask` | true | Clear a scheduled-task run limit short enough to interrupt a scan |
 | `DuplicationDepth` | 3 | Folder levels to probe for duplication settings |
 | `PerformanceSamples` | 3 | Seconds of performance-counter sampling per report |
 | `CollectSmart` / `CollectPerformance` / `CollectDrivePool` / `CollectPrimoCache` | true | Turn individual collectors off |
@@ -435,6 +462,7 @@ says so in plain words; an older one printed the raw code under "0 means success
 | `2` | The agent could not post its report |
 | `267008` / `267011` | Waiting for its next scheduled run |
 | `267009` | Still running |
+| `267014` | Stopped — usually a task run limit; see above |
 | `267010` | The task is disabled |
 | `267014` | The task was stopped before it finished |
 

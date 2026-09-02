@@ -12,6 +12,7 @@
   "CollectPrimoCache": true,
   "CollectCatalogJobs": true,
   "SelfUpdate": true,
+  "RepairScheduledTask": true,
   "PerformanceSamples": 3,
   "SkipCertificateCheck": false,
   "TimeoutSeconds": 120,

@@ -696,3 +696,93 @@ Describe 'Explaining a failed request' {
         Get-AgentApiErrorDetail -ErrorRecord $bare | Should -BeNullOrEmpty
     }
 }
+
+<#
+    A scheduled task run limit that would cut a catalog scan short.
+
+    The installer set this to twice the report interval -- thirty minutes by default --
+    and Task Scheduler duly killed the agent mid-batch on every real scan. A run is not
+    one report: after reporting, the agent takes catalog work, and walking a 95 TB pool
+    runs for hours. What ends it is the server closing the I/O window, which stops the
+    walk at a directory boundary with a cursor. A clock knows nothing about that.
+#>
+Describe 'Judging a scheduled task run limit' {
+    It 'flags the thirty minutes the installer used to set' {
+        Test-AgentTaskTimeLimit -Value 'PT30M' | Should -BeTrue
+    }
+
+    It 'flags anything else short enough to interrupt a scan' {
+        foreach ($limit in 'PT10M', 'PT1H', 'PT3H', 'PT150M') {
+            Test-AgentTaskTimeLimit -Value $limit | Should -BeTrue -Because "$limit is shorter than a real scan"
+        }
+    }
+
+    # PT0S is how Task Scheduler spells "no limit", which is what the agent wants.
+    It 'is happy with no limit at all' {
+        Test-AgentTaskTimeLimit -Value 'PT0S' | Should -BeFalse
+        Test-AgentTaskTimeLimit -Value '' | Should -BeFalse
+        Test-AgentTaskTimeLimit -Value $null | Should -BeFalse
+    }
+
+    # Somebody who sets twelve hours means it; that is not the mistake being repaired.
+    It 'leaves a deliberately generous limit alone' {
+        foreach ($limit in 'PT4H', 'PT8H', 'PT12H', 'P1D', 'PT72H') {
+            Test-AgentTaskTimeLimit -Value $limit | Should -BeFalse -Because "$limit is long enough to be on purpose"
+        }
+    }
+
+    It 'honours a different threshold' {
+        Test-AgentTaskTimeLimit -Value 'PT6H' -MinimumHours 8 | Should -BeTrue
+        Test-AgentTaskTimeLimit -Value 'PT6H' -MinimumHours 4 | Should -BeFalse
+    }
+
+    It 'does not throw on a value it cannot parse' {
+        Test-AgentTaskTimeLimit -Value 'not a duration' | Should -BeFalse
+    }
+}
+
+<#
+    Reporting while a scan is running.
+
+    A run is one process: report, then take catalog work that can run for hours. The
+    task repeats every interval, but IgnoreNew drops those firings while the scan is
+    still going -- so without a mid-scan report, a scan that takes all night means a
+    whole night with no SMART data, which is most of what this tool is for.
+#>
+Describe 'Deciding when to report again mid-scan' {
+    BeforeAll { $script:Noon = [DateTime]'2026-09-02T12:00:00' }
+
+    It 'reports when nothing has been sent yet' {
+        Test-AgentReportDue -LastReportAt $null -IntervalSeconds 900 | Should -BeTrue
+    }
+
+    It 'waits out the interval' {
+        Test-AgentReportDue -LastReportAt $script:Noon -IntervalSeconds 900 `
+            -Now $script:Noon.AddSeconds(300) | Should -BeFalse
+    }
+
+    It 'reports once the interval has passed' {
+        Test-AgentReportDue -LastReportAt $script:Noon -IntervalSeconds 900 `
+            -Now $script:Noon.AddSeconds(900) | Should -BeTrue
+        Test-AgentReportDue -LastReportAt $script:Noon -IntervalSeconds 900 `
+            -Now $script:Noon.AddHours(3) | Should -BeTrue
+    }
+
+    It 'follows the configured interval, not a fixed one' {
+        Test-AgentReportDue -LastReportAt $script:Noon -IntervalSeconds 60 `
+            -Now $script:Noon.AddSeconds(90) | Should -BeTrue
+        Test-AgentReportDue -LastReportAt $script:Noon -IntervalSeconds 3600 `
+            -Now $script:Noon.AddSeconds(90) | Should -BeFalse
+    }
+
+    # A nonsense interval must not turn every batch boundary into a full SMART sweep.
+    It 'falls back to the default rather than reporting constantly' {
+        Test-AgentReportDue -LastReportAt $script:Noon -IntervalSeconds 0 `
+            -Now $script:Noon.AddSeconds(60) | Should -BeFalse
+    }
+
+    It 'does not report backwards if the clock moves' {
+        Test-AgentReportDue -LastReportAt $script:Noon -IntervalSeconds 900 `
+            -Now $script:Noon.AddHours(-1) | Should -BeFalse
+    }
+}

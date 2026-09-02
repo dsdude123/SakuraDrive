@@ -807,6 +807,9 @@ function Invoke-CatalogScanJob {
 
         if ($batch.finished) { break }
         if (-not (Test-AgentJobContinue -Response $response)) { $state = 'paused'; break }
+
+        # A batch boundary is the cheap place to stop and say the disks are still fine.
+        Send-AgentHeartbeatReport -Config $Config | Out-Null
     }
 
     Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/finish" -Body ([ordered]@{
@@ -850,6 +853,7 @@ function Invoke-CatalogHashJob {
             if (-not (Test-AgentJobContinue -Response $response) -and $hashed -lt $files.Count) {
                 $state = 'paused'; break
             }
+            Send-AgentHeartbeatReport -Config $Config | Out-Null
         }
     }
 
@@ -861,6 +865,41 @@ function Invoke-CatalogHashJob {
         }) | Out-Null
 
     return [ordered]@{ state = $state; hashed = $hashed }
+}
+
+function Send-AgentHeartbeatReport {
+    <#
+    .SYNOPSIS
+        Report again mid-scan, if it has been an interval since the last one.
+    .DESCRIPTION
+        The scheduled task repeats every interval, but IgnoreNew drops those firings
+        while this run is still walking a pool -- so a scan that takes all night would
+        otherwise mean a whole night with no SMART data. Called between batches, where
+        stopping to report costs nothing: the walk resumes from its worklist.
+
+        A failure here is a warning. The scan is the thing in progress; losing one
+        health report is not a reason to abandon it.
+    #>
+    param($Config)
+
+    if (-not (Test-AgentReportDue -LastReportAt $script:LastReportAt -IntervalSeconds ([int]$Config.IntervalSeconds))) {
+        return $false
+    }
+
+    try {
+        $report = Invoke-AgentCycle -Config $Config -DistributionVersion $script:DistributionVersion
+        Send-AgentReport -Config $Config -Report $report | Out-Null
+        $script:LastReportAt = Get-Date
+        Write-AgentLog -Config $Config -Message 'Reported health mid-scan.'
+        return $true
+    }
+    catch {
+        Write-AgentLog -Config $Config -Level 'WARN' `
+            -Message "Mid-scan report failed, continuing the scan: $($_.Exception.Message)"
+        # Do not retry every batch after a failure; wait out another interval.
+        $script:LastReportAt = Get-Date
+        return $false
+    }
 }
 
 function Invoke-AgentJobs {
@@ -916,6 +955,52 @@ function Invoke-AgentJobs {
         }
     }
 }
+
+#region Scheduled task --------------------------------------------------------
+
+function Repair-AgentScheduledTask {
+    <#
+    .SYNOPSIS
+        Take a run limit off the scheduled task when one would cut a scan short.
+    .DESCRIPTION
+        The installer used to stop the task after twice the report interval -- thirty
+        minutes by default -- which killed every catalog scan mid-batch. Fixing the
+        installer only helps a fresh install: an update replaces the agent's files and
+        deliberately does not re-register the task, because unregistering one kills the
+        run doing the unregistering.
+
+        Set-ScheduledTask edits the stored definition without touching the running
+        instance, so the agent can correct this about itself and the fix reaches every
+        host that updates rather than only the ones reinstalled by hand.
+    #>
+    param($Config, [string] $TaskName = 'SakuraDrive Agent')
+
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    }
+    catch {
+        # Running outside the scheduled task, or under a different name. Nothing to fix.
+        return $false
+    }
+
+    $limit = [string]$task.Settings.ExecutionTimeLimit
+    if (-not (Test-AgentTaskTimeLimit -Value $limit)) { return $false }
+
+    try {
+        $task.Settings.ExecutionTimeLimit = 'PT0S'
+        Set-ScheduledTask -TaskName $TaskName -Settings $task.Settings -ErrorAction Stop | Out-Null
+        Write-AgentLog -Config $Config `
+            -Message "Removed the $limit run limit from '$TaskName': it would stop a catalog scan part-way through."
+        return $true
+    }
+    catch {
+        Write-AgentLog -Config $Config -Level 'WARN' `
+            -Message "Could not clear the run limit on '$TaskName': $($_.Exception.Message)"
+        return $false
+    }
+}
+
+#endregion
 
 #region Self update -----------------------------------------------------------
 
@@ -1143,6 +1228,10 @@ function Invoke-AgentSelfUpdate {
 $config = Read-AgentConfig -Path $ConfigPath
 $installPath = $PSScriptRoot
 
+# Shared with the mid-scan heartbeat, which runs deep inside a job loop.
+$script:LastReportAt = $null
+$script:DistributionVersion = ''
+
 if (-not $DryRun) {
     $problems = Test-AgentConfig -Config $config
     if ($problems.Count -gt 0) {
@@ -1156,6 +1245,12 @@ if (-not $DryRun) {
 # twice puts the old files back rather than leaving the host quietly unmonitored.
 $updateState = $null
 if (-not $DryRun) { $updateState = Resolve-AgentUpdateState -Config $config -InstallPath $installPath }
+
+# Before anything long-running: a task that will be killed in thirty minutes should not
+# start a scan it cannot finish.
+if (-not $DryRun -and $config.RepairScheduledTask) {
+    Repair-AgentScheduledTask -Config $config | Out-Null
+}
 
 do {
     $cycleFailed = $false
@@ -1173,6 +1268,7 @@ do {
             }
         }
 
+        $script:DistributionVersion = $distributionVersion
         $report = Invoke-AgentCycle -Config $config -DistributionVersion $distributionVersion -Notices $notices
 
         if ($DryRun) {
@@ -1180,6 +1276,7 @@ do {
         }
         else {
             $response = Send-AgentReport -Config $config -Report $report
+            $script:LastReportAt = Get-Date
             $summary = "posted: $($report.physicalDisks.Count) disks, $($report.smart.Count) SMART reports, $($report.pools.Count) pools"
             if ($response.alertsRaised -gt 0) { $summary += ", $($response.alertsRaised) new alerts" }
             Write-AgentLog -Message $summary -Config $config

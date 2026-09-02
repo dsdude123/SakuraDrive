@@ -57,6 +57,9 @@ function Get-DefaultAgentConfig {
         # Take catalog scan and hash jobs for roots the container cannot read. Turn off
         # only if you want the agent to report health and nothing else.
         CollectCatalogJobs   = $true
+        # Correct a scheduled task whose run limit would kill a catalog scan. Turn off
+        # if you set your own limit on purpose.
+        RepairScheduledTask  = $true
         # Replace the agent with whatever the server is shipping when the two differ.
         # Every file is hash-checked and parsed before it is installed, and a version
         # that fails twice puts the previous one back on its own.
@@ -1609,6 +1612,63 @@ function Get-AgentApiErrorDetail {
 
 #region Scheduled task --------------------------------------------------------
 
+function Test-AgentReportDue {
+    <#
+    .SYNOPSIS
+        Whether it has been long enough since the last report to send another.
+    .DESCRIPTION
+        A run is one process: report, then take catalog work that can run for hours.
+        The scheduled task repeats every interval, but MultipleInstances IgnoreNew means
+        those firings are dropped while a scan is still going -- so without this, health
+        data stops arriving for as long as the scan lasts, which on a 95 TB pool is most
+        of the night. Reporting between batches keeps SMART current while the walk runs.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowNull()] $LastReportAt,
+        [int] $IntervalSeconds = 900,
+        $Now = $null
+    )
+
+    if ($null -eq $LastReportAt) { return $true }
+    if ($null -eq $Now) { $Now = Get-Date }
+    if ($IntervalSeconds -lt 1) { $IntervalSeconds = 900 }
+
+    ($Now - [DateTime]$LastReportAt).TotalSeconds -ge $IntervalSeconds
+}
+
+function Test-AgentTaskTimeLimit {
+    <#
+    .SYNOPSIS
+        Whether a scheduled task's run limit would cut a catalog scan short.
+    .DESCRIPTION
+        A run is not one report. After reporting, the agent takes catalog work, and
+        walking a 95 TB pool runs for hours -- ended by the server closing the I/O
+        window, which arrives in the reply to a batch and stops the walk at a directory
+        boundary with a cursor. A clock in Task Scheduler knows nothing about that
+        window and kills the process mid-batch instead.
+
+        The installer used to set this to twice the report interval, thirty minutes by
+        default, which cut every real scan short. Anything under the threshold is that
+        mistake; a deliberately generous limit is left alone.
+
+        Returns $true when it needs repairing. PT0S, and an absent value, mean no limit.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()] [AllowEmptyString()] [string] $Value,
+        [int] $MinimumHours = 4
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+
+    try { $span = [System.Xml.XmlConvert]::ToTimeSpan($Value) }
+    catch { return $false }
+
+    if ($span -le [TimeSpan]::Zero) { return $false }
+    $span.TotalHours -lt $MinimumHours
+}
+
 function Get-ScheduledTaskResultText {
     <#
     .SYNOPSIS
@@ -2099,6 +2159,8 @@ Export-ModuleMember -Function @(
     'ConvertTo-AgentJsonBody'
     'New-AgentApiRequest'
     'Get-AgentApiErrorDetail'
+    'Test-AgentReportDue'
+    'Test-AgentTaskTimeLimit'
     'Get-ScheduledTaskResultText'
     'Get-AgentJobFromClaim'
     'Test-AgentJobContinue'
