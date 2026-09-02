@@ -715,22 +715,18 @@ function Invoke-AgentCycle {
 function Send-AgentReport {
     param($Config, $Report)
 
-    $uri = "$(([string]$Config.ServerUrl).TrimEnd('/'))/api/agent/report"
-    $body = $Report | ConvertTo-Json -Depth 12 -Compress
-    $parameters = @{
-        Uri         = $uri
-        Method      = 'Post'
-        Body        = $body
-        ContentType = 'application/json'
-        Headers     = @{ Authorization = "Bearer $($Config.Token)" }
-        TimeoutSec  = [int]$Config.TimeoutSeconds
-    }
+    # The same construction the job endpoints use, so the report cannot drift into
+    # sending a string body while everything else sends bytes.
+    $parameters = New-AgentApiRequest -Config $Config -Path '/api/agent/report' `
+        -Method 'Post' -Body $Report -Depth 12
     if (-not $Config.SkipCertificateCheck) { return Invoke-RestMethod @parameters }
 
     # -SkipCertificateCheck does not exist in Windows PowerShell 5.1, which is what ships
     # with Windows Server. There the only way is the global validation callback, so it is
     # set for this one call and put back afterwards rather than left off for the process.
     if ($PSVersionTable.PSVersion.Major -ge 6) {
+        # New-AgentApiRequest already set it on 7; belt and braces for a config that
+        # turned it on after the request was built.
         $parameters['SkipCertificateCheck'] = $true
         return Invoke-RestMethod @parameters
     }
@@ -752,18 +748,18 @@ function Invoke-AgentApi {
     #>
     param($Config, [string] $Path, [string] $Method = 'Post', $Body = $null)
 
-    $parameters = @{
-        Uri         = "$(([string]$Config.ServerUrl).TrimEnd('/'))$Path"
-        Method      = $Method
-        ContentType = 'application/json'
-        Headers     = @{ Authorization = "Bearer $($Config.Token)" }
-        TimeoutSec  = [int]$Config.TimeoutSeconds
+    $parameters = New-AgentApiRequest -Config $Config -Path $Path -Method $Method -Body $Body
+
+    try {
+        Invoke-RestMethod @parameters
     }
-    if ($null -ne $Body) { $parameters['Body'] = ($Body | ConvertTo-Json -Depth 8 -Compress) }
-    if ($Config.SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 6) {
-        $parameters['SkipCertificateCheck'] = $true
+    catch {
+        # "(400) Bad Request" on its own says nothing. The server explains itself in the
+        # body, which Invoke-RestMethod otherwise discards.
+        $detail = Get-AgentApiErrorDetail -ErrorRecord $_
+        if ($detail) { throw "$($_.Exception.Message) Server said: $detail" }
+        throw
     }
-    Invoke-RestMethod @parameters
 }
 
 function Invoke-CatalogScanJob {

@@ -586,3 +586,113 @@ Describe 'What a scheduled task result code means' {
         (Get-ScheduledTaskResultText -Code $null).ok | Should -BeTrue
     }
 }
+
+<#
+    How a request body is encoded.
+
+    This is the bug that broke the first real catalog scan. Windows PowerShell 5.1 --
+    what the host runs -- encodes a string body as ISO-8859-1 when the content type
+    names no charset. "Cafe Society.mkv" with an accent went out as a lone 0xE9 byte,
+    which is not valid UTF-8, so the server could not parse the JSON and answered
+    400 Bad Request with nothing useful in it.
+
+    Every test until now ran on PowerShell 7 on Linux, which defaults to UTF-8, so the
+    whole class of failure was invisible here and certain on the host: a media pool is
+    mostly non-ASCII filenames.
+#>
+Describe 'Encoding a request body' {
+    It 'returns bytes, not a string' {
+        $bytes = ConvertTo-AgentJsonBody -Body ([ordered]@{ a = 1 })
+        $bytes -is [byte[]] | Should -BeTrue
+    }
+
+    # The exact bytes, because this is the whole bug: UTF-8 spells e-acute C3 A9 and
+    # ISO-8859-1 spells it E9.
+    It 'encodes a non-ASCII character as UTF-8, never as ISO-8859-1' {
+        $name = 'Caf' + [char]0xE9 + '.mkv'
+        $bytes = ConvertTo-AgentJsonBody -Body ([ordered]@{ relPath = $name })
+
+        $bytes -contains 0xC3 | Should -BeTrue -Because 'UTF-8 encodes U+00E9 as C3 A9'
+        $bytes -contains 0xA9 | Should -BeTrue
+
+        # A lone E9 with no C3 in front of it is the ISO-8859-1 encoding, and is what
+        # the server rejects.
+        $latin1 = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetBytes(
+            ($([ordered]@{ relPath = $name }) | ConvertTo-Json -Compress))
+        [System.Text.Encoding]::UTF8.GetString($bytes) | Should -Match 'Caf'
+        (Compare-Object $bytes $latin1 -SyncWindow 0) | Should -Not -BeNullOrEmpty
+    }
+
+    It 'round-trips CJK and emoji through UTF-8' {
+        foreach ($name in @('Sen to Chihiro no Kamikakushi.mkv', 'test.mkv')) {
+            $bytes = ConvertTo-AgentJsonBody -Body ([ordered]@{ relPath = $name })
+            ([System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json).relPath |
+                Should -Be $name
+        }
+    }
+
+    It 'says nothing for a null body rather than sending "null"' {
+        ConvertTo-AgentJsonBody -Body $null | Should -BeNullOrEmpty
+    }
+
+    It 'honours a depth, so a deep report is not truncated' {
+        $deep = [ordered]@{ a = [ordered]@{ b = [ordered]@{ c = [ordered]@{ d = 'leaf' } } } }
+        $shallow = [System.Text.Encoding]::UTF8.GetString((ConvertTo-AgentJsonBody -Body $deep -Depth 2))
+        $full = [System.Text.Encoding]::UTF8.GetString((ConvertTo-AgentJsonBody -Body $deep -Depth 8))
+        $full | Should -Match 'leaf'
+        $shallow | Should -Not -Be $full
+    }
+}
+
+Describe 'Building an authenticated request' {
+    BeforeAll {
+        $script:Config = [ordered]@{
+            ServerUrl = 'http://nas.local:8099/'; Token = 'tok-123'
+            TimeoutSeconds = 60; SkipCertificateCheck = $false
+        }
+    }
+
+    It 'posts bytes, so PowerShell never picks the encoding' {
+        $request = New-AgentApiRequest -Config $script:Config -Path '/api/agent/jobs/1/batch' `
+            -Body ([ordered]@{ relPath = 'Caf' + [char]0xE9 + '.mkv' })
+        $request['Body'] -is [byte[]] | Should -BeTrue
+    }
+
+    It 'names the charset on the wire as well' {
+        $request = New-AgentApiRequest -Config $script:Config -Path '/x' -Body ([ordered]@{ a = 1 })
+        $request['ContentType'] | Should -Be 'application/json; charset=utf-8'
+    }
+
+    It 'carries the token and trims the trailing slash off the server url' {
+        $request = New-AgentApiRequest -Config $script:Config -Path '/api/agent/dist' -Method 'Get'
+        $request['Uri'] | Should -Be 'http://nas.local:8099/api/agent/dist'
+        $request['Headers']['Authorization'] | Should -Be 'Bearer tok-123'
+        $request['TimeoutSec'] | Should -Be 60
+    }
+
+    It 'sends no body at all for a GET' {
+        $request = New-AgentApiRequest -Config $script:Config -Path '/api/agent/dist' -Method 'Get'
+        $request.ContainsKey('Body') | Should -BeFalse
+    }
+}
+
+<#
+    A 400 that says only "(400) Bad Request" is what turned a one-line encoding bug into
+    an afternoon. The server explains itself in the response body; Invoke-RestMethod
+    throws it away.
+#>
+Describe 'Explaining a failed request' {
+    It 'uses the body PowerShell 7 puts on the error record' {
+        $record = [pscustomobject]@{
+            ErrorDetails = [pscustomobject]@{ Message = '{"error":"invalid_batch"}' }
+            Exception    = [pscustomobject]@{ Response = $null }
+        }
+        Get-AgentApiErrorDetail -ErrorRecord $record | Should -Match 'invalid_batch'
+    }
+
+    It 'returns nothing rather than throwing when there is no detail to be had' {
+        Get-AgentApiErrorDetail -ErrorRecord $null | Should -BeNullOrEmpty
+        $bare = [pscustomobject]@{ Exception = [pscustomobject]@{ Response = $null } }
+        Get-AgentApiErrorDetail -ErrorRecord $bare | Should -BeNullOrEmpty
+    }
+}

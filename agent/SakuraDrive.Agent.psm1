@@ -1495,6 +1495,118 @@ function Get-CatalogFileHash {
 
 #endregion
 
+#region HTTP bodies -----------------------------------------------------------
+
+function ConvertTo-AgentJsonBody {
+    <#
+    .SYNOPSIS
+        An object as UTF-8 encoded JSON bytes, ready to post.
+    .DESCRIPTION
+        Bytes, not a string, and that is the whole point.
+
+        Windows PowerShell 5.1 -- which is what the host runs -- encodes a string body
+        as ISO-8859-1 when the content type names no charset. An accented character in
+        a filename then arrives as a lone 0xE9 byte rather than the two bytes UTF-8
+        spells it with, so the server cannot parse the JSON and answers 400 Bad Request.
+        On a media pool that is not an edge case: it is most of the first batch.
+
+        Handing Invoke-RestMethod a byte array takes the encoding decision away from it
+        entirely, so 5.1 and 7 send identical bytes.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowNull()] $Body,
+        [int] $Depth = 8
+    )
+
+    if ($null -eq $Body) { return $null }
+    $json = $Body | ConvertTo-Json -Depth $Depth -Compress
+    # The comma matters: without it the pipeline unrolls the array and the caller gets
+    # an Object[] of boxed bytes, which Invoke-RestMethod does not treat as a raw body.
+    , [System.Text.Encoding]::UTF8.GetBytes($json)
+}
+
+function New-AgentApiRequest {
+    <#
+    .SYNOPSIS
+        The parameters for one authenticated call, ready to splat.
+    .DESCRIPTION
+        Pure, and in the module rather than in the script, because the encoding bug this
+        exists to prevent lived in the script where nothing could test it: a string body
+        posted from Windows PowerShell 5.1 goes out as ISO-8859-1, and the first
+        filename with an accent in it made the server answer 400.
+
+        A test can now assert that the body is bytes and that those bytes are UTF-8,
+        which is the property that actually matters.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Config,
+        [Parameter(Mandatory)] [string] $Path,
+        [string] $Method = 'Post',
+        [AllowNull()] $Body = $null,
+        [int] $Depth = 8
+    )
+
+    $parameters = @{
+        Uri         = "$(([string]$Config.ServerUrl).TrimEnd('/'))$Path"
+        Method      = $Method
+        # Naming the charset is not decoration: without it 5.1 decides for itself.
+        ContentType = 'application/json; charset=utf-8'
+        Headers     = @{ Authorization = "Bearer $($Config.Token)" }
+        TimeoutSec  = [int]$Config.TimeoutSeconds
+    }
+    if ($null -ne $Body) { $parameters['Body'] = ConvertTo-AgentJsonBody -Body $Body -Depth $Depth }
+
+    # -SkipCertificateCheck does not exist in 5.1; the caller handles that case with the
+    # global validation callback instead.
+    if ($Config.SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 6) {
+        $parameters['SkipCertificateCheck'] = $true
+    }
+    $parameters
+}
+
+function Get-AgentApiErrorDetail {
+    <#
+    .SYNOPSIS
+        The server's explanation behind a failed request, if it sent one.
+    .DESCRIPTION
+        Invoke-RestMethod turns a 400 into "The remote server returned an error: (400)
+        Bad Request" and throws the body away, so a schema rejection that names the
+        offending field arrives as four useless words. The body is on the error record
+        in PowerShell 7 and readable off the response stream in 5.1; this tries both.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowNull()] $ErrorRecord
+    )
+
+    if ($null -eq $ErrorRecord) { return '' }
+
+    try {
+        if ($ErrorRecord.PSObject.Properties['ErrorDetails'] -and $ErrorRecord.ErrorDetails -and
+            $ErrorRecord.ErrorDetails.Message) {
+            return [string]$ErrorRecord.ErrorDetails.Message
+        }
+    }
+    catch { }
+
+    # Windows PowerShell 5.1: the body is still on the WebException's response.
+    try {
+        $response = $ErrorRecord.Exception.Response
+        if ($null -ne $response) {
+            $stream = $response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+            try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+        }
+    }
+    catch { }
+
+    ''
+}
+
+#endregion
+
 #region Scheduled task --------------------------------------------------------
 
 function Get-ScheduledTaskResultText {
@@ -1984,6 +2096,9 @@ Export-ModuleMember -Function @(
     'Test-PathAgainstGlob'
     'Get-CatalogBatch'
     'Get-CatalogFileHash'
+    'ConvertTo-AgentJsonBody'
+    'New-AgentApiRequest'
+    'Get-AgentApiErrorDetail'
     'Get-ScheduledTaskResultText'
     'Get-AgentJobFromClaim'
     'Test-AgentJobContinue'
