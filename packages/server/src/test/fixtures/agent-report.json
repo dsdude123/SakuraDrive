@@ -1,6 +1,7 @@
 {
   "protocolVersion": 1,
   "agentVersion": "1.0.0",
+  "distributionVersion": "",
   "hostname": "NAS-01",
   "collectedAt": "2024-03-05T03:15:00.000Z",
   "intervalSeconds": 900,
