@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api, type RequestOptions } from '../api/client.js';
 
+/** However slow the server gets, keep asking at least this often. */
+const MAX_POLL_MS = 60_000;
+
 export interface QueryState<T> {
   data: T | null;
   error: ApiError | null;
@@ -65,13 +68,40 @@ export function useQuery<T>(
     };
 
     setLoading(true);
-    void run();
 
-    const timer = pollMs ? setInterval(() => void run(), pollMs) : null;
+    /*
+      Poll by scheduling the next request only once this one has settled, never on a
+      fixed interval.
+
+      setInterval does not care whether the last request came back. When the server
+      slowed to tens of seconds a request, a five second poll queued a dozen more while
+      the first was still outstanding, and every one of them was work the server then
+      had to do -- so the interface itself turned a slow server into an unusable one.
+
+      Slow answers also widen the gap: there is no point asking three times a minute for
+      something that takes a minute to produce.
+    */
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const loop = async () => {
+      const startedAt = Date.now();
+      await run();
+      if (cancelled || !mounted.current || !pollMs) return;
+
+      const elapsed = Date.now() - startedAt;
+      // Wait at least as long as the answer took, so a struggling server is asked less
+      // often rather than more. Capped, or a single bad minute would stall the page for
+      // an hour.
+      const delay = Math.min(MAX_POLL_MS, Math.max(pollMs, elapsed));
+      timer = setTimeout(() => void loop(), delay);
+    };
+
+    void loop();
+
     return () => {
       cancelled = true;
       controller.abort();
-      if (timer) clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [path, optionsKey, pollMs, enabled, tick]);
 

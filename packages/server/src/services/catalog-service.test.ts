@@ -685,3 +685,128 @@ describe('the cost of root statistics', () => {
     database.close();
   });
 });
+
+/**
+ * The yielding pool rebuild against the blocking one it replaced.
+ *
+ * It is a different query, a different grouping (in JavaScript rather than SQL) and a
+ * different way of counting what the pool has lost, all so it can be paged and let the
+ * process breathe. None of that is worth anything if it produces different numbers, so
+ * the two are compared directly.
+ */
+describe('rebuilding a pool without holding the process', () => {
+  const part = (id: string) => ({
+    id,
+    name: id.toUpperCase(),
+    kind: 'poolpart' as const,
+    poolId: 'hdd',
+    agentHostname: '',
+    hostPath: `\\\\?\\Volume{${id}}\\PoolPart.hdd`,
+    driveLabel: id.toUpperCase(),
+    enabled: true,
+    hashEnabled: true,
+    includeGlobs: [],
+    excludeGlobs: [],
+    minHashSizeBytes: 0,
+    maxHashSizeBytes: 0,
+  });
+
+  const build = () => {
+    const database = openTestDatabase();
+    const config = new SettingsService(database);
+    const service = new CatalogService(database, config);
+    config.update({ catalog: { roots: ['d1', 'd2', 'd3'].map(part) } });
+
+    // A shape with something of each kind in it: a file on every disk, one on a
+    // single disk, one gone from every disk, and one gone from only some.
+    const layout: Record<string, string[]> = {
+      d1: ['Media/everywhere.mkv', 'Media/only-here.mkv', 'Media/lost.mkv', 'Media/Deep/a/b/c.mkv', 'Media/partly.mkv'],
+      d2: ['Media/everywhere.mkv', 'Media/lost.mkv', 'Media/partly.mkv'],
+      d3: ['Media/everywhere.mkv', 'Media/lost.mkv'],
+    };
+    for (const [id, paths] of Object.entries(layout)) {
+      const root = config.get().catalog.roots.find((r) => r.id === id)!;
+      const runId = service.beginRun(id, 1);
+      service.recordAgentFiles(
+        runId,
+        root,
+        paths.map((relPath, index) => ({ relPath, sizeBytes: 100 + index, mtimeMs: 1, ctimeMs: 1 })),
+      );
+      service.finishRun(runId, 'completed');
+    }
+
+    // Delete every copy of one path, and only some copies of another.
+    database.prepare("UPDATE files SET deleted_at = '2026-01-01' WHERE rel_path = 'Media/lost.mkv'").run();
+    database
+      .prepare("UPDATE files SET deleted_at = '2026-01-01' WHERE rel_path = 'Media/partly.mkv' AND root_id = 'd2'")
+      .run();
+    database.prepare("UPDATE files SET hash = 'abc' WHERE rel_path = 'Media/everywhere.mkv'").run();
+    return { database, config, service };
+  };
+
+  const snapshot = (database: Db) => ({
+    dirs: database
+      .prepare(
+        `SELECT dir_key, direct_files, direct_bytes, direct_effective_bytes,
+                total_files, total_bytes, total_effective_bytes
+           FROM dir_stats WHERE root_id = 'pool:hdd' ORDER BY dir_key`,
+      )
+      .all(),
+    summary: database.prepare('SELECT deleted_files, hashed_files FROM pool_summary').all(),
+  });
+
+  it('produces exactly what the blocking rebuild produced', async () => {
+    const a = build();
+    a.service.rebuildPoolDirStats('hdd');
+    const blocking = snapshot(a.database);
+    a.database.close();
+
+    const b = build();
+    await b.service.rebuildPoolDirStatsYielding('hdd');
+    const yielding = snapshot(b.database);
+    b.database.close();
+
+    expect(yielding).toEqual(blocking);
+    // And the numbers are actually right, not merely equal to each other.
+    expect(blocking.summary).toEqual([{ deleted_files: 1, hashed_files: 1 }]);
+  });
+
+  // A path has one row per disk holding it, so a chunk boundary can land inside a
+  // group. Counting half its copies would understate what the pool spends.
+  it('gets the same answer however small the chunks are', async () => {
+    const reference = build();
+    reference.service.rebuildPoolDirStats('hdd');
+    const expected = snapshot(reference.database);
+    reference.database.close();
+
+    for (const chunkSize of [1, 2, 3, 5, 7, 100]) {
+      const { database, service } = build();
+      await service.rebuildPoolDirStatsYielding('hdd', chunkSize);
+      expect(snapshot(database), `chunk size ${chunkSize}`).toEqual(expected);
+      database.close();
+    }
+  });
+
+  it('counts a path with no surviving copy as lost, and a partly deleted one as present', async () => {
+    const { database, service } = build();
+    await service.rebuildPoolDirStatsYielding('hdd', 3);
+
+    const stats = service.rootStats('pool:hdd');
+    expect(stats.deletedFiles).toBe(1);
+    // everywhere, only-here, partly, and the deep one: four paths still served.
+    expect(stats.files).toBe(4);
+    database.close();
+  });
+
+  it('leaves nothing behind when every member disk is gone', async () => {
+    const { database, config, service } = build();
+    await service.rebuildPoolDirStatsYielding('hdd');
+    config.update({ catalog: { roots: [] } });
+
+    await service.rebuildPoolDirStatsYielding('hdd');
+    expect(
+      database.prepare("SELECT COUNT(*) AS n FROM dir_stats WHERE root_id = 'pool:hdd'").get(),
+    ).toEqual({ n: 0 });
+    database.close();
+  });
+});

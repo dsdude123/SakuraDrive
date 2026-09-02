@@ -33,6 +33,19 @@ export function openDatabase({ file, readonly = false }: OpenDatabaseOptions): D
     db.pragma('cache_size = -65536');
     db.pragma('mmap_size = 268435456');
     db.pragma('temp_store = MEMORY');
+    /*
+      Give the query planner statistics.
+
+      Without them SQLite has to guess, and on the catalog it guessed badly: the pool
+      rollup grouped by path across every member disk, and with no stats it chose the
+      per-root index and built a temporary B-tree over the whole result -- which cannot
+      be paged, so the process was held for as long as it took. With stats it walks the
+      path_key index in order and the same work streams in bounded chunks.
+
+      `optimize` only analyses what has changed enough to matter, so it is cheap here
+      and worth repeating after a scan has poured in a few million rows.
+    */
+    db.pragma('optimize');
     applyMigrations(db);
   }
   return db;

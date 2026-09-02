@@ -106,7 +106,7 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
         if (outcome === 'paused') {
           // Once per window rather than once per disk, and never left stale across a
           // pause: a window can close for the night.
-          rebuildDirtyPools(ctx, deps, cursor);
+          await rebuildDirtyPools(ctx, deps, cursor);
           ctx.setCursor(cursor);
           return { state: 'paused' };
         }
@@ -121,7 +121,7 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
         ctx.setCursor(cursor);
       }
 
-      rebuildDirtyPools(ctx, deps, cursor);
+      await rebuildDirtyPools(ctx, deps, cursor);
 
       return {
         state: 'completed',
@@ -138,11 +138,23 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
  * once for a batch of finished disks rather than once each. Clears the list, so a
  * resumed run does not repeat work it already did.
  */
-function rebuildDirtyPools(ctx: WorkflowContext, deps: CatalogScanDeps, cursor: ScanCursor): void {
+async function rebuildDirtyPools(
+  ctx: WorkflowContext,
+  deps: CatalogScanDeps,
+  cursor: ScanCursor,
+): Promise<void> {
   const pools = cursor.dirtyPools.splice(0);
+  if (pools.length === 0) return;
+
+  // Before the rollup, not after: the scan has just changed the shape of the data, and
+  // the rollup is the query that most depends on the planner getting it right.
+  deps.catalog.optimize();
+
   for (const poolId of pools) {
     const started = Date.now();
-    const rows = deps.catalog.rebuildPoolDirStats(poolId);
+    // Yielding: this is tens of seconds of work on a real pool, and holding the process
+    // for it stops everything else -- including the agent's next batch.
+    const rows = await deps.catalog.rebuildPoolDirStatsYielding(poolId);
     ctx.log(`Rebuilt the combined view of pool ${poolId} (${rows} paths, ${Date.now() - started} ms)`);
   }
 }

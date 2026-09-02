@@ -68,6 +68,33 @@ interface FileRow {
  * treating `Media/A.mkv` and `media/a.mkv` as two files would produce phantom
  * created/deleted pairs on every scan.
  */
+/** One directory's totals while a roll-up is being built. */
+interface DirNode {
+  dirKey: string;
+  relPath: string;
+  depth: number;
+  parentKey: string | null;
+  directFiles: number;
+  directBytes: number;
+  directEffective: number;
+  totalFiles: number;
+  totalBytes: number;
+  totalEffective: number;
+}
+
+type DirNodes = Map<string, DirNode>;
+
+/** A roll-up in progress, with the root directory already present. */
+function newDirNodes(): DirNodes {
+  return new Map<string, DirNode>([
+    ['', {
+      dirKey: '', relPath: '', depth: 0, parentKey: null,
+      directFiles: 0, directBytes: 0, directEffective: 0,
+      totalFiles: 0, totalBytes: 0, totalEffective: 0,
+    }],
+  ]);
+}
+
 /** How long memoised root statistics stay usable. */
 const STATS_CACHE_MS = 5_000;
 
@@ -615,6 +642,152 @@ export class CatalogService {
   }
 
   /**
+   * Refresh the query planner's statistics.
+   *
+   * Worth doing after a scan: a catalog that grew from nothing to millions of rows
+   * changes which plan is right, and the planner cannot know that on its own.
+   */
+  optimize(): void {
+    this.db.pragma('optimize');
+  }
+
+  /**
+   * The pool rollup, rebuilt without holding the process.
+   *
+   * This is the single most expensive thing the server does: it groups every row on
+   * every member disk, and at four seconds per million rows a real pool blocks the
+   * event loop for tens of seconds. Nothing else is served while it runs -- not a page,
+   * not the health check, not the agent posting its next batch -- so the interface
+   * looked dead and requests piled up behind it.
+   *
+   * Reading a row at a time and yielding between chunks turns one long stall into many
+   * short ones. It does not make the work cheaper; it stops the work owning the
+   * process. The query still runs inside SQLite as one statement, so the first row can
+   * take a while, but from there nothing holds the loop for more than a chunk.
+   */
+  async rebuildPoolDirStatsYielding(poolId: string, chunkSize = 20_000): Promise<number> {
+    this.invalidateStats();
+    const query = this.poolFileRows(poolId);
+    const rootId = CatalogService.poolRootId(poolId);
+    if (!query) {
+      this.db.prepare('DELETE FROM dir_stats WHERE root_id = ?').run(rootId);
+      return 0;
+    }
+
+    const rootIds = this.partRootIds(poolId);
+    const placeholders = rootIds.map(() => '?').join(', ');
+    // rootId -> the physical disk behind it. A handful of entries, held here rather
+    // than compiled into the query: as a CASE inside COUNT(DISTINCT ...) it was
+    // evaluated for every row of every group and forced a temporary B-tree, which is
+    // most of what made this the slowest thing the server does. Grouping in JavaScript
+    // leaves SQL doing an ordered index walk, which streams and chunks cleanly.
+    const deviceOf = this.partDeviceKeys(rootIds);
+
+    // Deleted rows are read too, not filtered out. The pool's lost-file count is
+    // "every copy of this path is gone", which cannot be seen by a query that only
+    // looks at live rows -- and computing it separately meant a second grouping pass
+    // over every row on every disk, which is what this method exists to avoid.
+    const statement = this.db.prepare<unknown[], {
+      path_key: string; rel_path: string; size_bytes: number; root_id: string;
+      deleted_at: string | null; hash: string | null;
+    }>(
+      `SELECT path_key, rel_path, size_bytes, root_id, deleted_at, hash
+         FROM files
+        WHERE root_id IN (${placeholders})
+          AND (path_key > ? OR (path_key = ? AND root_id > ?))
+        ORDER BY path_key, root_id
+        LIMIT ?`,
+    );
+
+    const nodes = newDirNodes();
+    let pending: Array<{ relPath: string; sizeBytes: number; effectiveBytes: number }> = [];
+    let deletedFiles = 0;
+    let hashedFiles = 0;
+    let group:
+      | { pathKey: string; relPath: string; sizeBytes: number; devices: Set<string>; hashed: boolean }
+      | null = null;
+
+    const flush = () => {
+      if (!group) return;
+      if (group.devices.size === 0) {
+        // Present on no disk any more: the pool has lost this path, not just one copy.
+        deletedFiles += 1;
+      } else {
+        if (group.hashed) hashedFiles += 1;
+        pending.push({
+          relPath: group.relPath,
+          sizeBytes: group.sizeBytes,
+          // What the pool actually spends: size once per disk holding a copy.
+          effectiveBytes: group.sizeBytes * Math.max(1, group.devices.size),
+        });
+      }
+      group = null;
+    };
+
+    // The cursor is (path_key, root_id), not path_key alone, so a chunk boundary can
+    // fall inside a group and be resumed exactly. A path has one row per disk holding
+    // it; stopping at a key boundary instead meant a chunk smaller than a group could
+    // never advance, and counting only part of a group understates what the pool spends.
+    let afterKey = '';
+    let afterRoot = '';
+    for (;;) {
+      const rows = statement.all(...rootIds, afterKey, afterKey, afterRoot, chunkSize);
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        if (!group || group.pathKey !== row.path_key) {
+          flush();
+          group = {
+            pathKey: row.path_key,
+            relPath: row.rel_path,
+            sizeBytes: row.size_bytes,
+            devices: new Set<string>(),
+            hashed: false,
+          };
+        }
+        if (row.deleted_at !== null) continue;
+        // The group is seeded from whichever row came first, deleted or not, so the
+        // first live row replaces those values outright rather than being folded in.
+        if (group.devices.size === 0) {
+          group.relPath = row.rel_path;
+          group.sizeBytes = row.size_bytes;
+        }
+        // The same MIN(rel_path) and MAX(size_bytes) the aggregate produced.
+        if (row.rel_path < group.relPath) group.relPath = row.rel_path;
+        if (row.size_bytes > group.sizeBytes) group.sizeBytes = row.size_bytes;
+        if (row.hash !== null) group.hashed = true;
+        group.devices.add(deviceOf.get(row.root_id) ?? row.root_id);
+      }
+
+      if (rows.length < chunkSize) break;
+      const last = rows[rows.length - 1]!;
+      afterKey = last.path_key;
+      afterRoot = last.root_id;
+
+      // The open group stays open across the boundary; only what is already complete
+      // is folded in, so nothing is held but the current path's rows.
+      this.accumulateDirNodes(nodes, pending);
+      pending = [];
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    flush();
+    this.accumulateDirNodes(nodes, pending);
+
+    this.db
+      .prepare(
+        `INSERT INTO pool_summary (pool_id, deleted_files, hashed_files, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(pool_id) DO UPDATE SET
+           deleted_files = excluded.deleted_files,
+           hashed_files = excluded.hashed_files,
+           updated_at = excluded.updated_at`,
+      )
+      .run(poolId, deletedFiles, hashedFiles, nowIso());
+
+    return this.finaliseDirStats(rootId, nodes);
+  }
+
+  /**
    * Build the directory rollups for a virtual pool.
    *
    * Same shape as `rebuildDirStats`, but the source rows are the deduplicated union of
@@ -786,25 +959,29 @@ export class CatalogService {
     rootId: string,
     entries: ReadonlyArray<{ relPath: string; sizeBytes: number; effectiveBytes: number }>,
   ): number {
-    interface Node {
-      dirKey: string;
-      relPath: string;
-      depth: number;
-      parentKey: string | null;
-      directFiles: number;
-      directBytes: number;
-      directEffective: number;
-      totalFiles: number;
-      totalBytes: number;
-      totalEffective: number;
-    }
+    const nodes = newDirNodes();
+    this.accumulateDirNodes(nodes, entries);
+    return this.finaliseDirStats(rootId, nodes);
+  }
 
-    const nodes = new Map<string, Node>();
-    const ensure = (dirKey: string, relPath: string): Node => {
+  /**
+   * Fold a batch of files into the directory totals.
+   *
+   * Separate from the write so a caller with millions of entries can feed them in
+   * pieces and let the process breathe between them, rather than holding it for the
+   * whole roll-up. That loop is per file and does real string work, so on a large pool
+   * it was seconds on its own -- the last thing still stalling the server after the
+   * queries had been sorted out.
+   */
+  private accumulateDirNodes(
+    nodes: DirNodes,
+    entries: ReadonlyArray<{ relPath: string; sizeBytes: number; effectiveBytes: number }>,
+  ): void {
+    const ensure = (dirKey: string, relPath: string): DirNode => {
       const existing = nodes.get(dirKey);
       if (existing) return existing;
       const depth = dirKey === '' ? 0 : dirKey.split('/').length;
-      const node: Node = {
+      const node: DirNode = {
         dirKey,
         relPath,
         depth,
@@ -820,7 +997,6 @@ export class CatalogService {
       return node;
     };
 
-    ensure('', '');
     for (const entry of entries) {
       // `relPath` keeps the on-disk casing; `dirKey` is the lower-cased identity.
       const displayDir = dirnameRel(entry.relPath);
@@ -842,6 +1018,10 @@ export class CatalogService {
       }
     }
 
+  }
+
+  /** Roll the totals upward and replace the stored rows. Small: one row per directory. */
+  private finaliseDirStats(rootId: string, nodes: DirNodes): number {
     for (const node of [...nodes.values()].sort((a, b) => b.depth - a.depth)) {
       if (node.parentKey === null) continue;
       const parent = nodes.get(node.parentKey);

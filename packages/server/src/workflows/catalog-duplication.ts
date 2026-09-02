@@ -42,6 +42,7 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
     async run(ctx) {
       const config = settings.get();
       const roots = settings.enabledRoots();
+      const dirtyPools = new Set<string>();
       let updated = 0;
 
       for (const [index, root] of roots.entries()) {
@@ -60,7 +61,15 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
           config.duplication.defaultLevel,
         );
         catalog.rebuildDirStats(root.id);
-        catalog.rebuildPoolsContaining(root.id);
+        // Not the pool: rebuilding it groups every row on every member disk, so doing
+        // it per root means one full pass over the whole pool per member. Once, below.
+        if (root.kind === 'poolpart' && root.poolId) dirtyPools.add(root.poolId);
+      }
+
+      for (const poolId of dirtyPools) {
+        const started = Date.now();
+        await catalog.rebuildPoolDirStatsYielding(poolId);
+        ctx.log(`Rebuilt the combined view of pool ${poolId} (${Date.now() - started} ms)`);
       }
 
       const poolIds = [

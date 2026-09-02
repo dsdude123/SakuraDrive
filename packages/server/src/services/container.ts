@@ -22,6 +22,7 @@ import { CatalogService } from './catalog-service.js';
 import { DiscordNotifier, type FetchLike } from './discord-notifier.js';
 import { ExportService } from './export-service.js';
 import { KopiaClient, createSpawnRunner, type KopiaRunner } from './kopia-client.js';
+import { watchEventLoop, type LoopMonitor } from '../observability.js';
 import { RootDetectionService } from './root-detection.js';
 import { SettingsService } from './settings-service.js';
 
@@ -174,6 +175,8 @@ export function createServices(options: CreateServicesOptions): Services {
     workflows,
     kopia,
     async shutdown() {
+      loopMonitor?.stop();
+      loopMonitor = null;
       workflows.stopScheduler();
       notifier.stop();
       workflows.stopAll('shutdown');
@@ -183,9 +186,14 @@ export function createServices(options: CreateServicesOptions): Services {
   };
 }
 
+let loopMonitor: LoopMonitor | null = null;
+
 /** Start the background timers. Skipped in tests via `disableBackgroundJobs`. */
 export function startBackgroundJobs(services: Services): void {
   if (services.config.disableBackgroundJobs) return;
+  // Says when the process was held, which a request log cannot: a workflow rebuilding
+  // rollups blocks everything just as hard and belongs to nobody's request.
+  loopMonitor = watchEventLoop(services.logger);
   const recovered = services.workflows.recoverInterruptedRuns();
   if (recovered > 0) {
     services.logger.info({ recovered }, 'recovered workflow runs interrupted by a restart');

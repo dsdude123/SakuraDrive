@@ -6,6 +6,7 @@ import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Services } from './services/container.js';
 import { SESSION_COOKIE } from './routes/helpers.js';
+import { registerRequestTiming } from './observability.js';
 import { registerAgentRoutes } from './routes/agent.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerCatalogRoutes } from './routes/catalog.js';
@@ -54,6 +55,9 @@ export async function buildApp(services: Services): Promise<FastifyInstance> {
    * session the agent does not have and cannot get. It failed with a 401 that looked
    * like a token problem and was not one.
    */
+  // Before the auth gate, so a slow request is timed whatever its outcome.
+  registerRequestTiming(app, services.logger);
+
   app.addHook('onRequest', async (request, reply) => {
     const url = request.url.split('?')[0] ?? '';
     if (!url.startsWith('/api/')) return;
