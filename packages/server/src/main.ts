@@ -1,11 +1,25 @@
 import { statSync } from 'node:fs';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { migrateDataDir } from './db/migrate-data-dir.js';
+import { createLogger } from './logger.js';
 import { createServices, startBackgroundJobs } from './services/container.js';
 
 /** Container entry point. */
 async function main(): Promise<void> {
   const config = loadConfig();
+
+  // Before anything opens the database: a previous data directory is copied across if
+  // this one is empty, so moving off a slow mount is a stack update rather than three
+  // docker commands run by hand.
+  const startupLogger = createLogger(config.logLevel);
+  migrateDataDir({
+    dataDir: config.dataDir,
+    databasePath: config.databasePath,
+    legacyDir: config.legacyDataDir,
+    logger: startupLogger,
+  });
+
   const services = createServices({ config });
   const { logger } = services;
 

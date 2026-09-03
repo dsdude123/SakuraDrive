@@ -20,6 +20,11 @@ export interface ServerConfig {
    * Absent in an image built without it; the agent then simply never updates itself.
    */
   agentDistDir: string;
+  /**
+   * A previous data directory to copy across on first start, if this one is empty.
+   * Set to the old bind mount when moving the database off a slow filesystem.
+   */
+  legacyDataDir: string;
   host: string;
   port: number;
   logLevel: string;
@@ -58,6 +63,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     agentDistDir: path.resolve(
       envString('SAKURADRIVE_AGENT_DIST_DIR', path.join(process.cwd(), 'agent')),
     ),
+    legacyDataDir: envString('SAKURADRIVE_LEGACY_DATA_DIR', ''),
     host: envString('SAKURADRIVE_HOST', '0.0.0.0'),
     port: envInt('PORT', 8080),
     logLevel: envString('SAKURADRIVE_LOG_LEVEL', 'info'),

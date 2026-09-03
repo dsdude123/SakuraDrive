@@ -103,31 +103,35 @@ are copied out to the bind mount that reaches Backblaze.
 
 ### Moving an existing installation off drvfs
 
-If `/data` is currently a bind mount under `/mnt`, copy it across once:
+Nothing to run: update the stack and the container does it.
 
-```bash
-cd ~/SakuraDrive/docker
-docker compose down
+The compose file mounts the old location read-only at `/data-previous` and names it in
+`SAKURADRIVE_LEGACY_DATA_DIR`. On a start where the volume has no database and that
+directory does, the files are copied across before anything opens them. It happens once
+— afterwards the volume has a database, so there is nothing to do — and the old
+location is never written to, so putting the bind mount back is always available.
 
-# Create the volume and copy the old data in.
-docker volume create docker_sakuradrive_data
-docker run --rm \
-  -v /mnt/m/Tier2/Docker/sakuradrive_data:/from:ro \
-  -v docker_sakuradrive_data:/to \
-  alpine sh -c 'cp -a /from/. /to/'
+The Kopia cache is skipped; it is rebuilt on demand and can be larger than the catalog.
 
-docker compose up -d
+Expect the first start to take a while: it is reading gigabytes off the slow mount it
+is escaping. The health check allows fifteen minutes for it, and the log says so at
+both ends:
+
+```
+copying the previous data directory across; this happens once and can take
+several minutes on a slow mount
+...
+copied the previous data directory. The old one was not modified and can be
+removed once this looks right.
 ```
 
-The old directory is left untouched, so you can put the bind mount back if you want to.
-Check it worked — the startup line reports the database size:
+Then check the size it reports on the following line, and once the interface looks
+right, delete the `/data-previous` mount and `SAKURADRIVE_LEGACY_DATA_DIR` from the
+stack — and the old directory when you are ready.
 
-```bash
-docker logs sakuradrive 2>&1 | head -1
-```
-
-Starting fresh instead is also fine: delete nothing, let the agent re-scan, and the
-catalog rebuilds. Only the change history and dismissed bit-rot findings are lost.
+Starting fresh instead is also fine: point nothing at `/data-previous`, let the agent
+re-scan, and the catalog rebuilds. Only the change history and dismissed bit-rot
+findings are lost.
 
 ## After deploying
 

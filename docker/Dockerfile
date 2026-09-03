@@ -104,7 +104,10 @@ ENV NODE_ENV=production \
 VOLUME ["/data"]
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# A long start period because the first start after moving the data directory copies it
+# across, which on a slow mount is minutes. Being marked unhealthy through that would
+# restart the container part-way and start the copy again.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
     CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # tini reaps the short-lived kopia processes the backup workflow spawns.

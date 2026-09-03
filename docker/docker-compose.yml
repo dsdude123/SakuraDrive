@@ -37,6 +37,9 @@ services:
       SAKURADRIVE_LOG_LEVEL: ${SAKURADRIVE_LOG_LEVEL:-info}
       # Set to true only on a trusted network, or behind an authenticating proxy.
       SAKURADRIVE_DISABLE_AUTH: ${SAKURADRIVE_DISABLE_AUTH:-false}
+      # Copied into the volume above on first start, only when that volume has no
+      # database. Remove along with the mount once the move is done.
+      SAKURADRIVE_LEGACY_DATA_DIR: /data-previous
 
     volumes:
       # Database, generated export bundles and the Kopia cache.
@@ -51,6 +54,11 @@ services:
       # Nothing irreplaceable lives here. The catalog is rebuilt by a scan, and export
       # bundles are copied out to the bind mount below, which is what reaches Backblaze.
       - sakuradrive_data:/data
+
+      # The old location, read-only, so the container can copy itself across on its
+      # first start with the volume above. It never writes here. Once the interface
+      # looks right, delete this line and the directory.
+      - /mnt/m/Tier2/Docker/sakuradrive_data:/data-previous:ro
 
       # ------------------------------------------------------------------
       # No pool disks are mounted here, and none need to be.
