@@ -160,6 +160,13 @@ export interface VolumeSummary {
   /** Folder mount points, for a volume with no drive letter. */
   mountPoints: string[];
   lastSeenAt: string | null;
+  /** False when low-free-space alerts have been muted for this volume. */
+  lowSpaceAlerts: boolean;
+  /** Free space is below the configured warning threshold, muted or not. */
+  lowSpace: boolean;
+  /** The DrivePool this volume is a member of, if any. */
+  poolId: string | null;
+  poolName: string | null;
 }
 
 export interface PoolSummary {

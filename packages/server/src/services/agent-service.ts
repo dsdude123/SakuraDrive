@@ -7,6 +7,7 @@ import {
   evaluateVolume,
   maxSeverity,
   normalizeRelPath,
+  volumeAlertMap,
   type AgentReport,
   type AgentSummary,
   type DriveSummary,
@@ -487,6 +488,7 @@ export class AgentService {
     }
 
     // Volume-level checks (dirty bit, health, free space).
+    const volumeAlerts = volumeAlertMap(settings.volumes.alerts);
     for (const volume of report.volumes) {
       const findings = evaluateVolume({
         label: volume.label,
@@ -496,6 +498,9 @@ export class AgentService {
         dirty: volume.dirty,
         sizeBytes: volume.sizeBytes,
         freeBytes: volume.freeBytes,
+        freeSpaceWarnFraction: settings.volumes.freeSpaceWarnFraction,
+        freeSpaceCritFraction: settings.volumes.freeSpaceCritFraction,
+        freeSpaceAlerts: volumeAlerts.get(volume.volumeId) ?? true,
       });
       for (const finding of findings) {
         out.push({
@@ -820,6 +825,21 @@ export class AgentService {
   }
 
   listVolumes(): VolumeSummary[] {
+    const volumeSettings = this.settings.get().volumes;
+    const muted = volumeAlertMap(volumeSettings.alerts);
+    // Which pool owns each volume, so the interface can offer "mute every member of
+    // this pool" rather than fourteen separate clicks.
+    const pools = new Map<string, { poolId: string; poolName: string | null }>();
+    for (const row of this.db
+      .prepare<[], { volume_id: string | null; pool_id: string; name: string | null }>(
+        `SELECT p.volume_id, p.pool_id, pools.name
+           FROM pool_parts p LEFT JOIN pools ON pools.pool_id = p.pool_id
+          WHERE p.volume_id IS NOT NULL AND p.volume_id != ''`,
+      )
+      .all()) {
+      if (row.volume_id) pools.set(row.volume_id, { poolId: row.pool_id, poolName: row.name });
+    }
+
     return this.db
       .prepare<[], {
         id: number; volume_id: string; label: string | null; drive_letter: string | null;
@@ -828,21 +848,81 @@ export class AgentService {
         device_keys: string; mount_points: string; last_seen_at: string;
       }>('SELECT * FROM volumes ORDER BY drive_letter, label')
       .all()
-      .map((row) => ({
-        id: row.id,
-        volumeId: row.volume_id,
-        label: row.label,
-        driveLetter: row.drive_letter,
-        fileSystem: row.file_system,
-        sizeBytes: row.size_bytes,
-        freeBytes: row.free_bytes,
-        healthStatus: row.health_status,
-        operationalStatus: row.operational_status,
-        dirty: fromDbBool(row.dirty),
-        deviceKeys: fromJson<string[]>(row.device_keys, []),
-        mountPoints: fromJson<string[]>(row.mount_points, []),
-        lastSeenAt: row.last_seen_at,
-      }));
+      .map((row) => {
+        const pool = pools.get(row.volume_id);
+        const size = row.size_bytes ?? 0;
+        return {
+          id: row.id,
+          volumeId: row.volume_id,
+          label: row.label,
+          driveLetter: row.drive_letter,
+          fileSystem: row.file_system,
+          sizeBytes: row.size_bytes,
+          freeBytes: row.free_bytes,
+          healthStatus: row.health_status,
+          operationalStatus: row.operational_status,
+          dirty: fromDbBool(row.dirty),
+          deviceKeys: fromJson<string[]>(row.device_keys, []),
+          mountPoints: fromJson<string[]>(row.mount_points, []),
+          lastSeenAt: row.last_seen_at,
+          lowSpaceAlerts: muted.get(row.volume_id) ?? true,
+          lowSpace: size > 0 && (row.free_bytes ?? 0) / size <= volumeSettings.freeSpaceWarnFraction,
+          poolId: pool?.poolId ?? null,
+          poolName: pool?.poolName ?? null,
+        };
+      });
+  }
+
+  /**
+   * Arm or mute low-free-space alerts for a set of volumes, by `volumes.id`.
+   *
+   * Muting resolves the volume's open free-space alert straight away rather than
+   * leaving it on the dashboard until the next agent report: the operator has just
+   * said it is not a problem, and an alert that lingers after being dismissed teaches
+   * people to ignore the list.
+   */
+  setLowSpaceAlerts(ids: number[], enabled: boolean): VolumeSummary[] {
+    if (ids.length === 0) return this.listVolumes();
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare<number[], { volume_id: string; label: string | null; drive_letter: string | null }>(
+        `SELECT volume_id, label, drive_letter FROM volumes WHERE id IN (${placeholders})`,
+      )
+      .all(...ids);
+
+    const current = this.settings.get().volumes.alerts;
+    const next = new Map(current.map((entry) => [entry.volumeId, { ...entry }]));
+    for (const row of rows) {
+      const label = row.label ?? (row.drive_letter ? `${row.drive_letter}:` : '');
+      const existing = next.get(row.volume_id);
+      // Arming is the default, so an armed volume needs no entry at all -- and dropping
+      // it keeps the stored list to the exceptions rather than to every volume anyone
+      // has ever clicked. A note is someone's explanation and is worth keeping.
+      if (enabled && !existing?.note) {
+        next.delete(row.volume_id);
+      } else if (existing) {
+        existing.lowSpaceAlerts = enabled;
+        if (label) existing.label = label;
+      } else {
+        next.set(row.volume_id, {
+          volumeId: row.volume_id,
+          label,
+          lowSpaceAlerts: enabled,
+          note: '',
+        });
+      }
+    }
+    this.settings.update({ volumes: { alerts: [...next.values()] } });
+
+    if (!enabled) {
+      for (const row of rows) {
+        this.alerts.resolve(
+          `volume:${row.volume_id}:volume.free-space`,
+          'Low-space alerts muted for this volume',
+        );
+      }
+    }
+    return this.listVolumes();
   }
 
   listPools(): PoolSummary[] {

@@ -12,7 +12,8 @@ import {
 import { PageHeader } from '../components/Layout.js';
 import { Sparkline } from '../components/Sparkline.js';
 import { Badge, Banner, Card, EmptyState, Loading, SeverityBadge, Table } from '../components/ui.js';
-import { useQuery } from '../hooks/useApi.js';
+import { useMutation, useQuery } from '../hooks/useApi.js';
+import { useToast } from '../hooks/useToast.js';
 
 export function DrivesPage(): JSX.Element {
   const drives = useQuery<{ drives: DriveSummary[] }>('/api/drives', { pollMs: 30_000 });
@@ -88,58 +89,160 @@ export function DrivesPage(): JSX.Element {
           </Card>
         )}
 
-        {(volumes.data?.volumes.length ?? 0) > 0 && (
-          <Card flush title="Volumes" description="Filesystem status as Windows reports it">
-            <Table headers={['Label', 'Letter', 'Filesystem', '#Size', '#Free', 'Health', 'chkdsk']}>
-              {volumes.data!.volumes.map((volume) => {
-                const size = volume.sizeBytes ?? 0;
-                const free = volume.freeBytes ?? 0;
-                const lowSpace = size > 0 && free / size < 0.05;
-                return (
-                  <tr key={volume.id}>
-                    <td>
-                      <strong>{volume.label ?? volume.volumeId}</strong>
-                    </td>
-                    <td>
-                      {volume.driveLetter ? (
-                        `${volume.driveLetter}:`
-                      ) : volume.mountPoints.length > 0 ? (
-                        <span className="mono" style={{ fontSize: 12 }} title={volume.mountPoints.join(', ')}>
-                          {volume.mountPoints[0]}
-                        </span>
-                      ) : (
-                        <span className="faint" title="No drive letter and no folder mount point — the container cannot reach this volume">
-                          not mounted
-                        </span>
-                      )}
-                    </td>
-                    <td>{volume.fileSystem ?? '—'}</td>
-                    <td className="num">{formatBytes(volume.sizeBytes)}</td>
-                    <td className="num" style={lowSpace ? { color: 'var(--warning)' } : undefined}>
-                      {formatBytes(volume.freeBytes)}
-                    </td>
-                    <td>
-                      <Badge tone={volume.healthStatus === 'Healthy' ? 'ok' : 'warning'}>
-                        {volume.healthStatus ?? 'unknown'}
-                      </Badge>
-                    </td>
-                    <td>
-                      {volume.dirty ? (
-                        <Badge tone="critical">dirty bit set</Badge>
-                      ) : (
-                        <span className="faint">clean</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </Table>
-          </Card>
-        )}
+        <VolumesCard volumes={volumes.data?.volumes ?? []} onChanged={volumes.refresh} />
 
         <PrimoCacheCard latest={primoCache.data?.latest ?? null} />
       </div>
     </>
+  );
+}
+
+/**
+ * Filesystem status, and the switch that decides whether a full disk is news.
+ *
+ * A DrivePool member runs low on space because DrivePool chose to put files there, and
+ * DrivePool will move them again when it needs to; there is nothing for anyone to do,
+ * so the alert is noise that buries the ones that matter. A volume holding data outside
+ * the pool -- an SSD tier with its own files on it -- is the opposite: DrivePool has no
+ * say in how full it gets, so nobody but the operator will notice.
+ *
+ * Muting is per volume and covers free space only. The dirty bit and Windows' own
+ * volume health are separate conditions and keep alerting either way.
+ */
+function VolumesCard({
+  volumes,
+  onChanged,
+}: {
+  volumes: VolumeSummary[];
+  onChanged: () => void;
+}): JSX.Element | null {
+  const mutation = useMutation();
+  const toast = useToast();
+
+  if (volumes.length === 0) return null;
+
+  const setAlerts = async (ids: number[], enabled: boolean) => {
+    if (ids.length === 0) return;
+    const result = await mutation.run('/api/volumes/low-space-alerts', {
+      method: 'PATCH',
+      body: { ids, enabled },
+    });
+    if (result) {
+      const what = ids.length === 1 ? 'Low-space alerts' : `Low-space alerts for ${ids.length} volumes`;
+      toast.push(`${what} ${enabled ? 'enabled' : 'muted'}`, 'success');
+      onChanged();
+    } else if (mutation.error) {
+      toast.push(mutation.error, 'error');
+    }
+  };
+
+  // One button per pool: fourteen member disks is the normal case, and clicking
+  // fourteen checkboxes to say one thing is not a design.
+  const pools = new Map<string, { name: string; ids: number[]; muted: number }>();
+  for (const volume of volumes) {
+    if (!volume.poolId) continue;
+    const entry = pools.get(volume.poolId) ?? {
+      name: volume.poolName ?? volume.poolId,
+      ids: [],
+      muted: 0,
+    };
+    entry.ids.push(volume.id);
+    if (!volume.lowSpaceAlerts) entry.muted += 1;
+    pools.set(volume.poolId, entry);
+  }
+
+  return (
+    <Card
+      flush
+      title="Volumes"
+      description="Filesystem status as Windows reports it"
+      actions={[...pools.entries()].map(([poolId, pool]) => {
+        const allMuted = pool.muted === pool.ids.length;
+        return (
+          <button
+            key={poolId}
+            type="button"
+            disabled={mutation.busy}
+            onClick={() => setAlerts(pool.ids, allMuted)}
+          >
+            {allMuted ? 'Alert on low space in' : 'Mute low space for'} {pool.name} (
+            {pool.ids.length} disks)
+          </button>
+        );
+      })}
+    >
+      <Table
+        headers={[
+          'Label',
+          'Letter',
+          'Filesystem',
+          '#Size',
+          '#Free',
+          'Health',
+          'chkdsk',
+          'Low space alert',
+        ]}
+      >
+        {volumes.map((volume) => (
+          <tr key={volume.id}>
+            <td>
+              <strong>{volume.label ?? volume.volumeId}</strong>
+              {volume.poolName && (
+                <div className="faint" style={{ fontSize: 12 }}>
+                  in {volume.poolName}
+                </div>
+              )}
+            </td>
+            <td>
+              {volume.driveLetter ? (
+                `${volume.driveLetter}:`
+              ) : volume.mountPoints.length > 0 ? (
+                <span className="mono" style={{ fontSize: 12 }} title={volume.mountPoints.join(', ')}>
+                  {volume.mountPoints[0]}
+                </span>
+              ) : (
+                <span className="faint" title="No drive letter and no folder mount point — the container cannot reach this volume">
+                  not mounted
+                </span>
+              )}
+            </td>
+            <td>{volume.fileSystem ?? '—'}</td>
+            <td className="num">{formatBytes(volume.sizeBytes)}</td>
+            <td
+              className="num"
+              style={
+                volume.lowSpace && volume.lowSpaceAlerts ? { color: 'var(--warning)' } : undefined
+              }
+            >
+              {formatBytes(volume.freeBytes)}
+            </td>
+            <td>
+              <Badge tone={volume.healthStatus === 'Healthy' ? 'ok' : 'warning'}>
+                {volume.healthStatus ?? 'unknown'}
+              </Badge>
+            </td>
+            <td>
+              {volume.dirty ? (
+                <Badge tone="critical">dirty bit set</Badge>
+              ) : (
+                <span className="faint">clean</span>
+              )}
+            </td>
+            <td>
+              <label className="checkbox" title="Raise an alert when this volume runs low on free space">
+                <input
+                  type="checkbox"
+                  checked={volume.lowSpaceAlerts}
+                  disabled={mutation.busy}
+                  onChange={(event) => setAlerts([volume.id], event.target.checked)}
+                />
+                <span>{volume.lowSpaceAlerts ? 'on' : 'muted'}</span>
+              </label>
+            </td>
+          </tr>
+        ))}
+      </Table>
+    </Card>
   );
 }
 

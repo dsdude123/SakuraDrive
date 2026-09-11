@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   SECRET_PLACEHOLDER,
   formatBytes,
@@ -713,9 +714,16 @@ function DuplicationTab({ draft, patch }: { draft: Settings; patch: PatchFn }): 
   );
 }
 
+/** Percentages arrive from a text input; keep the stored fraction inside 0..1. */
+function clampFraction(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
 /* --------------------------------------------------------------- thresholds */
 
 function ThresholdsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): JSX.Element {
+  const mutedVolumes = draft.volumes.alerts.filter((entry) => !entry.lowSpaceAlerts);
   return (
     <div className="stack">
       <Card title="SMART and temperature">
@@ -760,6 +768,49 @@ function ThresholdsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): J
             />
           </Field>
         </div>
+      </Card>
+
+      <Card
+        title="Free space"
+        description="Applies to every volume that has not been muted under Drives → Volumes"
+      >
+        <div className="form-grid">
+          <Field label="Warn below (% free)">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={Math.round(draft.volumes.freeSpaceWarnFraction * 100)}
+              onChange={(event) =>
+                patch((next) => {
+                  next.volumes.freeSpaceWarnFraction = clampFraction(Number(event.target.value) / 100);
+                })
+              }
+            />
+          </Field>
+          <Field
+            label="Critical below (% free)"
+            help="DrivePool needs room to balance and to write a second copy; a pool member with nothing left stops both."
+          >
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={Math.round(draft.volumes.freeSpaceCritFraction * 100)}
+              onChange={(event) =>
+                patch((next) => {
+                  next.volumes.freeSpaceCritFraction = clampFraction(Number(event.target.value) / 100);
+                })
+              }
+            />
+          </Field>
+        </div>
+        {mutedVolumes.length > 0 && (
+          <p className="faint" style={{ marginTop: 12 }}>
+            Muted: {mutedVolumes.map((entry) => entry.label || entry.volumeId).join(', ')}. Turn
+            these back on from <Link to="/drives">Drives → Volumes</Link>.
+          </p>
+        )}
       </Card>
 
       <Card

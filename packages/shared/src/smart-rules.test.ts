@@ -256,6 +256,37 @@ describe('evaluateVolume', () => {
   it('ignores free space when capacity is unknown', () => {
     expect(evaluateVolume({ label: 'x', sizeBytes: 0, freeBytes: 0 })).toEqual([]);
   });
+
+  it('says nothing about free space on a muted volume', () => {
+    expect(
+      evaluateVolume({ label: 'x', sizeBytes: 1000, freeBytes: 1, freeSpaceAlerts: false }),
+    ).toEqual([]);
+  });
+
+  it('still reports the dirty bit and health on a muted volume', () => {
+    // Muting says "a full disk is not news here", not "stop watching this disk". A
+    // pending chkdsk is a different problem and has nothing to do with how full it is.
+    const findings = evaluateVolume({
+      label: 'DRIVEPOOL27',
+      dirty: true,
+      healthStatus: 'Unhealthy',
+      sizeBytes: 1000,
+      freeBytes: 1,
+      freeSpaceAlerts: false,
+    });
+    expect(findings.map((finding) => finding.key)).toEqual(['volume.dirty', 'volume.health']);
+  });
+
+  it('alerts on free space unless muted explicitly', () => {
+    // `undefined` is the state of every volume nobody has configured; it must arm.
+    for (const freeSpaceAlerts of [undefined, true]) {
+      expect(
+        evaluateVolume({ label: 'x', sizeBytes: 1000, freeBytes: 1, freeSpaceAlerts }).map(
+          (finding) => finding.key,
+        ),
+      ).toEqual(['volume.free-space']);
+    }
+  });
 });
 
 describe('evaluatePerformance', () => {

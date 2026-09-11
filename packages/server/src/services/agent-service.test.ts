@@ -210,6 +210,166 @@ describe('volume evaluation', () => {
   });
 });
 
+describe('muting low-space alerts per volume', () => {
+  const nearlyFull = () => {
+    const report = buildAgentReport();
+    report.volumes[0]!.freeBytes = 1_000_000;
+    return report;
+  };
+  const freeSpaceAlerts = () =>
+    ctx.alerts.list().alerts.filter((alert) => alert.title.includes('free'));
+
+  it('reports every volume as armed until one is muted', () => {
+    ctx.agents.ingest(buildAgentReport());
+    const volume = ctx.agents.listVolumes()[0]!;
+    expect(volume.lowSpaceAlerts).toBe(true);
+    // Pool membership travels with the volume so the interface can offer to mute a
+    // whole pool at once rather than one disk at a time.
+    expect(volume.poolId).toBe('{hdd-pool}');
+    expect(volume.poolName).toBe('HDD Pool');
+  });
+
+  it('raises nothing about free space on a muted volume', () => {
+    ctx.agents.ingest(buildAgentReport());
+    const volume = ctx.agents.listVolumes()[0]!;
+    ctx.agents.setLowSpaceAlerts([volume.id], false);
+
+    ctx.agents.ingest(nearlyFull());
+    expect(freeSpaceAlerts()).toEqual([]);
+    expect(ctx.agents.listVolumes()[0]!.lowSpaceAlerts).toBe(false);
+  });
+
+  it('resolves an open free-space alert the moment it is muted', () => {
+    // Waiting for the next agent report would leave an alert on the dashboard after the
+    // operator has just said it is not a problem, which is how people learn to ignore
+    // the list.
+    ctx.agents.ingest(nearlyFull());
+    expect(freeSpaceAlerts()).toHaveLength(1);
+
+    ctx.agents.setLowSpaceAlerts([ctx.agents.listVolumes()[0]!.id], false);
+    expect(freeSpaceAlerts()).toEqual([]);
+    expect(
+      ctx.alerts.byKey('volume:\\\\?\\Volume{aaaa}\\:volume.free-space')!.state,
+    ).toBe('resolved');
+  });
+
+  it('keeps watching the dirty bit and volume health on a muted volume', () => {
+    ctx.agents.ingest(buildAgentReport());
+    ctx.agents.setLowSpaceAlerts([ctx.agents.listVolumes()[0]!.id], false);
+
+    const report = nearlyFull();
+    report.volumes[0]!.dirty = true;
+    ctx.agents.ingest(report);
+
+    const volumeAlerts = ctx.alerts.list().alerts.filter((alert) => alert.category === 'volume');
+    expect(volumeAlerts).toHaveLength(1);
+    expect(volumeAlerts[0]!.detail).toContain('chkdsk');
+  });
+
+  it('alerts again once the volume is re-armed, and forgets the exception', () => {
+    ctx.agents.ingest(nearlyFull());
+    const id = ctx.agents.listVolumes()[0]!.id;
+    ctx.agents.setLowSpaceAlerts([id], false);
+    expect(freeSpaceAlerts()).toEqual([]);
+
+    ctx.agents.setLowSpaceAlerts([id], true);
+    ctx.agents.ingest(nearlyFull());
+    expect(freeSpaceAlerts()).toHaveLength(1);
+    // Armed is the default, so the stored list holds the exceptions and nothing else.
+    expect(ctx.settings.get().volumes.alerts).toEqual([]);
+  });
+
+  it('keeps an entry that carries a note when the volume is re-armed', () => {
+    ctx.agents.ingest(buildAgentReport());
+    const volume = ctx.agents.listVolumes()[0]!;
+    ctx.settings.update({
+      volumes: {
+        alerts: [
+          {
+            volumeId: volume.volumeId,
+            label: 'DRIVEPOOL27',
+            lowSpaceAlerts: false,
+            note: 'pool member, DrivePool balances it',
+          },
+        ],
+      },
+    });
+
+    ctx.agents.setLowSpaceAlerts([volume.id], true);
+    expect(ctx.settings.get().volumes.alerts).toEqual([
+      {
+        volumeId: volume.volumeId,
+        label: 'DRIVEPOOL27',
+        lowSpaceAlerts: true,
+        note: 'pool member, DrivePool balances it',
+      },
+    ]);
+  });
+
+  it('remembers the mute when the disk is relabelled and given a new letter', () => {
+    // The setting is keyed on the volume GUID for exactly this reason: a relabel is
+    // the operator tidying up, not a request to start alerting again.
+    ctx.agents.ingest(buildAgentReport());
+    ctx.agents.setLowSpaceAlerts([ctx.agents.listVolumes()[0]!.id], false);
+
+    const renamed = nearlyFull();
+    renamed.volumes[0]!.label = 'SSDPOOL1';
+    renamed.volumes[0]!.driveLetter = 'Q';
+    ctx.agents.ingest(renamed);
+    expect(freeSpaceAlerts()).toEqual([]);
+  });
+
+  it('records the label alongside the GUID so the stored list is readable', () => {
+    ctx.agents.ingest(buildAgentReport());
+    ctx.agents.setLowSpaceAlerts([ctx.agents.listVolumes()[0]!.id], false);
+    expect(ctx.settings.get().volumes.alerts).toEqual([
+      {
+        volumeId: '\\\\?\\Volume{aaaa}\\',
+        label: 'DRIVEPOOL27',
+        lowSpaceAlerts: false,
+        note: '',
+      },
+    ]);
+  });
+
+  it('mutes a whole pool in one call without touching anything else', () => {
+    const report = buildAgentReport();
+    report.volumes.push({
+      ...report.volumes[0]!,
+      volumeId: '\\\\?\\Volume{bbbb}\\',
+      label: 'SSDCACHE',
+      driveLetter: 'Q',
+      freeBytes: 1_000_000,
+    });
+    ctx.agents.ingest(report);
+
+    const poolMembers = ctx.agents
+      .listVolumes()
+      .filter((volume) => volume.poolId)
+      .map((volume) => volume.id);
+    ctx.agents.setLowSpaceAlerts(poolMembers, false);
+
+    const after = ctx.agents.listVolumes();
+    expect(after.find((volume) => volume.label === 'DRIVEPOOL27')!.lowSpaceAlerts).toBe(false);
+    // The SSD holds files DrivePool does not manage, so it stays armed.
+    expect(after.find((volume) => volume.label === 'SSDCACHE')!.lowSpaceAlerts).toBe(true);
+  });
+
+  it('honours the configured free-space thresholds', () => {
+    // 4 TB free of 14 TB: comfortable by default, low once half is the bar.
+    ctx.agents.ingest(buildAgentReport());
+    expect(freeSpaceAlerts()).toEqual([]);
+    expect(ctx.agents.listVolumes()[0]!.lowSpace).toBe(false);
+
+    ctx.settings.update({ volumes: { freeSpaceWarnFraction: 0.5 } });
+    ctx.agents.ingest(buildAgentReport());
+    expect(freeSpaceAlerts()[0]!.severity).toBe('warning');
+    // The interface highlights the same volumes the rule alerts on, rather than
+    // carrying its own copy of the threshold and drifting from it.
+    expect(ctx.agents.listVolumes()[0]!.lowSpace).toBe(true);
+  });
+});
+
 describe('pool parts', () => {
   it('raises a critical alert when DrivePool reports a missing part', () => {
     const report = buildAgentReport();

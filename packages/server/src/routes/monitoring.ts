@@ -48,6 +48,27 @@ export function registerMonitoringRoutes(app: FastifyInstance, services: Service
   });
 
   app.get('/api/volumes', async () => ({ volumes: agents.listVolumes() }));
+
+  /**
+   * Arm or mute low-free-space alerts for one or more volumes.
+   *
+   * Takes a list rather than a single id because the common case is a whole pool: a
+   * DrivePool member fills up because DrivePool put files there, and there is nothing
+   * an operator can do about one member being low that DrivePool will not do itself.
+   */
+  app.patch('/api/volumes/low-space-alerts', async (request, reply) => {
+    const body = parseBody(
+      z.object({
+        ids: z.array(z.number().int().positive()).min(1).max(500),
+        enabled: z.boolean(),
+      }),
+      request,
+      reply,
+    );
+    if (!body) return reply;
+    return { volumes: agents.setLowSpaceAlerts(body.ids, body.enabled) };
+  });
+
   app.get('/api/pools', async () => ({ pools: agents.listPools() }));
   app.get('/api/primocache', async () => ({ latest: agents.latestPrimoCache() }));
 

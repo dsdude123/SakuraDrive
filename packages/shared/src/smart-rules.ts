@@ -386,6 +386,17 @@ export interface VolumeHealthInput {
   /** Warn when free space drops below this fraction of capacity. */
   freeSpaceWarnFraction?: number;
   freeSpaceCritFraction?: number;
+  /**
+   * Whether free space is worth alerting on for this volume at all.
+   *
+   * A plain DrivePool member fills up because DrivePool decided to put files there,
+   * and DrivePool is equally free to move them; there is nothing for an operator to
+   * do about it, so the alert is noise. A volume holding data DrivePool does not
+   * manage is the opposite case and stays armed. Only the free-space findings are
+   * suppressed -- the dirty bit and Windows' volume health are separate conditions
+   * and are reported either way.
+   */
+  freeSpaceAlerts?: boolean;
 }
 
 /** Filesystem-level checks: dirty bit, Windows health status and free space. */
@@ -419,7 +430,7 @@ export function evaluateVolume(input: VolumeHealthInput): SmartFinding[] {
 
   const size = input.sizeBytes ?? 0;
   const free = input.freeBytes ?? 0;
-  if (size > 0) {
+  if (size > 0 && input.freeSpaceAlerts !== false) {
     const fraction = free / size;
     if (fraction <= critFraction) {
       findings.push({

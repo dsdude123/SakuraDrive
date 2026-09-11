@@ -113,6 +113,45 @@ export const exportDestinationSchema = z.object({
 });
 export type ExportDestination = z.infer<typeof exportDestinationSchema>;
 
+export const volumeAlertSettingSchema = z.object({
+  /**
+   * Volume GUID path, e.g. `\\?\Volume{9f3a...}\`.
+   *
+   * Keyed on the GUID rather than the label or the drive letter because both of those
+   * are the operator's to change: relabelling `DRIVEPOOL27` or handing it a different
+   * letter must not silently re-arm an alert that was deliberately muted.
+   */
+  volumeId: z.string().min(1),
+  /** Last known label, kept so the muted list is readable before an agent reports. */
+  label: z.string().default(''),
+  /**
+   * Whether low-free-space findings are raised for this volume.
+   *
+   * Off is the right answer for a plain DrivePool member: nothing writes to it except
+   * DrivePool, which places and balances files across the pool itself, so one member
+   * running low is the pool doing its job rather than a problem anyone can act on. It
+   * is the wrong answer for a volume that also holds data outside the pool -- an SSD
+   * cache tier, say -- where DrivePool has no say in how full it gets.
+   *
+   * Only free space is affected. The dirty bit and Windows' own volume health are
+   * unrelated to how full a disk is, and stay armed either way.
+   */
+  lowSpaceAlerts: z.boolean().default(true),
+  /** Why it was muted, for whoever reads the list in a year. */
+  note: z.string().default(''),
+});
+export type VolumeAlertSetting = z.infer<typeof volumeAlertSettingSchema>;
+
+/**
+ * Volume GUID -> whether low-free-space alerts are armed for it.
+ *
+ * A volume with no entry is armed: muting has to be a deliberate act, so a disk that
+ * appears after the setting was written still gets watched.
+ */
+export function volumeAlertMap(alerts: VolumeAlertSetting[]): Map<string, boolean> {
+  return new Map(alerts.map((entry) => [entry.volumeId, entry.lowSpaceAlerts]));
+}
+
 export const smartThresholdSettingsSchema = z.object({
   temperatureWarnC: z.number().default(50),
   temperatureCritC: z.number().default(60),
@@ -229,6 +268,16 @@ export const settingsSchema = z.object({
     .default({}),
 
   smart: smartThresholdSettingsSchema.default({}),
+
+  volumes: z
+    .object({
+      /** Warn when free space drops below this fraction of a volume's capacity. */
+      freeSpaceWarnFraction: z.number().min(0).max(1).default(0.05),
+      freeSpaceCritFraction: z.number().min(0).max(1).default(0.01),
+      /** Per-volume overrides. A volume not listed here keeps the defaults above. */
+      alerts: z.array(volumeAlertSettingSchema).default([]),
+    })
+    .default({}),
 
   performance: z
     .object({

@@ -138,6 +138,46 @@ describe('agent reporting', () => {
     expect((drives.drives as unknown as unknown[])).toHaveLength(1);
   });
 
+  it('mutes low-space alerts for a volume and says so on the next read', async () => {
+    await h.app.inject({
+      method: 'POST',
+      url: '/api/agent/report',
+      headers: { authorization: `Bearer ${token}` },
+      payload: buildAgentReport(),
+    });
+
+    const before = json(await request(h, { method: 'GET', url: '/api/volumes' }));
+    const volume = (before.volumes as unknown as Array<{ id: number; lowSpaceAlerts: boolean }>)[0]!;
+    expect(volume.lowSpaceAlerts).toBe(true);
+
+    const muted = await request(h, {
+      method: 'PATCH',
+      url: '/api/volumes/low-space-alerts',
+      payload: { ids: [volume.id], enabled: false },
+    });
+    expect(muted.statusCode).toBe(200);
+    expect(
+      (json(muted).volumes as unknown as Array<{ lowSpaceAlerts: boolean }>)[0]!.lowSpaceAlerts,
+    ).toBe(false);
+
+    const after = json(await request(h, { method: 'GET', url: '/api/settings' }));
+    const settings = after.settings as unknown as {
+      volumes: { alerts: Array<{ label: string; lowSpaceAlerts: boolean }> };
+    };
+    expect(settings.volumes.alerts).toEqual([
+      { volumeId: expect.any(String), label: 'DRIVEPOOL27', lowSpaceAlerts: false, note: '' },
+    ]);
+  });
+
+  it('rejects a mute request that names no volumes', async () => {
+    const response = await request(h, {
+      method: 'PATCH',
+      url: '/api/volumes/low-space-alerts',
+      payload: { ids: [], enabled: false },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
   it('rejects a report with no token', async () => {
     const response = await h.app.inject({
       method: 'POST',

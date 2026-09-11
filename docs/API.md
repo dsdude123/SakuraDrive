@@ -56,6 +56,7 @@ matching HTTP status.
 | GET | `/api/drives/:id` | Latest SMART, per-attribute history, latency samples |
 | GET | `/api/drives.csv` | |
 | GET | `/api/volumes` | Filesystem status including the NTFS dirty bit |
+| PATCH | `/api/volumes/low-space-alerts` | `{ ids: number[], enabled: boolean }` — arm or mute free-space alerts per volume |
 | GET | `/api/pools` | Pools and their parts |
 | GET | `/api/primocache` | Most recent PrimoCache sample |
 
