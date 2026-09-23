@@ -117,6 +117,26 @@ nothing for that disk. Clearing the whole category would mean an unreadable driv
 alerts silently resolving, which is the worst failure a monitor has: reporting a dying
 disk as healthy because it could not see it.
 
+The flip side of that scoping: every condition sharing a prefix has to be raised in one
+pass. A pool has two — a member disk DrivePool cannot see, and the pool running out of
+space — and both key on `pool:<poolId>:`. Raised from separate passes each reconciling
+that prefix against its own active set, whichever ran second would resolve the other's
+alert for not being in it.
+
+## Free space is two different questions
+
+One member disk of a pool filling up is DrivePool placing files, and DrivePool is equally
+free to move them again; there is nothing for an operator to do, so fourteen such alerts
+are noise that buries the ones that matter. The pool as a whole running out is the point
+at which somebody has to buy a disk.
+
+So they are separate rules with separate thresholds — `volume.free-space` and
+`pool.free-space` — and the per-volume one can be muted per volume, keyed on the volume
+GUID so a relabel or a new drive letter cannot quietly re-arm it. Muting covers free
+space only: the NTFS dirty bit and Windows' own volume health are unrelated to how full a
+disk is and keep alerting either way. A volume that holds data the pool does not manage,
+such as an SSD tier with its own files on it, is the case the mute is *not* for.
+
 ## The pool is a view over its members
 
 Cataloguing both the pooled drive and its member disks would read every file twice and

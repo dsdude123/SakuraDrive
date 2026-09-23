@@ -771,7 +771,48 @@ function ThresholdsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): J
       </Card>
 
       <Card
-        title="Free space"
+        title="Free space: the pool"
+        description="The free-space question you can act on — one member disk filling up is DrivePool placing files, a full pool is a disk purchase"
+      >
+        <div className="form-grid">
+          <Field label="Warn below (% free)">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={Math.round(draft.pools.freeSpaceWarnFraction * 100)}
+              onChange={(event) =>
+                patch((next) => {
+                  next.pools.freeSpaceWarnFraction = clampFraction(Number(event.target.value) / 100);
+                })
+              }
+            />
+          </Field>
+          <Field label="Critical below (% free)">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={Math.round(draft.pools.freeSpaceCritFraction * 100)}
+              onChange={(event) =>
+                patch((next) => {
+                  next.pools.freeSpaceCritFraction = clampFraction(Number(event.target.value) / 100);
+                })
+              }
+            />
+          </Field>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <Checkbox
+            label="Alert when a pool is low on space"
+            checked={draft.pools.alertOnLowSpace}
+            onChange={(checked) => patch((next) => { next.pools.alertOnLowSpace = checked; })}
+          />
+        </div>
+      </Card>
+
+      <Card
+        title="Free space: individual volumes"
         description="Applies to every volume that has not been muted under Drives → Volumes"
       >
         <div className="form-grid">

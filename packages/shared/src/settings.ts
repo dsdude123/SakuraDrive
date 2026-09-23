@@ -269,6 +269,20 @@ export const settingsSchema = z.object({
 
   smart: smartThresholdSettingsSchema.default({}),
 
+  pools: z
+    .object({
+      /**
+       * Free space across a whole pool, which is the free-space question an operator
+       * can act on. Higher than the per-volume defaults on purpose: a pool is the sum
+       * of its disks, so the same percentage is far more bytes and far more warning.
+       */
+      freeSpaceWarnFraction: z.number().min(0).max(1).default(0.1),
+      freeSpaceCritFraction: z.number().min(0).max(1).default(0.05),
+      /** Whether pool free-space alerts are raised at all. */
+      alertOnLowSpace: z.boolean().default(true),
+    })
+    .default({}),
+
   volumes: z
     .object({
       /** Warn when free space drops below this fraction of a volume's capacity. */

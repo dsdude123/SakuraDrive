@@ -370,6 +370,98 @@ describe('muting low-space alerts per volume', () => {
   });
 });
 
+describe('pool free space', () => {
+  /** The fixture pool is 100 TB with 20 TB free; shrink the free space to go low. */
+  const poolWith = (freeBytes: number) => {
+    const report = buildAgentReport();
+    report.pools[0]!.freeBytes = freeBytes;
+    return report;
+  };
+  const spaceAlerts = () =>
+    ctx.alerts.list().alerts.filter((alert) => alert.title.includes('of the pool is free'));
+
+  it('says nothing while the pool has room', () => {
+    ctx.agents.ingest(buildAgentReport());
+    expect(spaceAlerts()).toEqual([]);
+    expect(ctx.agents.listPools()[0]!.spaceSeverity).toBeNull();
+  });
+
+  it('raises a warning when the pool itself is running low', () => {
+    ctx.agents.ingest(poolWith(8_000_000_000_000));
+    const alert = spaceAlerts()[0]!;
+    expect(alert.severity).toBe('warning');
+    expect(alert.title).toContain('HDD Pool');
+    expect(ctx.agents.listPools()[0]!.spaceSeverity).toBe('warning');
+  });
+
+  it('escalates to critical when the pool is nearly full', () => {
+    ctx.agents.ingest(poolWith(1_000_000_000_000));
+    expect(spaceAlerts()[0]!.severity).toBe('critical');
+    expect(ctx.agents.listPools()[0]!.spaceSeverity).toBe('critical');
+  });
+
+  it('resolves once space is freed', () => {
+    ctx.agents.ingest(poolWith(1_000_000_000_000));
+    expect(spaceAlerts()).toHaveLength(1);
+    ctx.agents.ingest(buildAgentReport());
+    expect(spaceAlerts()).toEqual([]);
+  });
+
+  /**
+   * The two pool alerts share a reconcile prefix. Raised from separate passes each
+   * reconciling `pool:<id>:` against its own active set, whichever ran second would
+   * resolve the other's alert for not being in it.
+   */
+  it('keeps a missing part and a full pool from resolving each other', () => {
+    const report = poolWith(1_000_000_000_000);
+    report.pools[0]!.parts[0]!.missing = true;
+    ctx.agents.ingest(report);
+
+    const open = ctx.alerts.list().alerts.filter((alert) => alert.category === 'pool');
+    expect(open).toHaveLength(2);
+    expect(open.map((alert) => alert.state)).toEqual(['open', 'open']);
+  });
+
+  it('alerts on the pool even when every member disk is muted', () => {
+    // This is the whole point: the member disks are DrivePool's business, the pool is
+    // the operator's. Muting the first must not take the second with it.
+    ctx.agents.ingest(buildAgentReport());
+    const members = ctx.agents.listVolumes().filter((volume) => volume.poolId);
+    ctx.agents.setLowSpaceAlerts(members.map((volume) => volume.id), false);
+
+    const report = poolWith(1_000_000_000_000);
+    report.volumes[0]!.freeBytes = 1_000_000;
+    ctx.agents.ingest(report);
+
+    expect(ctx.alerts.list().alerts.filter((a) => a.category === 'volume')).toEqual([]);
+    expect(spaceAlerts()).toHaveLength(1);
+  });
+
+  it('honours the configured thresholds', () => {
+    ctx.settings.update({ pools: { freeSpaceWarnFraction: 0.5 } });
+    // 20 TB of 100 TB: comfortable at the default 10%, low once half is the bar.
+    ctx.agents.ingest(buildAgentReport());
+    expect(spaceAlerts()[0]!.severity).toBe('warning');
+  });
+
+  it('can be turned off entirely', () => {
+    ctx.settings.update({ pools: { alertOnLowSpace: false } });
+    ctx.agents.ingest(poolWith(1_000_000_000_000));
+    expect(spaceAlerts()).toEqual([]);
+    // The page still says how the pool is doing; the switch governs alerting.
+    expect(ctx.agents.listPools()[0]!.spaceSeverity).toBe('critical');
+  });
+
+  it('resolves an open alert once alerting is turned off and the agent reports', () => {
+    ctx.agents.ingest(poolWith(1_000_000_000_000));
+    expect(spaceAlerts()).toHaveLength(1);
+
+    ctx.settings.update({ pools: { alertOnLowSpace: false } });
+    ctx.agents.ingest(poolWith(1_000_000_000_000));
+    expect(spaceAlerts()).toEqual([]);
+  });
+});
+
 describe('pool parts', () => {
   it('raises a critical alert when DrivePool reports a missing part', () => {
     const report = buildAgentReport();

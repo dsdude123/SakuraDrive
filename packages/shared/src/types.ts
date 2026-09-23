@@ -180,6 +180,12 @@ export interface PoolSummary {
   unduplicatedBytes: number | null;
   parts: PoolPartSummary[];
   lastSeenAt: string | null;
+  /**
+   * The pool is below the configured free-space threshold: `warning` past the warn
+   * mark, `critical` past the critical one, null when there is room. Computed server
+   * side so the interface highlights exactly what the alert rule fires on.
+   */
+  spaceSeverity: 'warning' | 'critical' | null;
 }
 
 export interface PoolPartSummary {

@@ -25,6 +25,7 @@ export function PoolsPage(): JSX.Element {
           const missing = pool.parts.filter((part) => part.missing);
           const size = pool.sizeBytes ?? 0;
           const free = pool.freeBytes ?? 0;
+          const freePercent = size > 0 ? `${((free / size) * 100).toFixed(1)}% free` : null;
           return (
             <Card
               key={pool.poolId}
@@ -32,8 +33,24 @@ export function PoolsPage(): JSX.Element {
               title={pool.name ?? pool.poolId}
               description={`${pool.driveLetter ? `${pool.driveLetter}: · ` : ''}${formatBytes(
                 size - free,
-              )} used of ${formatBytes(size)} · reported ${formatRelative(pool.lastSeenAt)}`}
+              )} used of ${formatBytes(size)}${
+                freePercent ? ` · ${freePercent}` : ''
+              } · reported ${formatRelative(pool.lastSeenAt)}`}
             >
+              {pool.spaceSeverity && (
+                <div style={{ padding: 16, paddingBottom: 0 }}>
+                  <Banner
+                    tone={pool.spaceSeverity}
+                    title={`${formatBytes(pool.freeBytes)} free across the pool${
+                      freePercent ? ` (${freePercent})` : ''
+                    }`}
+                  >
+                    {pool.spaceSeverity === 'critical'
+                      ? 'DrivePool needs free space to balance and to place the second copy of a duplicated file. Once the pool runs out it can do neither, and new writes start failing.'
+                      : 'Unlike one member disk filling up, this is not something DrivePool can rebalance its way out of — the pool needs another disk.'}
+                  </Banner>
+                </div>
+              )}
               {missing.length > 0 && (
                 <div style={{ padding: 16, paddingBottom: 0 }}>
                   <Banner tone="critical" title={`${missing.length} pool part missing`}>

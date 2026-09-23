@@ -4,6 +4,7 @@ import {
   attributeRaw,
   describeNvmeCriticalWarning,
   evaluatePerformance,
+  evaluatePoolSpace,
   evaluateSmart,
   evaluateVolume,
   maxSeverity,
@@ -286,6 +287,49 @@ describe('evaluateVolume', () => {
         ),
       ).toEqual(['volume.free-space']);
     }
+  });
+});
+
+describe('evaluatePoolSpace', () => {
+  it('is quiet while the pool has room', () => {
+    expect(evaluatePoolSpace({ name: 'HDD Pool', sizeBytes: 1000, freeBytes: 500 })).toEqual([]);
+  });
+
+  it('warns below the warn mark and escalates below the critical one', () => {
+    expect(
+      evaluatePoolSpace({ name: 'HDD Pool', sizeBytes: 1000, freeBytes: 80 })[0]!.severity,
+    ).toBe('warning');
+    expect(
+      evaluatePoolSpace({ name: 'HDD Pool', sizeBytes: 1000, freeBytes: 40 })[0]!.severity,
+    ).toBe('critical');
+  });
+
+  it('is more cautious than the per-volume rule, because a pool is bigger', () => {
+    // 8% free: fine on one disk DrivePool can rebalance, worth saying about a pool.
+    const pool = evaluatePoolSpace({ name: 'HDD Pool', sizeBytes: 1000, freeBytes: 80 });
+    const volume = evaluateVolume({ label: 'DRIVEPOOL27', sizeBytes: 1000, freeBytes: 80 });
+    expect(pool).toHaveLength(1);
+    expect(volume).toEqual([]);
+  });
+
+  it('honours configured thresholds', () => {
+    expect(
+      evaluatePoolSpace({ name: 'x', sizeBytes: 1000, freeBytes: 300, warnFraction: 0.5 }),
+    ).toHaveLength(1);
+    expect(
+      evaluatePoolSpace({ name: 'x', sizeBytes: 1000, freeBytes: 80, warnFraction: 0.01 }),
+    ).toEqual([]);
+  });
+
+  it('says nothing when the pool size is unknown', () => {
+    expect(evaluatePoolSpace({ name: 'x', sizeBytes: null, freeBytes: null })).toEqual([]);
+    expect(evaluatePoolSpace({ name: 'x', sizeBytes: 0, freeBytes: 0 })).toEqual([]);
+  });
+
+  it('names the pool, falling back to its drive letter', () => {
+    expect(
+      evaluatePoolSpace({ driveLetter: 'P', sizeBytes: 1000, freeBytes: 1 })[0]!.title,
+    ).toContain('P:');
   });
 });
 

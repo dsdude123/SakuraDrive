@@ -4,6 +4,7 @@ import {
   deviceKey,
   evaluatePerformance,
   evaluateSmart,
+  evaluatePoolSpace,
   evaluateVolume,
   maxSeverity,
   normalizeRelPath,
@@ -150,7 +151,7 @@ export class AgentService {
       this.alerts.reconcile(category, activeKeys, prefix);
     }
 
-    this.checkPoolParts(report);
+    this.checkPools(report);
     for (const error of report.errors) {
       warnings.push(`${error.collector}: ${error.message}`);
     }
@@ -657,10 +658,45 @@ export class AgentService {
     return scopes;
   }
 
-  /** A pool part DrivePool reports as missing means a disk has dropped out. */
-  private checkPoolParts(report: AgentReport): void {
+  /**
+   * Pool-level conditions: a member disk that dropped out, and the pool running low
+   * on space.
+   *
+   * Both live in one pass because they share a reconcile prefix. Split across two
+   * methods each reconciling `pool:<id>:` on its own, whichever ran second would
+   * resolve the other's alert for not being in its `active` set.
+   */
+  private checkPools(report: AgentReport): void {
+    const settings = this.settings.get().pools;
     const active = new Set<string>();
     for (const pool of report.pools) {
+      if (settings.alertOnLowSpace) {
+        for (const finding of evaluatePoolSpace({
+          name: pool.name,
+          driveLetter: pool.driveLetter,
+          sizeBytes: pool.sizeBytes,
+          freeBytes: pool.freeBytes,
+          warnFraction: settings.freeSpaceWarnFraction,
+          critFraction: settings.freeSpaceCritFraction,
+        })) {
+          const dedupeKey = `pool:${pool.poolId}:${finding.key}`;
+          active.add(dedupeKey);
+          this.alerts.raise({
+            dedupeKey,
+            category: 'pool',
+            severity: finding.severity,
+            title: finding.title,
+            detail: finding.detail,
+            context: {
+              pool: pool.name ?? pool.poolId,
+              driveLetter: pool.driveLetter ?? '',
+              freeBytes: pool.freeBytes ?? '',
+              sizeBytes: pool.sizeBytes ?? '',
+            },
+          });
+        }
+      }
+
       for (const part of pool.parts) {
         const dedupeKey = `pool:${pool.poolId}:${part.partId}:missing`;
         if (part.missing) {
@@ -681,7 +717,7 @@ export class AgentService {
         }
       }
     }
-    // Same reasoning: only clear missing-part alerts for pools this report described.
+    // Same reasoning: only clear alerts for pools this report described.
     for (const pool of report.pools) {
       this.alerts.reconcile('pool', active, `pool:${pool.poolId}:`);
     }
@@ -926,6 +962,7 @@ export class AgentService {
   }
 
   listPools(): PoolSummary[] {
+    const poolSettings = this.settings.get().pools;
     const pools = this.db
       .prepare<[], {
         id: number; pool_id: string; name: string | null; drive_letter: string | null;
@@ -951,6 +988,7 @@ export class AgentService {
       duplicatedBytes: pool.duplicated_bytes,
       unduplicatedBytes: pool.unduplicated_bytes,
       lastSeenAt: pool.last_seen_at,
+      spaceSeverity: poolSpaceSeverity(pool.size_bytes, pool.free_bytes, poolSettings),
       parts: parts
         .filter((part) => part.pool_id === pool.pool_id)
         .map((part) => ({
@@ -1086,6 +1124,29 @@ export class AgentService {
     if (labels.length > 0) return labels.join(', ');
     return row.model ?? row.serial_number ?? null;
   }
+}
+
+/**
+ * How the interface should colour a pool's free space.
+ *
+ * Asks the rule rather than re-deriving the comparison, so the pools highlighted are
+ * exactly the pools that alert rather than almost the same set. Deliberately not gated
+ * on `alertOnLowSpace`: that switch governs whether an alert is raised, while the pools
+ * page is where someone goes to see the state either way.
+ */
+function poolSpaceSeverity(
+  sizeBytes: number | null,
+  freeBytes: number | null,
+  settings: { freeSpaceWarnFraction: number; freeSpaceCritFraction: number },
+): 'warning' | 'critical' | null {
+  const [finding] = evaluatePoolSpace({
+    sizeBytes,
+    freeBytes,
+    warnFraction: settings.freeSpaceWarnFraction,
+    critFraction: settings.freeSpaceCritFraction,
+  });
+  if (!finding) return null;
+  return finding.severity === 'critical' ? 'critical' : 'warning';
 }
 
 function findAttr(attributes: SmartReport['attributes'], id: number) {

@@ -454,6 +454,51 @@ export function evaluateVolume(input: VolumeHealthInput): SmartFinding[] {
   return findings;
 }
 
+export interface PoolSpaceInput {
+  name?: string | null;
+  driveLetter?: string | null;
+  sizeBytes?: number | null;
+  freeBytes?: number | null;
+  /** Warn when free space drops below this fraction of the pool's capacity. */
+  warnFraction?: number;
+  critFraction?: number;
+}
+
+/**
+ * Free space across a whole pool.
+ *
+ * This is the free-space question an operator can actually answer. One member disk
+ * filling up is DrivePool placing files, and DrivePool will move them again; the pool
+ * as a whole running out is the point at which somebody has to buy a disk. The
+ * thresholds are separate from the per-volume ones because the quantities are not
+ * comparable: 5% of a 14 TB disk is 700 GB, 5% of a 200 TB pool is 10 TB.
+ */
+export function evaluatePoolSpace(input: PoolSpaceInput): SmartFinding[] {
+  const name = input.name || (input.driveLetter ? `${input.driveLetter}:` : 'pool');
+  const warnFraction = input.warnFraction ?? 0.1;
+  const critFraction = input.critFraction ?? 0.05;
+
+  const size = input.sizeBytes ?? 0;
+  const free = input.freeBytes ?? 0;
+  if (size <= 0) return [];
+
+  const fraction = free / size;
+  if (fraction > warnFraction) return [];
+
+  const critical = fraction <= critFraction;
+  return [
+    {
+      key: 'pool.free-space',
+      severity: critical ? 'critical' : 'warning',
+      title: `${name}: ${(fraction * 100).toFixed(1)}% of the pool is free`,
+      detail: critical
+        ? 'The pool is nearly full. DrivePool needs free space to balance and to place the second copy of a duplicated file; once it runs out it can do neither, and new writes start failing.'
+        : 'The pool is running low. Unlike one member disk filling up, this is not something DrivePool can rebalance its way out of.',
+      value: fraction,
+    },
+  ];
+}
+
 export interface PerformanceThresholds {
   /** Sustained read/write latency above this many milliseconds is a warning. */
   latencyWarnMs: number;
