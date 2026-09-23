@@ -502,6 +502,57 @@ export const MIGRATIONS: Migration[] = [
     CREATE INDEX files_hashed ON files(root_id) WHERE deleted_at IS NULL AND hash IS NOT NULL;
     `,
   },
+  {
+    version: 6,
+    name: 'duplication-shortfall',
+    up: `
+    -- Since when each file has had fewer copies than its duplication level requires.
+    --
+    -- Without this, "under-duplicated" is only ever a snapshot, and a snapshot cannot
+    -- tell the two cases apart: a file written a minute ago that DrivePool has not
+    -- copied yet, and a file DrivePool has been failing to copy for a fortnight. The
+    -- first is the balancer working and is not worth waking anyone for; the second is
+    -- the entire point of duplication being on.
+    --
+    -- Keyed on path_key because the shortfall belongs to the file as the pool sees it,
+    -- not to one member disk's row: copies live on several roots and the question is
+    -- how many distinct disks hold them.
+    CREATE TABLE duplication_shortfall (
+      pool_id    TEXT NOT NULL,
+      path_key   TEXT NOT NULL,
+      -- What the sweep saw, so reporting never has to group the catalog a second time.
+      -- Every column but 'since' is rewritten on each sweep, so these are as fresh as
+      -- the sweep that just ran rather than a copy that can drift.
+      rel_path   TEXT NOT NULL DEFAULT '',
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      copies     INTEGER NOT NULL DEFAULT 0,
+      required   INTEGER NOT NULL DEFAULT 0,
+      -- When the shortfall started. Preserved across sweeps; reset only when the file
+      -- reaches its duplication level and later falls short again.
+      since      TEXT NOT NULL,
+      -- Which sweep last saw it short. Rows the newest sweep did not touch are no
+      -- longer short and get dropped.
+      seen_at    TEXT NOT NULL,
+      PRIMARY KEY (pool_id, path_key)
+    ) WITHOUT ROWID;
+    -- Carries size_bytes so counting and totalling the overdue files is a range scan
+    -- that never touches the table.
+    CREATE INDEX duplication_shortfall_since
+      ON duplication_shortfall(pool_id, since, size_bytes);
+
+    -- Lets the shortfall sweep group by path_key without building a temp b-tree over
+    -- the whole pool first.
+    --
+    -- The sweep pages through the grouped result, and with only the UNIQUE(root_id,
+    -- path_key) index to work with, SQLite drove the scan from root_id and sorted every
+    -- remaining row into a temp b-tree to do the GROUP BY -- on each page. That makes
+    -- paging quadratic: 450k rows measured 10 s in thirty ~500 ms pages. Ordered by
+    -- path_key first, the grouping streams and LIMIT stops early: ~30 ms a page.
+    -- Partial because the sweep only ever looks at live files, which also keeps it off
+    -- the soft-deleted rows the catalog never throws away.
+    CREATE INDEX files_path_group ON files(path_key, root_id) WHERE deleted_at IS NULL;
+    `,
+  },
 ];
 
 export function currentSchemaVersion(): number {

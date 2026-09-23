@@ -264,6 +264,16 @@ export const settingsSchema = z.object({
       acceptAgentRules: z.boolean().default(true),
       /** Alert when a file is stored on fewer parts than its rule requires. */
       alertOnUnderDuplication: z.boolean().default(true),
+      /**
+       * How long a file may sit short of copies before it is worth an alert.
+       *
+       * Every file is briefly under-duplicated: DrivePool writes it to one disk and
+       * copies it later, when the balancer next runs. Alerting on that means alerting
+       * on ordinary writes, so the check waits this long and speaks only about files
+       * the balancer has had time to fix and has not. Two days covers an overnight
+       * balancing window with a day to spare; 0 alerts on the snapshot, as before.
+       */
+      underDuplicationGraceDays: z.number().min(0).max(365).default(2),
     })
     .default({}),
 

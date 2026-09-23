@@ -2000,6 +2000,167 @@ export class CatalogService {
    * Compare the pool root against its pool parts to find files stored fewer times
    * than their duplication rule requires.
    */
+  /**
+   * Record which files in a pool are short of copies, and since when.
+   *
+   * "Under-duplicated" on its own is a snapshot, and a snapshot cannot tell apart the
+   * file DrivePool has not copied *yet* from the file it has been failing to copy for
+   * a fortnight. Almost every file is briefly short right after it is written, so an
+   * alert on the snapshot fires constantly and says nothing. Keeping the start of each
+   * shortfall lets the alert wait out the balancer and speak only about files that are
+   * genuinely stuck.
+   *
+   * Sweeps yield between chunks: this groups every row on every member disk, which on
+   * a real pool is minutes of synchronous work, and nothing is served while it runs.
+   */
+  async trackDuplicationShortfallYielding(
+    poolId: string,
+    graceDays: number,
+    chunkSize = 5_000,
+  ): Promise<{
+    total: number;
+    overdue: number;
+    overdueBytes: number;
+    oldestSince: string | null;
+    examples: Array<{ relPath: string; expectedLevel: number; observedLevel: number; since: string }>;
+  }> {
+    const rootIds = this.partRootIds(poolId);
+    if (rootIds.length === 0) {
+      this.db.prepare('DELETE FROM duplication_shortfall WHERE pool_id = ?').run(poolId);
+      return { total: 0, overdue: 0, overdueBytes: 0, oldestSince: null, examples: [] };
+    }
+
+    const sweptAt = nowIso();
+    // Measured from the sweep's own clock, not the caller's. A cutoff taken before the
+    // sweep is always fractionally older than the `since` the sweep is about to write,
+    // so a grace of zero -- "tell me about anything short right now" -- would match
+    // nothing at all and the alert would never fire.
+    const overdueBefore = new Date(
+      Date.parse(sweptAt) - Math.max(0, graceDays) * 86_400_000,
+    ).toISOString();
+    const placeholders = rootIds.map(() => '?').join(', ');
+    const device = this.deviceExpression(rootIds);
+    // Paged on path_key. SQLite does the grouping, so LIMIT counts finished groups and
+    // a chunk boundary can never split one -- unlike the pool roll-up, where grouping
+    // happens in JS and the cursor has to carry the group key with it.
+    //
+    // INDEXED BY is not a hint here, it is the difference between linear and quadratic.
+    // Left to itself SQLite drives this from the UNIQUE(root_id, path_key) index and
+    // sorts every remaining row into a temp b-tree to group it -- on every page, so a
+    // pool of 450k rows took 10 s in thirty ~500 ms pages. Scanning in path_key order
+    // instead lets the grouping stream and LIMIT stop early: ~30 ms a page.
+    const page = this.db.prepare<unknown[], {
+      path_key: string; rel_path: string; copies: number; size_bytes: number; duplication_level: number;
+    }>(
+      `SELECT path_key, MIN(rel_path) AS rel_path,
+              COUNT(DISTINCT ${device.expr}) AS copies,
+              MAX(size_bytes) AS size_bytes, MAX(duplication_level) AS duplication_level
+         FROM files INDEXED BY files_path_group
+        WHERE root_id IN (${placeholders}) AND deleted_at IS NULL AND path_key > ?
+        GROUP BY path_key
+       HAVING copies < MAX(duplication_level)
+        ORDER BY path_key
+        LIMIT ?`,
+    );
+    // `since` is the one column left alone on conflict, so it survives every later
+    // sweep and measures the whole run of the shortfall rather than the time since the
+    // last check. The rest is refreshed, so the report reads this sweep's numbers.
+    const mark = this.db.prepare(
+      `INSERT INTO duplication_shortfall
+         (pool_id, path_key, rel_path, size_bytes, copies, required, since, seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(pool_id, path_key) DO UPDATE SET
+         rel_path = excluded.rel_path, size_bytes = excluded.size_bytes,
+         copies = excluded.copies, required = excluded.required, seen_at = excluded.seen_at`,
+    );
+
+    let total = 0;
+    let cursor = '';
+    for (;;) {
+      const rows = page.all(...device.params, ...rootIds, cursor, chunkSize);
+      if (rows.length === 0) break;
+      this.db.transaction(() => {
+        for (const row of rows) {
+          mark.run(
+            poolId, row.path_key, row.rel_path, row.size_bytes,
+            row.copies, row.duplication_level, sweptAt, sweptAt,
+          );
+        }
+      })();
+      total += rows.length;
+      if (rows.length < chunkSize) break;
+      cursor = rows[rows.length - 1]!.path_key;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // Anything this sweep did not touch has reached its duplication level. Dropping the
+    // row is what makes `since` mean "continuously short since", so a file that falls
+    // behind again later starts a fresh grace period rather than inheriting an old one.
+    this.db
+      .prepare('DELETE FROM duplication_shortfall WHERE pool_id = ? AND seen_at < ?')
+      .run(poolId, sweptAt);
+
+    return { total, ...this.duplicationShortfallOverdue(poolId, overdueBefore) };
+  }
+
+  /**
+   * Drop shortfall rows for pools that are no longer configured.
+   *
+   * The per-sweep cleanup only touches pools it sweeps, so a pool whose part roots were
+   * purged would keep its rows forever -- and if it ever came back, inherit a stale
+   * clock that alerts immediately. Pass no pools to clear the table outright.
+   */
+  pruneDuplicationShortfall(knownPoolIds: readonly string[]): number {
+    if (knownPoolIds.length === 0) {
+      return this.db.prepare('DELETE FROM duplication_shortfall').run().changes;
+    }
+    const placeholders = knownPoolIds.map(() => '?').join(', ');
+    return this.db
+      .prepare(`DELETE FROM duplication_shortfall WHERE pool_id NOT IN (${placeholders})`)
+      .run(...knownPoolIds).changes;
+  }
+
+  /**
+   * The stuck files: short of copies since at or before `overdueBefore`.
+   *
+   * Read straight off the shortfall table, which the sweep has just rewritten, rather
+   * than grouping the catalog a second time. Re-deriving it cost 900 ms of blocked
+   * event loop on a pool with 150k files behind -- and it is the same answer, because
+   * the sweep that produced these rows ran microseconds ago.
+   */
+  private duplicationShortfallOverdue(poolId: string, overdueBefore: string) {
+    const totals = this.db
+      .prepare<[string, string], { files: number; bytes: number | null; oldest: string | null }>(
+        `SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes), 0) AS bytes, MIN(since) AS oldest
+           FROM duplication_shortfall
+          WHERE pool_id = ? AND since <= ?`,
+      )
+      .get(poolId, overdueBefore)!;
+
+    const examples = this.db
+      .prepare<[string, string], {
+        rel_path: string; copies: number; required: number; since: string;
+      }>(
+        `SELECT rel_path, copies, required, since FROM duplication_shortfall
+          WHERE pool_id = ? AND since <= ?
+          ORDER BY since, size_bytes DESC
+          LIMIT 5`,
+      )
+      .all(poolId, overdueBefore);
+
+    return {
+      overdue: totals.files,
+      overdueBytes: totals.bytes ?? 0,
+      oldestSince: totals.oldest,
+      examples: examples.map((row) => ({
+        relPath: row.rel_path,
+        expectedLevel: row.required,
+        observedLevel: row.copies,
+        since: row.since,
+      })),
+    };
+  }
+
   findUnderDuplicated(poolId: string, limit = 500): Array<{
     relPath: string;
     expectedLevel: number;

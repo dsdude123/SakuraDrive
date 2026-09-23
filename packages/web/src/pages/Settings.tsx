@@ -627,6 +627,29 @@ function DuplicationTab({ draft, patch }: { draft: Settings; patch: PatchFn }): 
             onChange={(value) => patch((next) => { next.duplication.alertOnUnderDuplication = value; })}
           />
         </div>
+        {draft.duplication.alertOnUnderDuplication && (
+          <div className="form-grid" style={{ marginTop: 12 }}>
+            <Field
+              label="Only alert after (days short of copies)"
+              help="Every file is briefly under-duplicated: DrivePool writes it to one disk and copies it when the balancer next runs. Alerting on that means alerting on ordinary writes, so the check waits this long and speaks only about files the balancer has had time to fix and has not. 0 alerts on the snapshot."
+            >
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={draft.duplication.underDuplicationGraceDays}
+                onChange={(event) =>
+                  patch((next) => {
+                    next.duplication.underDuplicationGraceDays = Math.max(
+                      0,
+                      Number(event.target.value) || 0,
+                    );
+                  })
+                }
+              />
+            </Field>
+          </div>
+        )}
       </Card>
 
       <Card

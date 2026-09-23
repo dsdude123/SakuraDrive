@@ -72,6 +72,18 @@ function addFile(rootId: string, relPath: string, size: number, duplication = 2)
   );
 }
 
+/**
+ * Pretend the recorded shortfall started `days` ago.
+ *
+ * The workflow stamps `since` with the clock, so ageing the row is the only way to
+ * test the grace period without sleeping through it.
+ */
+function ageShortfall(days: number): void {
+  db.prepare('UPDATE duplication_shortfall SET since = ?').run(
+    new Date(Date.now() - days * 86_400_000).toISOString(),
+  );
+}
+
 async function runDuplicationCheck() {
   const run = await manager.start('catalog.duplication', { force: true });
   await manager.drain();
@@ -105,17 +117,178 @@ describe('duplication check', () => {
     expect(alerts.list({ category: 'duplication' }).total).toBe(0);
   });
 
-  it('reports a file whose second copy never landed', async () => {
+  /**
+   * A file is short of copies from the moment it is written until the balancer next
+   * runs, so alerting on the snapshot means alerting on ordinary writes. The count is
+   * still reported -- it is just not worth waking anyone for yet.
+   */
+  it('counts a freshly written file as short of copies without alerting', async () => {
     configurePoolRoots();
     setPartDisk('DRIVEPOOL27', 'disk-4');
     setPartDisk('DRIVEPOOL28', 'disk-9');
     addFile('part27', 'Media/needs-two.mkv', 400);
 
     const run = await runDuplicationCheck();
-    expect(run.stats).toMatchObject({ underDuplicated: 1 });
+    expect(run.stats).toMatchObject({ underDuplicated: 1, underDuplicatedOverdue: 0 });
+    expect(alerts.byKey('duplication:hdd:under')).toBeNull();
+  });
+
+  it('reports a file whose second copy never landed, once the balancer has had its chance', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+
+    await runDuplicationCheck();
+    ageShortfall(3);
+    const run = await runDuplicationCheck();
+
+    expect(run.stats).toMatchObject({ underDuplicated: 1, underDuplicatedOverdue: 1 });
     const alert = alerts.byKey('duplication:hdd:under');
     expect(alert?.severity).toBe('warning');
     expect(alert?.state).toBe('open');
+    expect(alert?.title).toContain('after 2 days');
+    expect(alert?.context.example).toBe('Media/needs-two.mkv');
+  });
+
+  it('honours a configured grace period', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+    settings.update({ duplication: { underDuplicationGraceDays: 10 } });
+
+    await runDuplicationCheck();
+    ageShortfall(3);
+    expect((await runDuplicationCheck()).stats.underDuplicatedOverdue).toBe(0);
+
+    ageShortfall(11);
+    expect((await runDuplicationCheck()).stats.underDuplicatedOverdue).toBe(1);
+  });
+
+  it('alerts on the snapshot when the grace period is zero', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+    settings.update({ duplication: { underDuplicationGraceDays: 0 } });
+
+    const run = await runDuplicationCheck();
+    expect(run.stats).toMatchObject({ underDuplicatedOverdue: 1 });
+    const alert = alerts.byKey('duplication:hdd:under');
+    expect(alert?.state).toBe('open');
+    // No "after 0 days" nonsense in the one place the operator actually reads.
+    expect(alert?.title).not.toContain('after');
+  });
+
+  it('resolves once the missing copy lands', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+    await runDuplicationCheck();
+    ageShortfall(3);
+    await runDuplicationCheck();
+    expect(alerts.byKey('duplication:hdd:under')?.state).toBe('open');
+
+    addFile('part28', 'Media/needs-two.mkv', 400);
+    const run = await runDuplicationCheck();
+    expect(run.stats).toMatchObject({ underDuplicated: 0, underDuplicatedOverdue: 0 });
+    expect(alerts.byKey('duplication:hdd:under')?.state).toBe('resolved');
+  });
+
+  /**
+   * The shortfall clock measures one continuous run of being short, not the total over
+   * a file's life. A file that was fixed and later falls behind again is a new event
+   * and gets the balancer's full grace period before anyone is told.
+   */
+  it('starts a fresh grace period when a file falls behind again', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+    await runDuplicationCheck();
+    ageShortfall(30);
+
+    // The copy lands: the shortfall row is dropped along with its 30-day-old clock.
+    addFile('part28', 'Media/needs-two.mkv', 400);
+    await runDuplicationCheck();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM duplication_shortfall').get()).toEqual({ n: 0 });
+
+    // And is lost again. Short once more, but only just.
+    db.prepare(`UPDATE files SET deleted_at = 'now' WHERE root_id = 'part28'`).run();
+    const run = await runDuplicationCheck();
+    expect(run.stats).toMatchObject({ underDuplicated: 1, underDuplicatedOverdue: 0 });
+    // Nothing was ever raised: the first shortfall was inside its grace period too.
+    expect(alerts.byKey('duplication:hdd:under')).toBeNull();
+  });
+
+  it('separates the stuck files from the ones still within their grace period', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/stuck.mkv', 400);
+    await runDuplicationCheck();
+    ageShortfall(3);
+
+    addFile('part27', 'Media/just-written.mkv', 100);
+    const run = await runDuplicationCheck();
+
+    expect(run.stats).toMatchObject({ underDuplicated: 2, underDuplicatedOverdue: 1 });
+    const alert = alerts.byKey('duplication:hdd:under');
+    expect(alert?.title).toContain('1 file');
+    expect(alert?.detail).toContain('A further 1 file(s)');
+    expect(alert?.context.example).toBe('Media/stuck.mkv');
+  });
+
+  /**
+   * The pool roll-up had a chunk-boundary bug that undercounted copies, because it
+   * grouped in JS and a group could straddle two chunks. This sweep lets SQLite do the
+   * grouping, so LIMIT counts finished groups -- but that is a claim worth testing at
+   * every awkward chunk size rather than asserting in a comment.
+   */
+  it('sweeps the same set whatever the chunk size', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    // Nine short files and one properly duplicated, so a boundary can land anywhere.
+    for (let i = 0; i < 9; i += 1) addFile('part27', `Media/short-${i}.mkv`, 100 + i);
+    addFile('part27', 'Media/fine.mkv', 50);
+    addFile('part28', 'Media/fine.mkv', 50);
+
+    for (const chunkSize of [1, 2, 3, 7, 9, 10, 100]) {
+      db.prepare('DELETE FROM duplication_shortfall').run();
+      const result = await catalog.trackDuplicationShortfallYielding('hdd', 0, chunkSize);
+      expect({ chunkSize, total: result.total, overdue: result.overdue }).toEqual({
+        chunkSize,
+        total: 9,
+        overdue: 9,
+      });
+      const stored = db
+        .prepare<[], { n: number }>('SELECT COUNT(*) AS n FROM duplication_shortfall')
+        .get()!;
+      expect({ chunkSize, stored: stored.n }).toEqual({ chunkSize, stored: 9 });
+    }
+  });
+
+  it('keeps the original start time as a file stays short across sweeps', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+
+    await runDuplicationCheck();
+    ageShortfall(5);
+    const since = db
+      .prepare<[], { since: string }>('SELECT since FROM duplication_shortfall')
+      .get()!.since;
+
+    await runDuplicationCheck();
+    await runDuplicationCheck();
+    // Re-stamped on every sweep, the clock would restart and the alert never fire.
+    expect(
+      db.prepare<[], { since: string }>('SELECT since FROM duplication_shortfall').get()!.since,
+    ).toBe(since);
   });
 
   // The condition that makes duplication a fiction: DrivePool thinks it wrote the two
@@ -151,6 +324,41 @@ describe('duplication check', () => {
     db.prepare(`UPDATE pool_parts SET device_key = 'disk-9' WHERE volume_label = 'DRIVEPOOL28'`).run();
     await runDuplicationCheck();
     expect(alerts.byKey('duplication:hdd:shared-disk:disk-4')?.state).toBe('resolved');
+  });
+
+  it('forgets the shortfall clock when the pool is no longer configured', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+    await runDuplicationCheck();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM duplication_shortfall').get()).toEqual({ n: 1 });
+
+    // Without the prune these rows outlive the pool, and a pool of the same id coming
+    // back later would inherit an aged clock and alert on its first sweep.
+    settings.update({ catalog: { roots: [] } });
+    await runDuplicationCheck();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM duplication_shortfall').get()).toEqual({ n: 0 });
+  });
+
+  it('drops the shortfall clock when under-duplication alerts are switched off', async () => {
+    configurePoolRoots();
+    setPartDisk('DRIVEPOOL27', 'disk-4');
+    setPartDisk('DRIVEPOOL28', 'disk-9');
+    addFile('part27', 'Media/needs-two.mkv', 400);
+    await runDuplicationCheck();
+    ageShortfall(30);
+
+    settings.update({ duplication: { alertOnUnderDuplication: false } });
+    await runDuplicationCheck();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM duplication_shortfall').get()).toEqual({ n: 0 });
+
+    // Turning it back on starts the grace period again rather than firing at once on a
+    // month-old clock nobody was watching.
+    settings.update({ duplication: { alertOnUnderDuplication: true } });
+    const run = await runDuplicationCheck();
+    expect(run.stats).toMatchObject({ underDuplicated: 1, underDuplicatedOverdue: 0 });
+    expect(alerts.byKey('duplication:hdd:under')).toBeNull();
   });
 
   it('checks the disk layout even when under-duplication alerts are switched off', async () => {

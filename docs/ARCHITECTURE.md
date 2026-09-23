@@ -137,6 +137,27 @@ space only: the NTFS dirty bit and Windows' own volume health are unrelated to h
 disk is and keep alerting either way. A volume that holds data the pool does not manage,
 such as an SSD tier with its own files on it, is the case the mute is *not* for.
 
+## A snapshot of under-duplication is not a problem
+
+Every file is short of copies from the moment it is written until DrivePool's balancer
+next runs, so an alert on the current state is an alert on ordinary writes. What matters
+is how long a file has been short, which a snapshot cannot say.
+
+`duplication_shortfall` records the start of each shortfall, keyed on `(pool_id,
+path_key)` because the shortfall belongs to the file as the pool sees it rather than to
+one member disk's row. Each sweep upserts every currently-short path and rewrites every
+column but `since`, then deletes the rows it did not touch — so `since` measures one
+continuous run of being short, and a file that is fixed and later falls behind again
+gets the balancer's full grace period rather than inheriting an old clock.
+
+The sweep pages through the grouped catalog with `INDEXED BY files_path_group`, which is
+load-bearing rather than a hint: left to itself SQLite drives the scan from
+`UNIQUE(root_id, path_key)` and sorts every remaining row into a temp b-tree to do the
+`GROUP BY` — on every page, which makes paging quadratic. Measured on 450k rows that was
+10 s in thirty ~500 ms pages; in `path_key` order the grouping streams and `LIMIT` stops
+early, giving ~30 ms a page. Reporting reads the shortfall table rather than grouping the
+catalog a second time, for the same reason.
+
 ## The pool is a view over its members
 
 Cataloguing both the pooled drive and its member disks would read every file twice and

@@ -23,6 +23,16 @@ export interface DuplicationDeps {
  *    which is what DrivePool's duplication setting actually promises and what a disk
  *    failure actually tests.
  */
+/** "2 days", "1 day", "12 hours" -- the grace period is configurable and may be short. */
+function describeDays(days: number): string {
+  if (days >= 1) {
+    const whole = Math.round(days);
+    return `${whole} day${whole === 1 ? '' : 's'}`;
+  }
+  const hours = Math.max(1, Math.round(days * 24));
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
 export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefinition {
   const { db, settings, catalog, alerts } = deps;
 
@@ -115,30 +125,62 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
 
       let underDuplicated = 0;
       let underDuplicatedBytes = 0;
-      if (config.duplication.alertOnUnderDuplication) {
+      let overdue = 0;
+      if (!config.duplication.alertOnUnderDuplication) {
+        // Not tracking means not keeping half-aged state around to mislead whoever
+        // turns the check back on: they get the balancer's full grace period again.
+        catalog.pruneDuplicationShortfall([]);
+      } else {
+        catalog.pruneDuplicationShortfall(poolIds);
+        const graceDays = config.duplication.underDuplicationGraceDays;
         for (const poolId of poolIds) {
-          const mismatches = catalog.findUnderDuplicated(poolId, 500);
-          if (mismatches.length === 0) {
-            alerts.resolve(`duplication:${poolId}:under`);
+          if (!ctx.shouldContinue()) return { state: 'paused' };
+          const shortfall = await catalog.trackDuplicationShortfallYielding(poolId, graceDays);
+          underDuplicated += shortfall.total;
+          underDuplicatedBytes += shortfall.overdueBytes;
+          overdue += shortfall.overdue;
+
+          const dedupeKey = `duplication:${poolId}:under`;
+          // Files short of copies but still inside the grace period are the balancer
+          // doing its job, so they are counted and logged but never alerted on.
+          if (shortfall.overdue === 0) {
+            alerts.resolve(dedupeKey);
             continue;
           }
-          underDuplicated += mismatches.length;
-          underDuplicatedBytes += mismatches.reduce((sum, item) => sum + item.sizeBytes, 0);
-          const dedupeKey = `duplication:${poolId}:under`;
+          const stuckDays = shortfall.oldestSince
+            ? Math.floor((Date.now() - Date.parse(shortfall.oldestSince)) / 86_400_000)
+            : graceDays;
+          const plural = shortfall.overdue === 1 ? '' : 's';
           active.add(dedupeKey);
           alerts.raise({
             dedupeKey,
             category: 'duplication',
             severity: 'warning',
-            title: `${mismatches.length} file${mismatches.length === 1 ? '' : 's'} in pool ${poolId} have fewer copies than configured`,
+            title:
+              graceDays > 0
+                ? `${shortfall.overdue} file${plural} in pool ${poolId} ` +
+                  `still ${shortfall.overdue === 1 ? 'has' : 'have'} fewer copies than configured ` +
+                  `after ${describeDays(graceDays)}`
+                : `${shortfall.overdue} file${plural} in pool ${poolId} ` +
+                  `${shortfall.overdue === 1 ? 'has' : 'have'} fewer copies than configured`,
             detail:
               'These files exist on fewer physical disks than their duplication setting requires, so losing one disk would lose them. ' +
-              'DrivePool usually fixes this on its own once it has free space and time to re-balance — if the count is not falling, check the balancer.',
+              (graceDays > 0
+                ? `DrivePool has had ${describeDays(graceDays)} to re-balance and has not fixed ${shortfall.overdue === 1 ? 'it' : 'them'}` +
+                  `${stuckDays > graceDays ? ` — the oldest has been short for ${describeDays(stuckDays)}` : ''}. `
+                : 'DrivePool usually fixes this on its own once it has free space and time to re-balance. ') +
+              'Check the balancer has run, and that the pool has the free space to place another copy.' +
+              (shortfall.total > shortfall.overdue
+                ? ` A further ${(shortfall.total - shortfall.overdue).toLocaleString()} file(s) are short of copies but still within the grace period; those are normal after a write.`
+                : ''),
             context: {
               pool: poolId,
-              files: mismatches.length,
-              bytes: formatBytes(underDuplicatedBytes),
-              example: mismatches[0]?.relPath ?? '',
+              files: shortfall.overdue,
+              bytes: formatBytes(shortfall.overdueBytes),
+              graceDays,
+              shortfallTotal: shortfall.total,
+              oldestSince: shortfall.oldestSince ?? '',
+              example: shortfall.examples[0]?.relPath ?? '',
             },
           });
         }
@@ -147,11 +189,18 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
 
       ctx.log(
         `Updated ${updated.toLocaleString()} duplication levels; ${underDuplicated} under-duplicated file(s)` +
+          `, ${overdue} of them past the grace period` +
           (sharedDisks > 0 ? `; ${sharedDisks} pool disk(s) hosting more than one part` : ''),
       );
       return {
         state: 'completed',
-        stats: { levelsUpdated: updated, underDuplicated, underDuplicatedBytes, sharedDisks },
+        stats: {
+          levelsUpdated: updated,
+          underDuplicated,
+          underDuplicatedOverdue: overdue,
+          underDuplicatedBytes,
+          sharedDisks,
+        },
       };
     },
   };
