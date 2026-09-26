@@ -123,7 +123,7 @@ export function createServices(options: CreateServicesOptions): Services {
     logger,
     ...(options.now ? { now: options.now } : {}),
   });
-  workflows.register(createCatalogScanWorkflow({ settings, catalog, alerts, agentJobs }));
+  workflows.register(createCatalogScanWorkflow({ db, settings, catalog, alerts, agentJobs }));
   workflows.register(createCatalogHashWorkflow({ settings, catalog, bitrot, alerts, agentJobs }));
   workflows.register(createDuplicationWorkflow({ db, settings, catalog, alerts }));
   workflows.register(createBackupVerifyWorkflow({ db, settings, backup }));

@@ -193,11 +193,17 @@ export class WorkflowManager extends EventEmitter {
     }
 
     if (definition.concurrencyGroup) {
-      for (const [otherId, run] of this.active) {
+      for (const [otherId, run] of [...this.active]) {
         const other = this.definitions.get(run.workflowId);
-        if (otherId !== id && other?.concurrencyGroup === definition.concurrencyGroup) {
-          throw new Error(`${other.name} is already using the disks; stop it first`);
-        }
+        if (otherId === id || other?.concurrencyGroup !== definition.concurrencyGroup) continue;
+        if (!force) throw new Error(`${other.name} is already using the disks; stop it first`);
+        // "Run now" means now. Refusing here left the bit-rot scan with no way in at
+        // all: it shares the disks with the catalog scan, which is scheduled to start
+        // again as soon as it finishes, so there was no moment at which pressing the
+        // button could work. The other run is asked to stop the same cooperative way a
+        // closing window asks, so it pauses with a cursor and resumes later.
+        this.stop(otherId, 'manual');
+        await run.promise;
       }
     }
 
@@ -267,15 +273,34 @@ export class WorkflowManager extends EventEmitter {
         }
       }
 
-      for (const definition of this.orderedDefinitions()) {
-        if (!definition.autoStart) continue;
+      const candidates = this.orderedDefinitions().filter((definition) => definition.autoStart);
+      const resumableFor = new Map(
+        candidates.map((definition) => [definition.id, this.resumableRun(definition.id)]),
+      );
+      /**
+       * Work already begun, before work not yet begun.
+       *
+       * The static order is about dependency -- cataloguing before hashing, because
+       * hashing a stale file list wastes the window. It is the wrong rule for deciding
+       * who gets a shared set of disks back, though: applied there it means whatever
+       * comes first in the list restarts ahead of a half-finished run behind it, every
+       * window, forever. That is how the bit-rot scan went unrun for months behind a
+       * catalog scan. Within a group the dependency order still decides between two runs
+       * that are both fresh, or both part-done.
+       */
+      const ordered = [
+        ...candidates.filter((definition) => resumableFor.get(definition.id)),
+        ...candidates.filter((definition) => !resumableFor.get(definition.id)),
+      ];
+
+      for (const definition of ordered) {
         // Heavy-I/O workflows wait for a painted window; light ones (verification,
         // exports, retention) run whenever they say they have work.
         if (definition.respectsSchedule && !open) continue;
         if (this.active.has(definition.id)) continue;
         if (this.groupBusy(definition.concurrencyGroup)) continue;
 
-        const resumable = this.resumableRun(definition.id);
+        const resumable = resumableFor.get(definition.id) ?? null;
         if (resumable && !settings.schedule.autoResume) continue;
         if (!resumable && !(await definition.hasWork())) continue;
 
@@ -397,18 +422,36 @@ export class WorkflowManager extends EventEmitter {
     return false;
   }
 
-  /** The paused run for a workflow, if one is waiting to be resumed. */
+  /**
+   * The run a fresh start should continue instead of replacing.
+   *
+   * A paused run, or a failed one that still has a cursor. The second case matters more
+   * than it looks: a workflow whose cursor holds its position across a pool of disks
+   * loses weeks of progress if one transient error -- a dropped connection to the
+   * agent, a busy database -- sends it back to the first root. Keying on the cursor
+   * rather than the state means a run that failed with nothing saved is not retried
+   * forever, because there is nothing to retry from.
+   */
   private resumableRun(id: WorkflowId): WorkflowRun | null {
+    const row = this.db
+      .prepare<[string], RunRow>(
+        `SELECT * FROM workflow_runs
+          WHERE workflow_id = ?
+            AND (state = 'paused' OR (state = 'failed' AND cursor_json IS NOT NULL))
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(id);
+    return row ? toRun(row) : null;
+  }
+
+  /** What the interface shows as the current run: paused only, never a failure. */
+  private pausedRun(id: WorkflowId): WorkflowRun | null {
     const row = this.db
       .prepare<[string], RunRow>(
         `SELECT * FROM workflow_runs WHERE workflow_id = ? AND state = 'paused' ORDER BY id DESC LIMIT 1`,
       )
       .get(id);
     return row ? toRun(row) : null;
-  }
-
-  private pausedRun(id: WorkflowId): WorkflowRun | null {
-    return this.resumableRun(id);
   }
 
   private createRow(id: WorkflowId, trigger: string, params: Record<string, unknown>): number {
@@ -508,18 +551,28 @@ export class WorkflowManager extends EventEmitter {
     }
   }
 
+  /**
+   * Close out a run.
+   *
+   * The cursor is kept for `paused` and for `failed`, and dropped for `completed` and
+   * `cancelled`. Keeping it on failure is what lets a run that died part-way through a
+   * long walk pick up where it stopped rather than starting the whole pool again; a
+   * completed run has nothing left to point at, and a cancelled one was abandoned on
+   * purpose.
+   */
   private finishRun(runId: number, state: WorkflowRunState, error: string | null): void {
     const now = nowIso();
+    const keepsCursor = state === 'paused' || state === 'failed';
     this.db
       .prepare(
         `UPDATE workflow_runs
             SET state = ?, updated_at = ?, error = ?,
                 finished_at = CASE WHEN ? IN ('completed','failed','cancelled') THEN ? ELSE NULL END,
-                cursor_json = CASE WHEN ? = 'paused' THEN cursor_json ELSE NULL END
+                cursor_json = CASE WHEN ? THEN cursor_json ELSE NULL END
           WHERE id = ?`,
       )
-      .run(state, now, error, state, now, state, runId);
-    if (isTerminalRunState(state)) {
+      .run(state, now, error, state, now, keepsCursor ? 1 : 0, runId);
+    if (isTerminalRunState(state) && !keepsCursor) {
       this.db.prepare('UPDATE workflow_runs SET cursor_json = NULL WHERE id = ?').run(runId);
     }
   }

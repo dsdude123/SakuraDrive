@@ -216,6 +216,17 @@ function GeneralTab({
           />
         </Field>
         <Field
+          label="Re-scan every (hours)"
+          help="How long to wait after a finished pass before walking every root again. The bit-rot scan shares the disks with the catalog scan and runs after it, so with no gap here the catalog scan restarts the moment it finishes and nothing is ever verified. 0 walks continuously."
+        >
+          <input
+            type="number"
+            min={0}
+            value={draft.catalog.rescanIntervalHours}
+            onChange={(event) => patch((next) => { next.catalog.rescanIntervalHours = Number(event.target.value); })}
+          />
+        </Field>
+        <Field
           label="Mass-deletion alert threshold (%)"
           help="Raise a critical alert when one scan marks more than this share of a root as deleted — a dead disk and a missing bind mount look identical from inside the container."
         >

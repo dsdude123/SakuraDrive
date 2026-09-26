@@ -385,6 +385,60 @@ describe('scheduler tick', () => {
     expect(order).toEqual(['scan', 'hash']);
   });
 
+  /**
+   * The dependency order decides between two fresh runs. It must not decide who gets a
+   * shared set of disks back, because applied there it means the workflow listed first
+   * restarts ahead of a half-finished one behind it, every window, and that one never
+   * finishes. This is exactly how a bit-rot scan went months without running: a catalog
+   * scan ahead of it in the same `io` group became due again the moment it completed.
+   */
+  it('resumes a part-done run before starting a fresh one on the same disks', async () => {
+    const order: string[] = [];
+    let hashPhase = 0;
+    // Stands in for the catalog scan's rescan interval: due, then not, then due again.
+    let scanDue = true;
+    manager.register(
+      makeWorkflow({
+        id: 'catalog.hash',
+        name: 'Hash',
+        run: async () => {
+          order.push('hash');
+          hashPhase += 1;
+          return hashPhase === 1 ? { state: 'paused' } : { state: 'completed' };
+        },
+      }),
+    );
+    manager.register(
+      makeWorkflow({
+        id: 'catalog.scan',
+        name: 'Scan',
+        hasWork: () => scanDue,
+        run: async () => {
+          order.push('scan');
+          scanDue = false;
+          return { state: 'completed' };
+        },
+      }),
+    );
+
+    // The scan is fresh and listed first, so it goes first and finishes.
+    await manager.tick();
+    await settle();
+    expect(order).toEqual(['scan']);
+
+    // Now the disks are free and the hash starts, pausing part-way through.
+    await manager.tick();
+    await settle();
+    expect(order).toEqual(['scan', 'hash']);
+
+    // The scan is due again, but the hash is half done. Finishing it comes first.
+    scanDue = true;
+    await manager.tick();
+    await settle();
+    expect(order).toEqual(['scan', 'hash', 'hash']);
+    expect(manager.runs('catalog.hash')[0]!.state).toBe('completed');
+  });
+
   it('does not overlap ticks', async () => {
     let concurrent = 0;
     let max = 0;

@@ -298,6 +298,38 @@ h3 {
   color: var(--accent);
 }
 
+/*
+ * A tile that picks what the rest of the page shows.
+ *
+ * Plain `.stat` is a read-only metric, and a row of them that silently changed the page
+ * when clicked gave no sign it could be clicked at all -- so the catalog looked like it
+ * held one disk's worth of files when it was showing one disk out of seventeen.
+ */
+.stat.selectable {
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+.stat.selectable:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+.stat.selectable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.stat.selectable.selected {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.stat.selectable.selected .value {
+  color: var(--accent);
+}
+
 /* ------------------------------------------------------------------ badges */
 
 .badge {

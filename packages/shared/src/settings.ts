@@ -217,6 +217,16 @@ export const settingsSchema = z.object({
       hashAlgorithm: z.enum(HASH_ALGORITHMS).default('sha256'),
       /** Re-hash a file this many days after its last hash to detect silent corruption. */
       rehashIntervalDays: z.number().int().min(0).default(90),
+      /**
+       * Wait this long after a finished pass before walking every root again.
+       *
+       * Without a gate the scan is always "due", so the moment a pass completes the
+       * scheduler starts another one and the heavy-I/O slot is never free. The bit-rot
+       * scan shares that slot and is ordered after the scan, so it would never run at
+       * all -- the pool gets walked forever and never verified. 0 restores the old
+       * always-due behaviour for anyone who genuinely wants a continuous walk.
+       */
+      rescanIntervalHours: z.number().int().min(0).default(24),
       /** Globs applied to every root in addition to the root's own excludes. */
       globalExcludeGlobs: z
         .array(z.string())

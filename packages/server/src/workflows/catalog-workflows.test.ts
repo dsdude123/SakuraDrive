@@ -192,7 +192,7 @@ beforeEach(() => {
   bitrot = new BitrotService(db, alerts);
   agentJobs = new AgentJobService(db);
   manager = new WorkflowManager({ db, settings, logger: createSilentLogger() });
-  manager.register(createCatalogScanWorkflow({ settings, catalog, alerts, agentJobs }));
+  manager.register(createCatalogScanWorkflow({ db, settings, catalog, alerts, agentJobs }));
   manager.register(createCatalogHashWorkflow({ settings, catalog, bitrot, alerts, agentJobs }));
 });
 
@@ -236,6 +236,54 @@ describe('catalog scan', () => {
   it('tells the scheduler there is no work when no roots are configured', () => {
     settings.update({ catalog: { roots: [] } });
     expect(manager.definition('catalog.scan')!.hasWork()).toBe(false);
+  });
+
+  /**
+   * The scan used to report work unconditionally, so the scheduler started a fresh pass
+   * within a tick of the previous one finishing. It shares the `io` group with the
+   * bit-rot scan and is ordered before it, which meant the bit-rot scan never ran once
+   * in months of deployment: there was never an instant at which the disks were free.
+   */
+  it('waits out the rescan interval before asking to walk everything again', async () => {
+    put('a.txt', 'one');
+    configureRoot();
+    settings.update({ catalog: { rescanIntervalHours: 24 } });
+
+    expect(manager.definition('catalog.scan')!.hasWork()).toBe(true);
+    await runScan();
+    expect(manager.definition('catalog.scan')!.hasWork()).toBe(false);
+  });
+
+  it('still walks continuously when the interval is set to zero', async () => {
+    put('a.txt', 'one');
+    configureRoot();
+    settings.update({ catalog: { rescanIntervalHours: 0 } });
+
+    await runScan();
+    expect(manager.definition('catalog.scan')!.hasWork()).toBe(true);
+  });
+
+  /**
+   * With the scan holding the disks and scheduled to restart the moment it finishes,
+   * refusing a forced start left the bit-rot scan with no way in at all -- not on a
+   * schedule, and not from the button either.
+   */
+  it('lets a forced bit-rot scan take the disks from a running catalog scan', async () => {
+    put('a.txt', 'one');
+    configureRoot();
+
+    const scan = manager.start('catalog.scan', { trigger: 'schedule' });
+    // Wait for it to be genuinely in flight and waiting on the agent.
+    await scan;
+    expect(manager.isRunning('catalog.scan')).toBe(true);
+
+    const hash = await manager.start('catalog.hash', { force: true });
+    expect(hash.state).toBe('running');
+    // The scan was asked to stop rather than killed, so it kept its place.
+    expect(manager.isRunning('catalog.scan')).toBe(false);
+    expect(manager.runs('catalog.scan')[0]!.state).toBe('paused');
+
+    await manager.drain();
   });
 
   it('records created, modified and deleted differences between runs', async () => {

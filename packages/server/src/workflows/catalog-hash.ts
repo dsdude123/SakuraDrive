@@ -224,6 +224,13 @@ async function hashViaAgent(
         cancelRequested = true;
       }
 
+      // Same as the scan: an unclaimed job has no batch boundary to stop at, and the
+      // files in it are simply still due a hash next time round.
+      if (cancelRequested && current.state === 'queued') {
+        agentJobs.cancel(job.id, 'The I/O window closed before an agent took this job.');
+        return true;
+      }
+
       const stats = current.stats as {
         filesSeen?: number;
         dirsDone?: number;

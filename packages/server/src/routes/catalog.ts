@@ -80,7 +80,15 @@ export function registerCatalogRoutes(app: FastifyInstance, services: Services):
       reply,
     );
     if (!query) return reply;
-    return { runs: catalog.listRuns(query.rootId, query.limit) };
+    // Named, because a pool's runs come from its member disks and "#477" alone does not
+    // say which disk it walked.
+    const roots = settings.get().catalog.roots;
+    return {
+      runs: catalog.listRuns(query.rootId, query.limit).map((run) => ({
+        ...run,
+        rootName: roots.find((root) => root.id === run.rootId)?.name ?? run.rootId,
+      })),
+    };
   });
 
   app.get<{ Params: { runId: string } }>('/api/catalog/runs/:runId/diff', async (request) => ({

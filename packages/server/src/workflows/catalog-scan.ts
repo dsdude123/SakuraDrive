@@ -6,7 +6,9 @@ import type { AgentJobService } from '../services/agent-job-service.js';
 import type { AlertService } from '../services/alert-service.js';
 import type { CatalogService } from '../services/catalog-service.js';
 import type { SettingsService } from '../services/settings-service.js';
+import type { Db } from '../db/index.js';
 import type { WorkflowContext, WorkflowDefinition, WorkflowResult } from './engine.js';
+import { hoursSince, lastCompletedAt } from './support.js';
 
 /**
  * Cursor shape persisted on pause.
@@ -21,9 +23,6 @@ interface ScanCursor {
   dirsDone: number;
   filesSeen: number;
   bytesSeen: number;
-  created: number;
-  modified: number;
-  restored: number;
   /** Roots fully walked in this run; used so deletions are only applied to those. */
   finishedRoots: string[];
   /**
@@ -45,15 +44,13 @@ function emptyCursor(): ScanCursor {
     dirsDone: 0,
     filesSeen: 0,
     bytesSeen: 0,
-    created: 0,
-    modified: 0,
-    restored: 0,
     finishedRoots: [],
     dirtyPools: [],
   };
 }
 
 export interface CatalogScanDeps {
+  db: Db;
   settings: SettingsService;
   catalog: CatalogService;
   alerts: AlertService;
@@ -68,7 +65,7 @@ export interface CatalogScanDeps {
  * so it only runs inside a painted window and pauses cleanly at a directory boundary.
  */
 export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefinition {
-  const { settings, catalog, alerts } = deps;
+  const { db, settings, catalog, alerts } = deps;
 
   return {
     id: 'catalog.scan',
@@ -79,7 +76,20 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
     concurrencyGroup: 'io',
     autoStart: true,
 
-    hasWork: () => settings.enabledRoots().length > 0,
+    /**
+     * Roots to walk, and long enough since the last full pass to be worth walking them.
+     *
+     * The interval is the important half. Without it this is always true, so the
+     * scheduler starts a fresh pass within a tick of the previous one finishing and the
+     * `io` group is never free -- which starves the bit-rot scan completely, since it
+     * shares that group and is ordered after this. A pass that finds nothing changed is
+     * also not free: it is every byte of metadata on every disk, read again.
+     */
+    hasWork: () => {
+      if (settings.enabledRoots().length === 0) return false;
+      const interval = settings.get().catalog.rescanIntervalHours;
+      return hoursSince(lastCompletedAt(db, 'catalog.scan')) >= interval;
+    },
 
     async run(ctx: WorkflowContext): Promise<WorkflowResult> {
       const cursor: ScanCursor = { ...emptyCursor(), ...(ctx.getCursor<ScanCursor>() ?? {}) };
@@ -172,14 +182,17 @@ async function finishRoot(
   // The root was walked in full, so anything not seen really is gone.
   const deleted = await catalog.markMissingAsDeletedYielding(runId, root.id);
   const stats = catalog.rootStats(root.id);
+  // Counted from the change log rather than carried in the cursor: the cursor is reset
+  // on every resume, so anything accumulated there only ever described the last window.
+  const changed = catalog.runChangeCounts(runId);
   catalog.updateRunStats(runId, {
     filesSeen: cursor.filesSeen,
     dirsSeen: cursor.dirsDone,
     bytesSeen: cursor.bytesSeen,
-    created: cursor.created,
-    modified: cursor.modified,
+    created: changed.created,
+    modified: changed.modified,
     deleted,
-    restored: cursor.restored,
+    restored: changed.restored,
   });
   await catalog.rebuildDirStatsYielding(root.id);
   // The pool this disk belongs to is now stale, but rebuilding it here would mean one
@@ -191,7 +204,7 @@ async function finishRoot(
 
   ctx.log(
     `Finished "${root.name}": ${cursor.filesSeen.toLocaleString()} files, ` +
-      `${formatBytes(cursor.bytesSeen)}, +${cursor.created} ~${cursor.modified} -${deleted}`,
+      `${formatBytes(cursor.bytesSeen)}, +${changed.created} ~${changed.modified} -${deleted}`,
   );
   checkMassDeletion(deps, root, deleted, stats.files + deleted, config.catalog.massDeletionAlertPercent);
   cursor.finishedRoots.push(root.id);
@@ -203,9 +216,6 @@ function resetRootCursor(cursor: ScanCursor): void {
   cursor.dirsDone = 0;
   cursor.filesSeen = 0;
   cursor.bytesSeen = 0;
-  cursor.created = 0;
-  cursor.modified = 0;
-  cursor.restored = 0;
 }
 
 /**
@@ -278,6 +288,15 @@ async function runAgentScan(
       agentJobs.requestCancel(job.id);
       cancelRequested = true;
       ctx.log(`Asked the agent to stop "${root.name}" at the next batch`);
+    }
+
+    // Nobody ever took it, so there is no batch boundary to wait for. Waiting out the
+    // claim timeout here would hold the disks for up to half an hour after the window
+    // shut, doing nothing -- and the worklist already handed over is still exactly where
+    // to resume, so dropping the job costs nothing.
+    if (cancelRequested && current.state === 'queued') {
+      agentJobs.cancel(job.id, 'The I/O window closed before an agent took this job.');
+      return 'paused';
     }
 
     const stats = current.stats as { filesSeen?: number; bytesSeen?: number; dirsDone?: number; dirsRemaining?: number };

@@ -10,7 +10,7 @@ import {
 } from '@sakuradrive/shared';
 import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
-import { Badge, Card, EmptyState, Loading } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading } from '../components/ui.js';
 import { useQuery } from '../hooks/useApi.js';
 
 interface RootWithStats extends ScanRoot {
@@ -24,9 +24,24 @@ interface RootWithStats extends ScanRoot {
   };
 }
 
+/**
+ * A pool as the catalog sees it: the deduplicated union of its member disks, addressed
+ * by the synthetic root id `pool:<poolId>` and browsable like any real root.
+ */
+interface PoolWithStats {
+  id: string;
+  poolId: string;
+  name: string;
+  kind: 'pool';
+  virtual: true;
+  partRootIds: string[];
+  stats: RootWithStats['stats'];
+}
+
 interface CatalogRun {
   id: number;
   rootId: string;
+  rootName: string;
   startedAt: string;
   finishedAt: string | null;
   state: string;
@@ -39,43 +54,124 @@ interface CatalogRun {
 
 type Tab = 'browse' | 'changes' | 'search';
 
+/**
+ * What the catalog should be showing: the explicit choice, or the pool.
+ *
+ * Defaulting to the first *part* is what made this page read as a broken catalog. A
+ * pool member is a seventeenth of the answer, and the page around it looked exactly the
+ * same as it does for the whole pool -- so the totals were compared against the pool and
+ * came up short by a factor of forty, with nothing on screen to explain the difference.
+ */
+export function chooseCatalogRoot<P extends { id: string }, R extends { id: string }>(
+  pools: readonly P[],
+  parts: readonly R[],
+  rootId: string,
+): P | R | undefined {
+  return (
+    pools.find((pool) => pool.id === rootId) ??
+    parts.find((part) => part.id === rootId) ??
+    pools[0] ??
+    parts[0]
+  );
+}
+
 /** Deletions first, then restores, then edits, then plain new files. */
 const CHANGE_ORDER: Record<string, number> = { deleted: 0, restored: 1, modified: 2, created: 3 };
 
 export function CatalogPage(): JSX.Element {
-  const roots = useQuery<{ roots: RootWithStats[] }>('/api/catalog/roots', { pollMs: 30_000 });
+  const roots = useQuery<{ roots: RootWithStats[]; pools: PoolWithStats[] }>('/api/catalog/roots', {
+    pollMs: 30_000,
+  });
   const [rootId, setRootId] = useState<string>('');
   const [tab, setTab] = useState<Tab>('browse');
 
-  const activeRoot = roots.data?.roots.find((root) => root.id === rootId) ?? roots.data?.roots[0];
+  const pools = roots.data?.pools ?? [];
+  const parts = roots.data?.roots ?? [];
+  const activeRoot = chooseCatalogRoot(pools, parts, rootId);
   const currentRootId = activeRoot?.id ?? '';
+  const viewingPool = pools.some((pool) => pool.id === currentRootId);
+  const activePool = pools.find((pool) => pool.partRootIds.includes(currentRootId));
 
   return (
     <>
       <PageHeader
         title="Catalog"
         subtitle="Every file on the pool, with a full created / modified / deleted history"
+        actions={
+          currentRootId && (
+            <label className="field" style={{ maxWidth: 340 }}>
+              <span>Viewing</span>
+              <select
+                value={currentRootId}
+                onChange={(event) => setRootId(event.target.value)}
+              >
+                {pools.length > 0 && (
+                  <optgroup label="Pools">
+                    {pools.map((pool) => (
+                      <option key={pool.id} value={pool.id}>
+                        {pool.name} — all {pool.partRootIds.length} disks
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {parts.length > 0 && (
+                  <optgroup label="Individual disks">
+                    {parts.map((root) => (
+                      <option key={root.id} value={root.id}>
+                        {root.driveLabel || root.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </label>
+          )
+        }
       />
       <div className="content">
         {roots.loading && !roots.data && <Loading />}
-        {roots.data?.roots.length === 0 && (
+        {roots.data && pools.length === 0 && parts.length === 0 && (
           <EmptyState title="No catalog roots configured">
             Add the pool mounts under Settings → Catalog roots, then run a catalog scan.
           </EmptyState>
         )}
 
-        {roots.data && roots.data.roots.length > 0 && (
+        {roots.data && (pools.length > 0 || parts.length > 0) && (
           <>
+            {viewingPool && (
+              <Banner tone="info">
+                The pool as one tree: a file held on several member disks appears once here, and
+                &ldquo;on pool&rdquo; is what the pool actually spends on it across those disks.
+              </Banner>
+            )}
+            {!viewingPool && activePool && (
+              <Banner
+                tone="warning"
+                actions={
+                  <button type="button" className="button ghost" onClick={() => setRootId(activePool.id)}>
+                    Show the whole pool
+                  </button>
+                }
+              >
+                This is one disk of {activePool.partRootIds.length} in {activePool.name}, so these
+                totals are a slice of the pool rather than all of it.
+              </Banner>
+            )}
+
             <div className="grid cols-4">
-              {roots.data.roots.map((root) => (
+              {[...pools, ...parts].map((root) => (
                 <button
                   key={root.id}
-                  className={root.id === currentRootId ? 'stat accent' : 'stat'}
-                  style={{ textAlign: 'left', cursor: 'pointer' }}
+                  type="button"
+                  aria-pressed={root.id === currentRootId}
+                  className={
+                    root.id === currentRootId ? 'stat selectable selected' : 'stat selectable'
+                  }
                   onClick={() => setRootId(root.id)}
                 >
                   <span className="label">
-                    {root.name} · {root.kind}
+                    {root.name} ·{' '}
+                    {'partRootIds' in root ? `pool of ${root.partRootIds.length} disks` : root.kind}
                   </span>
                   <span className="value">{formatCount(root.stats.files)}</span>
                   <span className="hint">
@@ -215,8 +311,8 @@ function ChangesTab({ rootId }: { rootId: string }): JSX.Element {
         >
           {runs.data?.runs.map((run) => (
             <option key={run.id} value={run.id}>
-              #{run.id} · {new Date(run.startedAt).toLocaleString()} · {run.state} · +{run.created} ~
-              {run.modified} −{run.deleted}
+              {run.rootName} · {new Date(run.startedAt).toLocaleString()} · {run.state} · +
+              {run.created} ~{run.modified} −{run.deleted}
             </option>
           ))}
         </select>

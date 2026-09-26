@@ -163,14 +163,52 @@ export class CatalogService {
       );
   }
 
+  /**
+   * What a catalog run has actually changed so far, counted from the change log.
+   *
+   * The scan workflow used to carry these in its own cursor, which meant they were
+   * reset to zero every time a window closed and the run resumed -- so a scan spread
+   * over three nights reported the third night's changes, and a scan the agent walked
+   * reported none at all, because nothing on that path ever incremented them. The
+   * change rows are written as the files are ingested and are per run, so they survive
+   * a pause and are the same number the Differences tab shows.
+   */
+  runChangeCounts(runId: number): { created: number; modified: number; restored: number; deleted: number } {
+    const counts = { created: 0, modified: 0, restored: 0, deleted: 0 };
+    const rows = this.db
+      .prepare<[number], { kind: string; n: number }>(
+        'SELECT kind, COUNT(*) AS n FROM catalog_changes WHERE run_id = ? GROUP BY kind',
+      )
+      .all(runId);
+    for (const row of rows) {
+      if (row.kind in counts) counts[row.kind as keyof typeof counts] = row.n;
+    }
+    return counts;
+  }
+
+  /**
+   * Scan runs, newest first.
+   *
+   * A pool is scanned one member disk at a time, so it has no runs of its own. Asked
+   * for a pool's id, this answers with its members' runs rather than with nothing --
+   * otherwise selecting the pool anywhere the runs are listed produces an empty list
+   * that looks like "this has never been scanned".
+   */
   listRuns(rootId?: string, limit = 50) {
-    const rows = rootId
-      ? this.db
-          .prepare(
-            'SELECT * FROM catalog_runs WHERE root_id = ? ORDER BY id DESC LIMIT ?',
-          )
-          .all(rootId, limit)
-      : this.db.prepare('SELECT * FROM catalog_runs ORDER BY id DESC LIMIT ?').all(limit);
+    const poolId = rootId ? CatalogService.parsePoolRootId(rootId) : null;
+    const scope = poolId === null ? (rootId ? [rootId] : []) : this.partRootIds(poolId);
+
+    const rows =
+      scope.length > 0
+        ? this.db
+            .prepare(
+              `SELECT * FROM catalog_runs WHERE root_id IN (${scope.map(() => '?').join(', ')})
+                ORDER BY id DESC LIMIT ?`,
+            )
+            .all(...scope, limit)
+        : rootId
+          ? []
+          : this.db.prepare('SELECT * FROM catalog_runs ORDER BY id DESC LIMIT ?').all(limit);
     return (rows as Array<Record<string, unknown>>).map((row) => ({
       id: row.id as number,
       rootId: row.root_id as string,
