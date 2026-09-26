@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import {
   ALERT_CATEGORIES,
+  SEVERITY_ORDER,
   formatRelative,
   type Alert,
   type AlertCategory,
 } from '@sakuradrive/shared';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
-import { Badge, Card, EmptyState, Loading, Modal, SeverityBadge, Table } from '../components/ui.js';
+import { Badge, Card, EmptyState, Loading, Modal, SeverityBadge } from '../components/ui.js';
 import { useMutation, useQuery } from '../hooks/useApi.js';
 import { useToast } from '../hooks/useToast.js';
 
@@ -93,35 +95,73 @@ export function AlertsPage(): JSX.Element {
             </EmptyState>
           )}
           {data && data.alerts.length > 0 && (
-            <Table headers={['Severity', 'Alert', 'Category', 'Seen', 'First seen', '#Times', '']}>
-              {data.alerts.map((alert) => (
-                <tr key={alert.id} className="clickable" onClick={() => setSelected(alert)}>
-                  <td>
-                    <SeverityBadge severity={alert.severity} />
-                    {alert.state === 'acknowledged' && (
-                      <div style={{ marginTop: 4 }}>
-                        <Badge>acked</Badge>
+            <DataTable
+              rows={data.alerts}
+              rowKey={(alert) => alert.id}
+              initialSort={{ key: 'severity' }}
+              columns={[
+                {
+                  key: 'severity',
+                  header: 'Severity',
+                  // Worst first. Sorted as text this reads critical, info, warning;
+                  // sorted by rank ascending it reads info first, which is worse still.
+                  defaultDirection: 'desc',
+                  sort: (alert) => SEVERITY_ORDER[alert.severity],
+                  cell: (alert) => (
+                    <>
+                      <SeverityBadge severity={alert.severity} />
+                      {alert.state === 'acknowledged' && (
+                        <div style={{ marginTop: 4 }}>
+                          <Badge>acked</Badge>
+                        </div>
+                      )}
+                      {alert.state === 'resolved' && (
+                        <div style={{ marginTop: 4 }}>
+                          <Badge tone="ok">resolved</Badge>
+                        </div>
+                      )}
+                    </>
+                  ),
+                },
+                {
+                  key: 'title',
+                  header: 'Alert',
+                  sort: (alert) => alert.title,
+                  cell: (alert) => (
+                    <>
+                      <div>{alert.title}</div>
+                      <div className="faint" style={{ fontSize: 12 }}>
+                        {alert.detail.slice(0, 160)}
                       </div>
-                    )}
-                    {alert.state === 'resolved' && (
-                      <div style={{ marginTop: 4 }}>
-                        <Badge tone="ok">resolved</Badge>
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    <div>{alert.title}</div>
-                    <div className="faint" style={{ fontSize: 12 }}>
-                      {alert.detail.slice(0, 160)}
-                    </div>
-                  </td>
-                  <td>
-                    <Badge>{alert.category}</Badge>
-                  </td>
-                  <td className="nowrap muted">{formatRelative(alert.lastSeenAt)}</td>
-                  <td className="nowrap muted">{formatRelative(alert.firstSeenAt)}</td>
-                  <td className="num">{alert.occurrences}</td>
-                  <td onClick={(event) => event.stopPropagation()}>
+                    </>
+                  ),
+                },
+                {
+                  key: 'category',
+                  header: 'Category',
+                  sort: (alert) => alert.category,
+                  cell: (alert) => <Badge>{alert.category}</Badge>,
+                },
+                {
+                  key: 'seen',
+                  header: 'Seen',
+                  className: 'nowrap muted',
+                  sort: (alert) => sortTime(alert.lastSeenAt),
+                  cell: (alert) => formatRelative(alert.lastSeenAt),
+                },
+                {
+                  key: 'firstSeen',
+                  header: 'First seen',
+                  className: 'nowrap muted',
+                  sort: (alert) => sortTime(alert.firstSeenAt),
+                  cell: (alert) => formatRelative(alert.firstSeenAt),
+                },
+                { key: 'times', header: 'Times', numeric: true, sort: (alert) => alert.occurrences },
+                {
+                  key: 'actions',
+                  header: '',
+                  controls: true,
+                  cell: (alert) => (
                     <div className="button-row">
                       {alert.state === 'open' && (
                         <button className="small" onClick={() => void act(alert, 'acknowledge')}>
@@ -139,10 +179,11 @@ export function AlertsPage(): JSX.Element {
                         </button>
                       )}
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </Table>
+                  ),
+                },
+              ]}
+              onRowClick={(alert) => setSelected(alert)}
+            />
           )}
         </Card>
       </div>

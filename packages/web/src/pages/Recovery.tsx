@@ -6,8 +6,9 @@ import {
   type DiskLossImpact,
   type ScanRoot,
 } from '@sakuradrive/shared';
+import { DataTable } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
-import { Badge, Banner, Card, EmptyState, Loading, Table } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading } from '../components/ui.js';
 import { useQuery } from '../hooks/useApi.js';
 
 interface RootWithStats extends ScanRoot {
@@ -154,17 +155,34 @@ export function RecoveryPage(): JSX.Element {
                       Losing it would not lose any data.
                     </EmptyState>
                   ) : (
-                    <Table headers={['Path', '#Size', 'Modified']}>
-                      {impact.data.files.files.map((file) => (
-                        <tr key={file.relPath}>
-                          <td className="path" title={file.relPath}>
-                            {file.relPath}
-                          </td>
-                          <td className="num">{formatBytes(file.sizeBytes)}</td>
-                          <td className="nowrap muted">{formatRelative(new Date(file.mtimeMs))}</td>
-                        </tr>
-                      ))}
-                    </Table>
+                    <DataTable
+                      rows={impact.data.files.files}
+                      rowKey={(file) => file.relPath}
+                      initialSort={{ key: 'size' }}
+                      columns={[
+                        {
+                          key: 'path',
+                          header: 'Path',
+                          className: 'path',
+                          sort: (file) => file.relPath,
+                          cell: (file) => <span title={file.relPath}>{file.relPath}</span>,
+                        },
+                        {
+                          key: 'size',
+                          header: 'Size',
+                          numeric: true,
+                          sort: (file) => file.sizeBytes,
+                          cell: (file) => formatBytes(file.sizeBytes),
+                        },
+                        {
+                          key: 'modified',
+                          header: 'Modified',
+                          className: 'nowrap muted',
+                          sort: (file) => file.mtimeMs,
+                          cell: (file) => formatRelative(new Date(file.mtimeMs)),
+                        },
+                      ]}
+                    />
                   )}
                 </Card>
               </>

@@ -15,6 +15,7 @@ import {
   type Settings,
 } from '@sakuradrive/shared';
 import { api, upload } from '../api/client.js';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
 import { Badge, Banner, Card, Checkbox, EmptyState, Field, Loading, Table } from '../components/ui.js';
 import { useMutation, useQuery } from '../hooks/useApi.js';
@@ -661,6 +662,9 @@ function DuplicationTab({ draft, patch }: { draft: Settings; patch: PatchFn }): 
         {manual.length === 0 ? (
           <EmptyState title="No manual rules" />
         ) : (
+          /* Not sortable, deliberately: every row here is a form bound to its index in
+             the settings array, so sorting would move the row out from under whoever is
+             typing in it. */
           <Table headers={['Pool id', 'Path', '#Level', 'Note', '']}>
             {manual.map((rule) => {
               const index = draft.duplication.rules.findIndex((entry) => entry.id === rule.id);
@@ -720,17 +724,28 @@ function DuplicationTab({ draft, patch }: { draft: Settings; patch: PatchFn }): 
         {fromAgent.length === 0 ? (
           <EmptyState title="The agent has not reported duplication settings yet" />
         ) : (
-          <Table headers={['Pool id', 'Path', '#Level']}>
-            {fromAgent.map((rule: DuplicationRuleSetting) => (
-              <tr key={rule.id}>
-                <td className="mono">{rule.poolId ?? '—'}</td>
-                <td className="path">{rule.path || <span className="faint">(pool root)</span>}</td>
-                <td className="num">
-                  <Badge tone={rule.level > 1 ? 'accent' : 'neutral'}>{rule.level}×</Badge>
-                </td>
-              </tr>
-            ))}
-          </Table>
+          <DataTable
+            rows={fromAgent}
+            rowKey={(rule: DuplicationRuleSetting) => rule.id}
+            initialSort={{ key: 'path' }}
+            columns={[
+              { key: 'pool', header: 'Pool id', className: 'mono', sort: (rule) => rule.poolId },
+              {
+                key: 'path',
+                header: 'Path',
+                className: 'path',
+                sort: (rule) => rule.path,
+                cell: (rule) => rule.path || <span className="faint">(pool root)</span>,
+              },
+              {
+                key: 'level',
+                header: 'Level',
+                numeric: true,
+                sort: (rule) => rule.level,
+                cell: (rule) => <Badge tone={rule.level > 1 ? 'accent' : 'neutral'}>{rule.level}×</Badge>,
+              },
+            ]}
+          />
         )}
       </Card>
     </div>
@@ -1665,26 +1680,55 @@ function ExportTab({
         {(exports.data?.exports.length ?? 0) === 0 ? (
           <EmptyState title="No exports yet" />
         ) : (
-          <Table headers={['Created', 'File', 'Destination', '#Records', '#Size', 'Verified']}>
-            {exports.data!.exports.map((record) => (
-              <tr key={record.id}>
-                <td className="nowrap muted">{formatRelative(record.createdAt)}</td>
-                <td className="mono">{record.fileName}</td>
-                <td className="path faint">{record.destinationPath ?? '—'}</td>
-                <td className="num">{record.recordCount.toLocaleString()}</td>
-                <td className="num">{formatBytes(record.sizeBytes)}</td>
-                <td>
-                  {record.error ? (
+          <DataTable
+            rows={exports.data!.exports}
+            rowKey={(record) => record.id}
+            initialSort={{ key: 'created', direction: 'desc' }}
+            columns={[
+              {
+                key: 'created',
+                header: 'Created',
+                className: 'nowrap muted',
+                sort: (record) => sortTime(record.createdAt),
+                cell: (record) => formatRelative(record.createdAt),
+              },
+              { key: 'file', header: 'File', className: 'mono', sort: (record) => record.fileName },
+              {
+                key: 'destination',
+                header: 'Destination',
+                className: 'path faint',
+                sort: (record) => record.destinationPath,
+              },
+              {
+                key: 'records',
+                header: 'Records',
+                numeric: true,
+                sort: (record) => record.recordCount,
+                cell: (record) => record.recordCount.toLocaleString(),
+              },
+              {
+                key: 'size',
+                header: 'Size',
+                numeric: true,
+                sort: (record) => record.sizeBytes,
+                cell: (record) => formatBytes(record.sizeBytes),
+              },
+              {
+                key: 'verified',
+                header: 'Verified',
+                // Failures first: a bundle that did not write is the reason to look.
+                sort: (record) => (record.error ? 0 : record.verified ? 2 : 1),
+                cell: (record) =>
+                  record.error ? (
                     <Badge tone="critical">{record.error.slice(0, 50)}</Badge>
                   ) : record.verified ? (
                     <Badge tone="ok">verified</Badge>
                   ) : (
                     <Badge>written</Badge>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </Table>
+                  ),
+              },
+            ]}
+          />
         )}
       </Card>
     </div>
@@ -1768,15 +1812,25 @@ function AgentsTab(): JSX.Element {
             Create a token, then run the install command on the host.
           </EmptyState>
         ) : (
-          <Table headers={['Host', 'Version', 'Distribution', 'Protocol', '#Reports', 'Last report', 'Status']}>
-            {agents.data!.agents.map((agent) => (
-              <tr key={agent.id}>
-                <td>
-                  <strong>{agent.hostname}</strong>
-                </td>
-                <td className="mono">{agent.agentVersion}</td>
-                <td className="mono nowrap">
-                  {agent.distributionVersion ? (
+          <DataTable
+            rows={agents.data!.agents}
+            rowKey={(agent) => agent.id}
+            initialSort={{ key: 'status' }}
+            columns={[
+              {
+                key: 'host',
+                header: 'Host',
+                sort: (agent) => agent.hostname,
+                cell: (agent) => <strong>{agent.hostname}</strong>,
+              },
+              { key: 'version', header: 'Version', className: 'mono', sort: (agent) => agent.agentVersion },
+              {
+                key: 'distribution',
+                header: 'Distribution',
+                className: 'mono nowrap',
+                sort: (agent) => agent.distributionVersion,
+                cell: (agent) =>
+                  agent.distributionVersion ? (
                     <>
                       {agent.distributionVersion.slice(0, 8)}{' '}
                       {dist.data?.version && agent.distributionVersion !== dist.data.version && (
@@ -1785,30 +1839,51 @@ function AgentsTab(): JSX.Element {
                     </>
                   ) : (
                     <span className="faint">installed by hand</span>
-                  )}
-                </td>
-                <td className="num">{agent.protocolVersion}</td>
-                <td className="num">{agent.reportCount.toLocaleString()}</td>
-                <td className="nowrap muted">{formatRelative(agent.lastReportAt)}</td>
-                <td>
-                  {agent.online ? (
-                    <Badge tone="ok" dot>
-                      reporting
-                    </Badge>
-                  ) : (
-                    <Badge tone="warning" dot>
-                      stale
-                    </Badge>
-                  )}
-                  {agent.lastErrors.length > 0 && (
-                    <div className="faint" style={{ fontSize: 11 }}>
-                      {agent.lastErrors.map((error) => `${error.collector}: ${error.message}`).join('; ')}
-                    </div>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </Table>
+                  ),
+              },
+              { key: 'protocol', header: 'Protocol', numeric: true, sort: (agent) => agent.protocolVersion },
+              {
+                key: 'reports',
+                header: 'Reports',
+                numeric: true,
+                sort: (agent) => agent.reportCount,
+                cell: (agent) => agent.reportCount.toLocaleString(),
+              },
+              {
+                key: 'lastReport',
+                header: 'Last report',
+                className: 'nowrap muted',
+                sort: (agent) => sortTime(agent.lastReportAt),
+                cell: (agent) => formatRelative(agent.lastReportAt),
+              },
+              {
+                key: 'status',
+                header: 'Status',
+                // A stale agent means monitoring is blind, so it sorts to the top.
+                sort: (agent) => agent.online,
+                cell: (agent) => (
+                  <>
+                    {agent.online ? (
+                      <Badge tone="ok" dot>
+                        reporting
+                      </Badge>
+                    ) : (
+                      <Badge tone="warning" dot>
+                        stale
+                      </Badge>
+                    )}
+                    {agent.lastErrors.length > 0 && (
+                      <div className="faint" style={{ fontSize: 11 }}>
+                        {agent.lastErrors
+                          .map((error) => `${error.collector}: ${error.message}`)
+                          .join('; ')}
+                      </div>
+                    )}
+                  </>
+                ),
+              },
+            ]}
+          />
         )}
       </Card>
 
@@ -1873,26 +1948,57 @@ function AgentsTab(): JSX.Element {
           {(tokens.data?.tokens.length ?? 0) === 0 ? (
             <EmptyState title="No tokens yet" />
           ) : (
-            <Table headers={['Name', 'Prefix', 'Created', 'Last used', 'Status', '']}>
-              {tokens.data!.tokens.map((token) => (
-                <tr key={token.id}>
-                  <td>{token.name}</td>
-                  <td className="mono">{token.prefix}…</td>
-                  <td className="nowrap muted">{formatRelative(token.createdAt)}</td>
-                  <td className="nowrap muted">{formatRelative(token.lastUsedAt)}</td>
-                  <td>
-                    {token.revokedAt ? <Badge tone="critical">revoked</Badge> : <Badge tone="ok">active</Badge>}
-                  </td>
-                  <td>
-                    {!token.revokedAt && (
+            <DataTable
+              rows={tokens.data!.tokens}
+              rowKey={(token) => token.id}
+              initialSort={{ key: 'created', direction: 'desc' }}
+              columns={[
+                { key: 'name', header: 'Name', sort: (token) => token.name },
+                {
+                  key: 'prefix',
+                  header: 'Prefix',
+                  className: 'mono',
+                  sort: (token) => token.prefix,
+                  cell: (token) => `${token.prefix}…`,
+                },
+                {
+                  key: 'created',
+                  header: 'Created',
+                  className: 'nowrap muted',
+                  sort: (token) => sortTime(token.createdAt),
+                  cell: (token) => formatRelative(token.createdAt),
+                },
+                {
+                  key: 'lastUsed',
+                  header: 'Last used',
+                  className: 'nowrap muted',
+                  sort: (token) => sortTime(token.lastUsedAt),
+                  cell: (token) => formatRelative(token.lastUsedAt),
+                },
+                {
+                  key: 'status',
+                  header: 'Status',
+                  sort: (token) => (token.revokedAt ? 0 : 1),
+                  cell: (token) =>
+                    token.revokedAt ? (
+                      <Badge tone="critical">revoked</Badge>
+                    ) : (
+                      <Badge tone="ok">active</Badge>
+                    ),
+                },
+                {
+                  key: 'actions',
+                  header: '',
+                  controls: true,
+                  cell: (token) =>
+                    !token.revokedAt && (
                       <button className="small danger" onClick={() => void revoke(token)}>
                         Revoke
                       </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </Table>
+                    ),
+                },
+              ]}
+            />
           )}
         </div>
       </Card>

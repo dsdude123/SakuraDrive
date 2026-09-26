@@ -1,7 +1,15 @@
 import { formatBytes, formatRelative, type PoolSummary } from '@sakuradrive/shared';
+import { DataTable } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
-import { Badge, Banner, Card, EmptyState, Loading, Table } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading } from '../components/ui.js';
 import { useQuery } from '../hooks/useApi.js';
+
+/** DrivePool reports used bytes, but falls back to the difference when it does not. */
+function usedBytes(part: PoolSummary['parts'][number]): number | null {
+  if (part.usedBytes !== null && part.usedBytes !== undefined) return part.usedBytes;
+  const size = part.sizeBytes ?? 0;
+  return size > 0 ? size - (part.freeBytes ?? 0) : null;
+}
 
 export function PoolsPage(): JSX.Element {
   const { data, loading } = useQuery<{ pools: PoolSummary[] }>('/api/pools', { pollMs: 30_000 });
@@ -60,37 +68,76 @@ export function PoolsPage(): JSX.Element {
                   </Banner>
                 </div>
               )}
-              <Table headers={['Part', 'Label', 'Letter', '#Size', '#Used', '#Free', 'Status']}>
-                {pool.parts.map((part) => {
-                  const partSize = part.sizeBytes ?? 0;
-                  const partFree = part.freeBytes ?? 0;
-                  return (
-                    <tr key={part.partId}>
-                      <td className="mono">{part.partId}</td>
-                      <td>
-                        <strong>{part.volumeLabel ?? part.name ?? '—'}</strong>
-                      </td>
-                      <td>{part.driveLetter ? `${part.driveLetter}:` : '—'}</td>
-                      <td className="num">{formatBytes(part.sizeBytes)}</td>
-                      <td className="num">
-                        {formatBytes(part.usedBytes ?? (partSize > 0 ? partSize - partFree : null))}
-                      </td>
-                      <td className="num">{formatBytes(part.freeBytes)}</td>
-                      <td>
-                        {part.missing ? (
-                          <Badge tone="critical" dot>
-                            Missing
-                          </Badge>
-                        ) : (
-                          <Badge tone="ok" dot>
-                            Online
-                          </Badge>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </Table>
+              <DataTable
+                rows={pool.parts}
+                rowKey={(part) => part.partId}
+                initialSort={{ key: 'label' }}
+                columns={[
+                  { key: 'part', header: 'Part', className: 'mono', sort: (part) => part.partId },
+                  {
+                    key: 'label',
+                    header: 'Label',
+                    sort: (part) => part.volumeLabel ?? part.name,
+                    cell: (part) => <strong>{part.volumeLabel ?? part.name ?? '—'}</strong>,
+                  },
+                  {
+                    key: 'letter',
+                    header: 'Letter',
+                    sort: (part) => part.driveLetter,
+                    cell: (part) => (part.driveLetter ? `${part.driveLetter}:` : '—'),
+                  },
+                  {
+                    key: 'size',
+                    header: 'Size',
+                    numeric: true,
+                    sort: (part) => part.sizeBytes,
+                    cell: (part) => formatBytes(part.sizeBytes),
+                  },
+                  {
+                    key: 'used',
+                    header: 'Used',
+                    numeric: true,
+                    sort: (part) => usedBytes(part),
+                    cell: (part) => formatBytes(usedBytes(part)),
+                  },
+                  {
+                    key: 'free',
+                    header: 'Free',
+                    numeric: true,
+                    sort: (part) => part.freeBytes,
+                    cell: (part) => formatBytes(part.freeBytes),
+                  },
+                  {
+                    key: 'freePercent',
+                    header: 'Free %',
+                    numeric: true,
+                    // Which member is actually tight, rather than which is smallest.
+                    sort: (part) =>
+                      (part.sizeBytes ?? 0) > 0 ? (part.freeBytes ?? 0) / part.sizeBytes! : null,
+                    cell: (part) =>
+                      (part.sizeBytes ?? 0) > 0
+                        ? `${(((part.freeBytes ?? 0) / part.sizeBytes!) * 100).toFixed(1)}%`
+                        : '—',
+                  },
+                  {
+                    key: 'status',
+                    header: 'Status',
+                    // Missing parts first: the one row here anybody needs to act on.
+                    defaultDirection: 'desc',
+                    sort: (part) => part.missing,
+                    cell: (part) =>
+                      part.missing ? (
+                        <Badge tone="critical" dot>
+                          Missing
+                        </Badge>
+                      ) : (
+                        <Badge tone="ok" dot>
+                          Online
+                        </Badge>
+                      ),
+                  },
+                ]}
+              />
             </Card>
           );
         })}

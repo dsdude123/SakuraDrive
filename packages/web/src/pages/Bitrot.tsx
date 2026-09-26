@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { formatBytes, formatRelative, type BitrotFinding, type BitrotStatus } from '@sakuradrive/shared';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
-import { Badge, Banner, Card, EmptyState, Loading, Modal, Table } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading, Modal } from '../components/ui.js';
 import { useMutation, useQuery } from '../hooks/useApi.js';
 import { useToast } from '../hooks/useToast.js';
 
@@ -10,6 +11,9 @@ interface BitrotResponse {
   total: number;
   counts: { open: number; confirmed: number; dismissed: number; resolved: number };
 }
+
+/** Worst first: confirmed rot, then open, then the ones somebody has already judged. */
+const STATUS_ORDER: Record<string, number> = { confirmed: 0, open: 1, resolved: 2, dismissed: 3 };
 
 export function BitrotPage(): JSX.Element {
   const [status, setStatus] = useState<'active' | BitrotStatus | 'any'>('active');
@@ -136,71 +140,111 @@ export function BitrotPage(): JSX.Element {
             </EmptyState>
           )}
           {data && data.findings.length > 0 && (
-            <Table
-              headers={[
-                <input
-                  key="all"
-                  type="checkbox"
-                  aria-label="Select all"
-                  checked={selected.size === data.findings.length}
-                  onChange={(event) =>
-                    setSelected(event.target.checked ? new Set(data.findings.map((f) => f.id)) : new Set())
-                  }
-                />,
-                'Path',
-                '#Size',
-                'Expected',
-                'Found',
-                'Detected',
-                'Status',
-                '',
-              ]}
-            >
-              {data.findings.map((finding) => (
-                <tr key={finding.id}>
-                  <td>
+            <DataTable
+              rows={data.findings}
+              rowKey={(finding) => finding.id}
+              initialSort={{ key: 'detected', direction: 'desc' }}
+              columns={[
+                {
+                  key: 'select',
+                  controls: true,
+                  header: (
+                    <input
+                      type="checkbox"
+                      aria-label="Select all"
+                      checked={selected.size === data.findings.length}
+                      onChange={(event) =>
+                        setSelected(
+                          event.target.checked ? new Set(data.findings.map((f) => f.id)) : new Set(),
+                        )
+                      }
+                    />
+                  ),
+                  cell: (finding) => (
                     <input
                       type="checkbox"
                       aria-label={`Select ${finding.relPath}`}
                       checked={selected.has(finding.id)}
                       onChange={() => toggle(finding.id)}
                     />
-                  </td>
-                  <td className="path" title={finding.relPath}>
-                    {finding.relPath}
-                    <div className="faint" style={{ fontSize: 11 }}>
-                      {finding.rootId}
-                      {finding.previousHashedAt &&
-                        ` · last verified ${formatRelative(finding.previousHashedAt)}`}
-                    </div>
-                  </td>
-                  <td className="num">{formatBytes(finding.sizeBytes)}</td>
-                  <td className="mono faint">{finding.expectedHash.slice(0, 12)}</td>
-                  <td className="mono" style={{ color: 'var(--critical)' }}>
-                    {finding.actualHash.slice(0, 12)}
-                  </td>
-                  <td className="nowrap muted">{formatRelative(finding.detectedAt)}</td>
-                  <td>
-                    <Badge
-                      tone={
-                        finding.status === 'confirmed'
-                          ? 'critical'
-                          : finding.status === 'open'
-                            ? 'warning'
-                            : finding.status === 'resolved'
-                              ? 'ok'
-                              : 'neutral'
-                      }
-                    >
-                      {finding.status}
-                    </Badge>
-                    {finding.note && (
+                  ),
+                },
+                {
+                  key: 'path',
+                  header: 'Path',
+                  className: 'path',
+                  sort: (finding) => finding.relPath,
+                  cell: (finding) => (
+                    <span title={finding.relPath}>
+                      {finding.relPath}
                       <div className="faint" style={{ fontSize: 11 }}>
-                        {finding.note}
+                        {finding.rootId}
+                        {finding.previousHashedAt &&
+                          ` · last verified ${formatRelative(finding.previousHashedAt)}`}
                       </div>
-                    )}
-                  </td>
-                  <td>
+                    </span>
+                  ),
+                },
+                {
+                  key: 'size',
+                  header: 'Size',
+                  numeric: true,
+                  sort: (finding) => finding.sizeBytes,
+                  cell: (finding) => formatBytes(finding.sizeBytes),
+                },
+                {
+                  key: 'expected',
+                  header: 'Expected',
+                  className: 'mono faint',
+                  cell: (finding) => finding.expectedHash.slice(0, 12),
+                },
+                {
+                  key: 'found',
+                  header: 'Found',
+                  className: 'mono',
+                  cell: (finding) => (
+                    <span style={{ color: 'var(--critical)' }}>{finding.actualHash.slice(0, 12)}</span>
+                  ),
+                },
+                {
+                  key: 'detected',
+                  header: 'Detected',
+                  className: 'nowrap muted',
+                  sort: (finding) => sortTime(finding.detectedAt),
+                  cell: (finding) => formatRelative(finding.detectedAt),
+                },
+                {
+                  key: 'status',
+                  header: 'Status',
+                  sort: (finding) => STATUS_ORDER[finding.status] ?? 99,
+                  cell: (finding) => (
+                    <>
+                      <Badge
+                        tone={
+                          finding.status === 'confirmed'
+                            ? 'critical'
+                            : finding.status === 'open'
+                              ? 'warning'
+                              : finding.status === 'resolved'
+                                ? 'ok'
+                                : 'neutral'
+                        }
+                      >
+                        {finding.status}
+                      </Badge>
+                      {finding.note && (
+                        <div className="faint" style={{ fontSize: 11 }}>
+                          {finding.note}
+                        </div>
+                      )}
+                    </>
+                  ),
+                },
+                {
+                  key: 'actions',
+                  header: '',
+                  controls: true,
+                  cell: (finding) => (
                     <div className="button-row">
                       {finding.status !== 'resolved' && (
                         <button
@@ -224,10 +268,10 @@ export function BitrotPage(): JSX.Element {
                         </button>
                       )}
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </Table>
+                  ),
+                },
+              ]}
+            />
           )}
         </Card>
       </div>

@@ -1,7 +1,8 @@
 import { formatBytes, formatCount, formatDurationMs, formatRelative } from '@sakuradrive/shared';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
 import { ProgressBar } from '../components/ProgressBar.js';
-import { Badge, Banner, Card, EmptyState, Loading, Table } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading } from '../components/ui.js';
 import { useMutation, useQuery } from '../hooks/useApi.js';
 import { useToast } from '../hooks/useToast.js';
 
@@ -185,25 +186,47 @@ export function AgentJobsPage(): JSX.Element {
 
         {queued.length > 0 && (
           <Card flush title="Waiting for an agent">
-            <Table headers={['Root', 'Work', 'Queued', '']}>
-              {queued.map((job) => (
-                <tr key={job.id}>
-                  <td>
-                    <strong>{job.rootName}</strong>
-                    <div className="faint mono" style={{ fontSize: 12 }}>
-                      {job.hostPath}
+            <DataTable
+              rows={queued}
+              rowKey={(job) => job.id}
+              initialSort={{ key: 'queued' }}
+              columns={[
+                {
+                  key: 'root',
+                  header: 'Root',
+                  sort: (job) => job.rootName,
+                  cell: (job) => (
+                    <>
+                      <strong>{job.rootName}</strong>
+                      <div className="faint mono" style={{ fontSize: 12 }}>
+                        {job.hostPath}
+                      </div>
+                    </>
+                  ),
+                },
+                { key: 'work', header: 'Work', sort: (job) => TYPE_LABEL[job.type] },
+                {
+                  key: 'queued',
+                  header: 'Queued',
+                  // Longest wait first: the job that looks stuck.
+                  numeric: true,
+                  sort: (job) => job.queuedForMs ?? 0,
+                  cell: (job) => formatDurationMs(job.queuedForMs ?? 0),
+                },
+                {
+                  key: 'actions',
+                  header: '',
+                  controls: true,
+                  cell: (job) => (
+                    <div style={{ textAlign: 'right' }}>
+                      <button className="small" disabled={mutation.busy} onClick={() => void cancel(job)}>
+                        Cancel
+                      </button>
                     </div>
-                  </td>
-                  <td>{TYPE_LABEL[job.type]}</td>
-                  <td>{formatDurationMs(job.queuedForMs ?? 0)}</td>
-                  <td style={{ textAlign: 'right' }}>
-                    <button className="small" disabled={mutation.busy} onClick={() => void cancel(job)}>
-                      Cancel
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </Table>
+                  ),
+                },
+              ]}
+            />
           </Card>
         )}
 
@@ -211,26 +234,57 @@ export function AgentJobsPage(): JSX.Element {
           {(data?.recent.length ?? 0) === 0 ? (
             <EmptyState title="No finished jobs yet" />
           ) : (
-            <Table headers={['Root', 'Work', 'Outcome', '#Files', '#Size', 'Took', 'Finished']}>
-              {(data?.recent ?? []).map((job) => (
-                <tr key={job.id}>
-                  <td>{job.rootName}</td>
-                  <td>{TYPE_LABEL[job.type]}</td>
-                  <td>
-                    <StateBadge job={job} />
-                    {job.error && (
-                      <div className="faint" style={{ fontSize: 12 }}>
-                        {job.error}
-                      </div>
-                    )}
-                  </td>
-                  <td className="num">{formatCount(job.filesSeen)}</td>
-                  <td className="num">{job.bytesSeen > 0 ? formatBytes(job.bytesSeen) : '—'}</td>
-                  <td className="num">{formatDurationMs(job.elapsedMs)}</td>
-                  <td>{job.finishedAt ? formatRelative(job.finishedAt) : '—'}</td>
-                </tr>
-              ))}
-            </Table>
+            <DataTable
+              rows={data?.recent ?? []}
+              rowKey={(job) => job.id}
+              initialSort={{ key: 'finished', direction: 'desc' }}
+              columns={[
+                { key: 'root', header: 'Root', sort: (job) => job.rootName },
+                { key: 'work', header: 'Work', sort: (job) => TYPE_LABEL[job.type] },
+                {
+                  key: 'outcome',
+                  header: 'Outcome',
+                  sort: (job) => job.state,
+                  cell: (job) => (
+                    <>
+                      <StateBadge job={job} />
+                      {job.error && (
+                        <div className="faint" style={{ fontSize: 12 }}>
+                          {job.error}
+                        </div>
+                      )}
+                    </>
+                  ),
+                },
+                {
+                  key: 'files',
+                  header: 'Files',
+                  numeric: true,
+                  sort: (job) => job.filesSeen,
+                  cell: (job) => formatCount(job.filesSeen),
+                },
+                {
+                  key: 'size',
+                  header: 'Size',
+                  numeric: true,
+                  sort: (job) => (job.bytesSeen > 0 ? job.bytesSeen : null),
+                  cell: (job) => (job.bytesSeen > 0 ? formatBytes(job.bytesSeen) : '—'),
+                },
+                {
+                  key: 'took',
+                  header: 'Took',
+                  numeric: true,
+                  sort: (job) => job.elapsedMs,
+                  cell: (job) => formatDurationMs(job.elapsedMs),
+                },
+                {
+                  key: 'finished',
+                  header: 'Finished',
+                  sort: (job) => sortTime(job.finishedAt),
+                  cell: (job) => (job.finishedAt ? formatRelative(job.finishedAt) : '—'),
+                },
+              ]}
+            />
           )}
         </Card>
       </div>

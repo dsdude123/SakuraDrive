@@ -6,8 +6,9 @@ import {
   type BackupIssue,
   type BackupVerificationSummary,
 } from '@sakuradrive/shared';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
-import { Badge, Banner, Card, EmptyState, Loading, Table } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading } from '../components/ui.js';
 import { useMutation, useQuery } from '../hooks/useApi.js';
 import { useToast } from '../hooks/useToast.js';
 
@@ -114,39 +115,71 @@ export function BackupPage(): JSX.Element {
             </EmptyState>
           )}
           {(coverage.data?.roots.length ?? 0) > 0 && (
-            <Table headers={['Root', 'Rules', '#Covered', '#Not covered', 'Left out']}>
-              {(coverage.data?.roots ?? []).map((root) => (
-                <tr key={root.rootId}>
-                  <td>
-                    <strong>{root.rootName}</strong>
-                  </td>
-                  <td>
-                    {root.expectations.length > 0 ? (
+            <DataTable
+              rows={coverage.data?.roots ?? []}
+              rowKey={(root) => root.rootId}
+              // Biggest gap first: the whole question this table answers.
+              initialSort={{ key: 'uncovered' }}
+              columns={[
+                {
+                  key: 'root',
+                  header: 'Root',
+                  sort: (root) => root.rootName,
+                  cell: (root) => <strong>{root.rootName}</strong>,
+                },
+                {
+                  key: 'rules',
+                  header: 'Rules',
+                  sort: (root) => root.expectations.length,
+                  cell: (root) =>
+                    root.expectations.length > 0 ? (
                       root.expectations.join(', ')
                     ) : (
                       <Badge tone="warning">none</Badge>
-                    )}
-                  </td>
-                  <td className="num">
-                    {formatBytes(root.coveredBytes)}
-                    <div className="hint">{formatCount(root.coveredFiles)} files</div>
-                  </td>
-                  <td className="num">
-                    {formatBytes(root.uncoveredBytes)}
-                    <div className="hint">{formatCount(root.uncoveredFiles)} files</div>
-                  </td>
-                  <td>
-                    {root.uncoveredFolders.length === 0
-                      ? '—'
-                      : root.uncoveredFolders
-                          .slice(0, 6)
-                          .map((folder) => `${folder.name} (${formatBytes(folder.bytes)})`)
-                          .join(', ')}
-                    {root.uncoveredFolders.length > 6 && ` and ${root.uncoveredFolders.length - 6} more`}
-                  </td>
-                </tr>
-              ))}
-            </Table>
+                    ),
+                },
+                {
+                  key: 'covered',
+                  header: 'Covered',
+                  numeric: true,
+                  sort: (root) => root.coveredBytes,
+                  cell: (root) => (
+                    <>
+                      {formatBytes(root.coveredBytes)}
+                      <div className="hint">{formatCount(root.coveredFiles)} files</div>
+                    </>
+                  ),
+                },
+                {
+                  key: 'uncovered',
+                  header: 'Not covered',
+                  numeric: true,
+                  sort: (root) => root.uncoveredBytes,
+                  cell: (root) => (
+                    <>
+                      {formatBytes(root.uncoveredBytes)}
+                      <div className="hint">{formatCount(root.uncoveredFiles)} files</div>
+                    </>
+                  ),
+                },
+                {
+                  key: 'leftOut',
+                  header: 'Left out',
+                  cell: (root) => (
+                    <>
+                      {root.uncoveredFolders.length === 0
+                        ? '—'
+                        : root.uncoveredFolders
+                            .slice(0, 6)
+                            .map((folder) => `${folder.name} (${formatBytes(folder.bytes)})`)
+                            .join(', ')}
+                      {root.uncoveredFolders.length > 6 &&
+                        ` and ${root.uncoveredFolders.length - 6} more`}
+                    </>
+                  ),
+                },
+              ]}
+            />
           )}
         </Card>
 
@@ -158,29 +191,77 @@ export function BackupPage(): JSX.Element {
             </EmptyState>
           )}
           {(runs.data?.runs.length ?? 0) > 0 && (
-            <Table
-              headers={['Expectation', 'Snapshot', '#Expected', '#Present', '#Missing', '#Stale', 'Started', 'Result']}
-            >
-              {runs.data!.runs.map((run) => (
-                <tr key={run.runId}>
-                  <td>
-                    <strong>{run.expectationName}</strong>
-                  </td>
-                  <td className="mono faint" title={run.snapshotId ?? ''}>
-                    {run.snapshotId ? run.snapshotId.slice(0, 16) : '—'}
-                    {run.snapshotTime && (
-                      <div style={{ fontSize: 11 }}>{formatRelative(run.snapshotTime)}</div>
-                    )}
-                  </td>
-                  <td className="num">{formatCount(run.expectedFiles)}</td>
-                  <td className="num">{formatCount(run.presentFiles)}</td>
-                  <td className="num" style={run.missingFiles > 0 ? { color: 'var(--critical)' } : undefined}>
-                    {formatCount(run.missingFiles)}
-                  </td>
-                  <td className="num">{formatCount(run.staleFiles)}</td>
-                  <td className="nowrap muted">{formatRelative(run.startedAt)}</td>
-                  <td>
-                    {run.error ? (
+            <DataTable
+              rows={runs.data!.runs}
+              rowKey={(run) => run.runId}
+              initialSort={{ key: 'started', direction: 'desc' }}
+              columns={[
+                {
+                  key: 'expectation',
+                  header: 'Expectation',
+                  sort: (run) => run.expectationName,
+                  cell: (run) => <strong>{run.expectationName}</strong>,
+                },
+                {
+                  key: 'snapshot',
+                  header: 'Snapshot',
+                  className: 'mono faint',
+                  sort: (run) => sortTime(run.snapshotTime),
+                  cell: (run) => (
+                    <span title={run.snapshotId ?? ''}>
+                      {run.snapshotId ? run.snapshotId.slice(0, 16) : '—'}
+                      {run.snapshotTime && (
+                        <div style={{ fontSize: 11 }}>{formatRelative(run.snapshotTime)}</div>
+                      )}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'expected',
+                  header: 'Expected',
+                  numeric: true,
+                  sort: (run) => run.expectedFiles,
+                  cell: (run) => formatCount(run.expectedFiles),
+                },
+                {
+                  key: 'present',
+                  header: 'Present',
+                  numeric: true,
+                  sort: (run) => run.presentFiles,
+                  cell: (run) => formatCount(run.presentFiles),
+                },
+                {
+                  key: 'missing',
+                  header: 'Missing',
+                  numeric: true,
+                  sort: (run) => run.missingFiles,
+                  cell: (run) => (
+                    <span style={run.missingFiles > 0 ? { color: 'var(--critical)' } : undefined}>
+                      {formatCount(run.missingFiles)}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'stale',
+                  header: 'Stale',
+                  numeric: true,
+                  sort: (run) => run.staleFiles,
+                  cell: (run) => formatCount(run.staleFiles),
+                },
+                {
+                  key: 'started',
+                  header: 'Started',
+                  className: 'nowrap muted',
+                  sort: (run) => sortTime(run.startedAt),
+                  cell: (run) => formatRelative(run.startedAt),
+                },
+                {
+                  key: 'result',
+                  header: 'Result',
+                  // Failures first, then runs that found gaps, then the clean ones.
+                  sort: (run) => (run.error ? 0 : run.missingFiles > 0 ? 1 : 2),
+                  cell: (run) =>
+                    run.error ? (
                       <Badge tone="critical" dot>
                         {run.error.slice(0, 60)}
                       </Badge>
@@ -188,11 +269,10 @@ export function BackupPage(): JSX.Element {
                       <Badge tone="critical">gaps found</Badge>
                     ) : (
                       <Badge tone="ok">complete</Badge>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </Table>
+                    ),
+                },
+              ]}
+            />
           )}
         </Card>
 
@@ -222,26 +302,60 @@ export function BackupPage(): JSX.Element {
           )}
           {(issues.data?.issues.length ?? 0) > 0 && (
             <>
-              <Table headers={['Problem', 'Path', '#Size', '#In backup', 'Detected', '']}>
-                {issues.data!.issues.map((issue) => (
-                  <tr key={issue.id}>
-                    <td>
+              <DataTable
+                rows={issues.data!.issues}
+                rowKey={(issue) => issue.id}
+                initialSort={{ key: 'size' }}
+                columns={[
+                  {
+                    key: 'kind',
+                    header: 'Problem',
+                    sort: (issue) => (issue.kind === 'missing' ? 0 : 1),
+                    cell: (issue) => (
                       <Badge tone={issue.kind === 'missing' ? 'critical' : 'warning'}>{issue.kind}</Badge>
-                    </td>
-                    <td className="path" title={issue.relPath}>
-                      {issue.relPath}
-                    </td>
-                    <td className="num">{formatBytes(issue.sizeBytes)}</td>
-                    <td className="num faint">{formatBytes(issue.backupSizeBytes)}</td>
-                    <td className="nowrap muted">{formatRelative(issue.detectedAt)}</td>
-                    <td>
+                    ),
+                  },
+                  {
+                    key: 'path',
+                    header: 'Path',
+                    className: 'path',
+                    sort: (issue) => issue.relPath,
+                    cell: (issue) => <span title={issue.relPath}>{issue.relPath}</span>,
+                  },
+                  {
+                    key: 'size',
+                    header: 'Size',
+                    numeric: true,
+                    sort: (issue) => issue.sizeBytes,
+                    cell: (issue) => formatBytes(issue.sizeBytes),
+                  },
+                  {
+                    key: 'backupSize',
+                    header: 'In backup',
+                    numeric: true,
+                    className: 'faint',
+                    sort: (issue) => issue.backupSizeBytes,
+                    cell: (issue) => formatBytes(issue.backupSizeBytes),
+                  },
+                  {
+                    key: 'detected',
+                    header: 'Detected',
+                    className: 'nowrap muted',
+                    sort: (issue) => sortTime(issue.detectedAt),
+                    cell: (issue) => formatRelative(issue.detectedAt),
+                  },
+                  {
+                    key: 'actions',
+                    header: '',
+                    controls: true,
+                    cell: (issue) => (
                       <button className="small ghost" onClick={() => void dismiss(issue)}>
                         Dismiss
                       </button>
-                    </td>
-                  </tr>
-                ))}
-              </Table>
+                    ),
+                  },
+                ]}
+              />
               {issues.data!.total > issues.data!.issues.length && (
                 <div className="faint" style={{ padding: '10px 16px', fontSize: 12 }}>
                   Showing {issues.data!.issues.length} of {formatCount(issues.data!.total)}.

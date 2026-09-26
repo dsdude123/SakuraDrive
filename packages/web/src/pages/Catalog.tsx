@@ -8,8 +8,9 @@ import {
   type DirectoryEntry,
   type ScanRoot,
 } from '@sakuradrive/shared';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
-import { Badge, Card, EmptyState, Loading, Table } from '../components/ui.js';
+import { Badge, Card, EmptyState, Loading } from '../components/ui.js';
 import { useQuery } from '../hooks/useApi.js';
 
 interface RootWithStats extends ScanRoot {
@@ -37,6 +38,9 @@ interface CatalogRun {
 }
 
 type Tab = 'browse' | 'changes' | 'search';
+
+/** Deletions first, then restores, then edits, then plain new files. */
+const CHANGE_ORDER: Record<string, number> = { deleted: 0, restored: 1, modified: 2, created: 3 };
 
 export function CatalogPage(): JSX.Element {
   const roots = useQuery<{ roots: RootWithStats[] }>('/api/catalog/roots', { pollMs: 30_000 });
@@ -124,35 +128,62 @@ function BrowseTab({ rootId }: { rootId: string }): JSX.Element {
       {loading && !data && <Loading />}
       {data && data.entries.length === 0 && <EmptyState title="This directory is empty" />}
       {data && data.entries.length > 0 && (
-        <Table headers={['Name', '#Size', '#On pool', '#Files', 'Duplication', 'Modified']}>
-          {data.entries.map((entry) => (
-            <tr
-              key={entry.relPath}
-              className={entry.kind === 'directory' ? 'clickable' : undefined}
-              onClick={() => entry.kind === 'directory' && setPath(entry.relPath)}
-            >
-              <td className="path">
-                {entry.kind === 'directory' ? '📁 ' : '📄 '}
-                {entry.name}
-              </td>
-              <td className="num">{formatBytes(entry.sizeBytes)}</td>
-              <td className="num">{formatBytes(entry.effectiveBytes)}</td>
-              <td className="num">{formatCount(entry.fileCount)}</td>
-              <td>
-                {entry.duplicationLevel && entry.duplicationLevel > 1 ? (
+        <DataTable
+          rows={data.entries}
+          rowKey={(entry) => entry.relPath}
+          rowProps={(entry) => ({ className: entry.kind === 'directory' ? 'clickable' : undefined })}
+          onRowClick={(entry) => entry.kind === 'directory' && setPath(entry.relPath)}
+          columns={[
+            {
+              key: 'name',
+              header: 'Name',
+              className: 'path',
+              sort: (entry) => entry.name,
+              cell: (entry) => `${entry.kind === 'directory' ? '📁 ' : '📄 '}${entry.name}`,
+            },
+            {
+              key: 'size',
+              header: 'Size',
+              numeric: true,
+              sort: (entry) => entry.sizeBytes,
+              cell: (entry) => formatBytes(entry.sizeBytes),
+            },
+            {
+              key: 'effective',
+              header: 'On pool',
+              numeric: true,
+              sort: (entry) => entry.effectiveBytes,
+              cell: (entry) => formatBytes(entry.effectiveBytes),
+            },
+            {
+              key: 'files',
+              header: 'Files',
+              numeric: true,
+              sort: (entry) => entry.fileCount,
+              cell: (entry) => formatCount(entry.fileCount),
+            },
+            {
+              key: 'duplication',
+              header: 'Duplication',
+              sort: (entry) => entry.duplicationLevel,
+              cell: (entry) =>
+                entry.duplicationLevel && entry.duplicationLevel > 1 ? (
                   <Badge tone="accent">{entry.duplicationLevel}×</Badge>
                 ) : entry.kind === 'file' ? (
                   <span className="faint">1×</span>
                 ) : (
                   ''
-                )}
-              </td>
-              <td className="nowrap muted">
-                {entry.mtimeMs ? formatRelative(new Date(entry.mtimeMs)) : ''}
-              </td>
-            </tr>
-          ))}
-        </Table>
+                ),
+            },
+            {
+              key: 'modified',
+              header: 'Modified',
+              className: 'nowrap muted',
+              sort: (entry) => entry.mtimeMs,
+              cell: (entry) => (entry.mtimeMs ? formatRelative(new Date(entry.mtimeMs)) : ''),
+            },
+          ]}
+        />
       )}
     </div>
   );
@@ -241,10 +272,17 @@ function ChangesTab({ rootId }: { rootId: string }): JSX.Element {
       )}
       {changes.data && changes.data.changes.length > 0 && (
         <>
-          <Table headers={['Change', 'Path', '#Size', '#Was', 'Detected']}>
-            {changes.data.changes.map((change) => (
-              <tr key={change.id}>
-                <td>
+          <DataTable
+            rows={changes.data.changes}
+            rowKey={(change) => change.id}
+            columns={[
+              {
+                key: 'kind',
+                header: 'Change',
+                // Deletions first: on a page about what a scan changed, they are the
+                // ones that might mean a disk rather than an edit.
+                sort: (change) => CHANGE_ORDER[change.kind] ?? 99,
+                cell: (change) => (
                   <Badge
                     tone={
                       change.kind === 'deleted'
@@ -258,16 +296,39 @@ function ChangesTab({ rootId }: { rootId: string }): JSX.Element {
                   >
                     {change.kind}
                   </Badge>
-                </td>
-                <td className="path" title={change.relPath}>
-                  {change.relPath}
-                </td>
-                <td className="num">{formatBytes(change.sizeBytes)}</td>
-                <td className="num faint">{formatBytes(change.previousSizeBytes)}</td>
-                <td className="nowrap muted">{formatRelative(change.detectedAt)}</td>
-              </tr>
-            ))}
-          </Table>
+                ),
+              },
+              {
+                key: 'path',
+                header: 'Path',
+                className: 'path',
+                sort: (change) => change.relPath,
+                cell: (change) => <span title={change.relPath}>{change.relPath}</span>,
+              },
+              {
+                key: 'size',
+                header: 'Size',
+                numeric: true,
+                sort: (change) => change.sizeBytes,
+                cell: (change) => formatBytes(change.sizeBytes),
+              },
+              {
+                key: 'was',
+                header: 'Was',
+                numeric: true,
+                className: 'faint',
+                sort: (change) => change.previousSizeBytes,
+                cell: (change) => formatBytes(change.previousSizeBytes),
+              },
+              {
+                key: 'detected',
+                header: 'Detected',
+                className: 'nowrap muted',
+                sort: (change) => sortTime(change.detectedAt),
+                cell: (change) => formatRelative(change.detectedAt),
+              },
+            ]}
+          />
           {changes.data.total > changes.data.changes.length && (
             <div className="faint" style={{ fontSize: 12 }}>
               Showing {changes.data.changes.length} of {formatCount(changes.data.total)} changes —
@@ -337,25 +398,52 @@ function SearchTab({ rootId }: { rootId: string }): JSX.Element {
       {data && data.files.length === 0 && <EmptyState title="No matching files" />}
       {data && data.files.length > 0 && (
         <>
-          <Table headers={['Path', '#Size', '#On pool', 'Hash', 'Status']}>
-            {data.files.map((file) => (
-              <tr key={`${file.rootId}:${file.relPath}`}>
-                <td className="path" title={file.relPath}>
-                  {file.relPath}
-                </td>
-                <td className="num">{formatBytes(file.sizeBytes)}</td>
-                <td className="num">{formatBytes(file.effectiveBytes)}</td>
-                <td className="mono faint">{file.hash ? file.hash.slice(0, 12) : '—'}</td>
-                <td>
-                  {file.deletedAt ? (
+          <DataTable
+            rows={data.files}
+            rowKey={(file) => `${file.rootId}:${file.relPath}`}
+            initialSort={{ key: 'size' }}
+            columns={[
+              {
+                key: 'path',
+                header: 'Path',
+                className: 'path',
+                sort: (file) => file.relPath,
+                cell: (file) => <span title={file.relPath}>{file.relPath}</span>,
+              },
+              {
+                key: 'size',
+                header: 'Size',
+                numeric: true,
+                sort: (file) => file.sizeBytes,
+                cell: (file) => formatBytes(file.sizeBytes),
+              },
+              {
+                key: 'effective',
+                header: 'On pool',
+                numeric: true,
+                sort: (file) => file.effectiveBytes,
+                cell: (file) => formatBytes(file.effectiveBytes),
+              },
+              {
+                key: 'hash',
+                header: 'Hash',
+                className: 'mono faint',
+                sort: (file) => file.hash,
+                cell: (file) => (file.hash ? file.hash.slice(0, 12) : '—'),
+              },
+              {
+                key: 'status',
+                header: 'Status',
+                sort: (file) => sortTime(file.deletedAt) ?? Number.POSITIVE_INFINITY,
+                cell: (file) =>
+                  file.deletedAt ? (
                     <Badge tone="critical">deleted {formatRelative(file.deletedAt)}</Badge>
                   ) : (
                     <Badge tone="ok">present</Badge>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </Table>
+                  ),
+              },
+            ]}
+          />
           <div className="faint" style={{ fontSize: 12 }}>
             {formatCount(data.total)} match{data.total === 1 ? '' : 'es'}
           </div>

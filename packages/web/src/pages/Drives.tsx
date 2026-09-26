@@ -2,6 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import {
   attributeRaw,
   DEFAULT_ATTRIBUTE_RULES,
+  SEVERITY_ORDER,
   formatBytes,
   formatCount,
   formatRelative,
@@ -9,6 +10,7 @@ import {
   type SmartReport,
   type VolumeSummary,
 } from '@sakuradrive/shared';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
 import { Sparkline } from '../components/Sparkline.js';
 import { Badge, Banner, Card, EmptyState, Loading, SeverityBadge, Table } from '../components/ui.js';
@@ -46,46 +48,104 @@ export function DrivesPage(): JSX.Element {
 
         {(drives.data?.drives.length ?? 0) > 0 && (
           <Card flush title="Physical disks">
-            <Table
-              headers={['Label', 'Model', 'Serial', '#Size', '#Temp', '#Power on', 'Pool', 'Health', 'Last seen']}
-            >
-              {drives.data!.drives.map((drive) => (
-                <tr key={drive.id}>
-                  <td>
-                    <Link to={`/drives/${drive.id}`}>
-                      <strong>{drive.labels.join(', ') || drive.deviceId || '—'}</strong>
-                    </Link>
-                    {drive.driveLetters.length > 0 && (
+            <DataTable
+              rows={drives.data!.drives}
+              rowKey={(drive) => drive.id}
+              initialSort={{ key: 'label' }}
+              columns={[
+                {
+                  key: 'label',
+                  header: 'Label',
+                  sort: (drive) => drive.labels.join(', ') || drive.deviceId,
+                  cell: (drive) => (
+                    <>
+                      <Link to={`/drives/${drive.id}`}>
+                        <strong>{drive.labels.join(', ') || drive.deviceId || '—'}</strong>
+                      </Link>
+                      {drive.driveLetters.length > 0 && (
+                        <div className="faint" style={{ fontSize: 12 }}>
+                          {drive.driveLetters.map((letter) => `${letter}:`).join(' ')}
+                        </div>
+                      )}
+                    </>
+                  ),
+                },
+                {
+                  key: 'model',
+                  header: 'Model',
+                  sort: (drive) => drive.model,
+                  cell: (drive) => (
+                    <>
+                      {drive.model ?? '—'}
                       <div className="faint" style={{ fontSize: 12 }}>
-                        {drive.driveLetters.map((letter) => `${letter}:`).join(' ')}
+                        {[drive.mediaType, drive.busType].filter(Boolean).join(' · ')}
                       </div>
-                    )}
-                  </td>
-                  <td>
-                    {drive.model ?? '—'}
-                    <div className="faint" style={{ fontSize: 12 }}>
-                      {[drive.mediaType, drive.busType].filter(Boolean).join(' · ')}
-                    </div>
-                  </td>
-                  <td className="mono">{drive.serialNumber ?? '—'}</td>
-                  <td className="num">{formatBytes(drive.sizeBytes)}</td>
-                  <td className="num">{drive.temperatureC !== null ? `${drive.temperatureC}°C` : '—'}</td>
-                  <td className="num">
-                    {drive.powerOnHours !== null ? `${formatCount(Math.round(drive.powerOnHours))} h` : '—'}
-                  </td>
-                  <td>{drive.poolNames.join(', ') || <span className="faint">—</span>}</td>
-                  <td>
-                    <SeverityBadge severity={drive.severity} />
-                    {drive.overallHealthPassed === false && (
-                      <div style={{ marginTop: 4 }}>
-                        <Badge tone="critical">SMART FAILED</Badge>
-                      </div>
-                    )}
-                  </td>
-                  <td className="nowrap muted">{formatRelative(drive.lastSeenAt)}</td>
-                </tr>
-              ))}
-            </Table>
+                    </>
+                  ),
+                },
+                { key: 'serial', header: 'Serial', className: 'mono', sort: (drive) => drive.serialNumber },
+                {
+                  key: 'size',
+                  header: 'Size',
+                  numeric: true,
+                  sort: (drive) => drive.sizeBytes,
+                  cell: (drive) => formatBytes(drive.sizeBytes),
+                },
+                {
+                  key: 'temp',
+                  header: 'Temp',
+                  numeric: true,
+                  sort: (drive) => drive.temperatureC,
+                  cell: (drive) => (drive.temperatureC !== null ? `${drive.temperatureC}°C` : '—'),
+                },
+                {
+                  key: 'power',
+                  header: 'Power on',
+                  numeric: true,
+                  sort: (drive) => drive.powerOnHours,
+                  cell: (drive) =>
+                    drive.powerOnHours !== null
+                      ? `${formatCount(Math.round(drive.powerOnHours))} h`
+                      : '—',
+                },
+                {
+                  key: 'pool',
+                  header: 'Pool',
+                  sort: (drive) => drive.poolNames.join(', '),
+                  cell: (drive) => drive.poolNames.join(', ') || <span className="faint">—</span>,
+                },
+                {
+                  key: 'health',
+                  header: 'Health',
+                  // Worst first, and a failed SMART self-assessment outranks every
+                  // severity: alphabetical order would bury `critical` under `info`.
+                  defaultDirection: 'desc',
+                  sort: (drive) =>
+                    drive.overallHealthPassed === false
+                      ? 99
+                      : drive.severity
+                        ? SEVERITY_ORDER[drive.severity] + 1
+                        : 0,
+                  cell: (drive) => (
+                    <>
+                      <SeverityBadge severity={drive.severity} />
+                      {drive.overallHealthPassed === false && (
+                        <div style={{ marginTop: 4 }}>
+                          <Badge tone="critical">SMART FAILED</Badge>
+                        </div>
+                      )}
+                    </>
+                  ),
+                },
+                {
+                  key: 'lastSeen',
+                  header: 'Last seen',
+                  sort: (drive) => sortTime(drive.lastSeenAt),
+                  className: 'nowrap muted',
+                  cell: (drive) => formatRelative(drive.lastSeenAt),
+                },
+              ]}
+            />
           </Card>
         )}
 
@@ -171,30 +231,32 @@ function VolumesCard({
         );
       })}
     >
-      <Table
-        headers={[
-          'Label',
-          'Letter',
-          'Filesystem',
-          '#Size',
-          '#Free',
-          'Health',
-          'chkdsk',
-          'Low space alert',
-        ]}
-      >
-        {volumes.map((volume) => (
-          <tr key={volume.id}>
-            <td>
-              <strong>{volume.label ?? volume.volumeId}</strong>
-              {volume.poolName && (
-                <div className="faint" style={{ fontSize: 12 }}>
-                  in {volume.poolName}
-                </div>
-              )}
-            </td>
-            <td>
-              {volume.driveLetter ? (
+      <DataTable
+        rows={volumes}
+        rowKey={(volume) => volume.id}
+        initialSort={{ key: 'label' }}
+        columns={[
+          {
+            key: 'label',
+            header: 'Label',
+            sort: (volume) => volume.label ?? volume.volumeId,
+            cell: (volume) => (
+              <>
+                <strong>{volume.label ?? volume.volumeId}</strong>
+                {volume.poolName && (
+                  <div className="faint" style={{ fontSize: 12 }}>
+                    in {volume.poolName}
+                  </div>
+                )}
+              </>
+            ),
+          },
+          {
+            key: 'letter',
+            header: 'Letter',
+            sort: (volume) => volume.driveLetter ?? volume.mountPoints[0],
+            cell: (volume) =>
+              volume.driveLetter ? (
                 `${volume.driveLetter}:`
               ) : volume.mountPoints.length > 0 ? (
                 <span className="mono" style={{ fontSize: 12 }} title={volume.mountPoints.join(', ')}>
@@ -204,31 +266,73 @@ function VolumesCard({
                 <span className="faint" title="No drive letter and no folder mount point — the container cannot reach this volume">
                   not mounted
                 </span>
-              )}
-            </td>
-            <td>{volume.fileSystem ?? '—'}</td>
-            <td className="num">{formatBytes(volume.sizeBytes)}</td>
-            <td
-              className="num"
-              style={
-                volume.lowSpace && volume.lowSpaceAlerts ? { color: 'var(--warning)' } : undefined
-              }
-            >
-              {formatBytes(volume.freeBytes)}
-            </td>
-            <td>
+              ),
+          },
+          { key: 'fs', header: 'Filesystem', sort: (volume) => volume.fileSystem },
+          {
+            key: 'size',
+            header: 'Size',
+            numeric: true,
+            sort: (volume) => volume.sizeBytes,
+            cell: (volume) => formatBytes(volume.sizeBytes),
+          },
+          {
+            key: 'free',
+            header: 'Free',
+            numeric: true,
+            sort: (volume) => volume.freeBytes,
+            cell: (volume) => (
+              <span
+                style={
+                  volume.lowSpace && volume.lowSpaceAlerts ? { color: 'var(--warning)' } : undefined
+                }
+              >
+                {formatBytes(volume.freeBytes)}
+              </span>
+            ),
+          },
+          {
+            key: 'freePercent',
+            header: 'Free %',
+            numeric: true,
+            // The column the free-space rule actually fires on. Sorting by bytes puts a
+            // nearly-full 20 TB disk above a genuinely full 2 TB one.
+            sort: (volume) =>
+              (volume.sizeBytes ?? 0) > 0 ? (volume.freeBytes ?? 0) / volume.sizeBytes! : null,
+            cell: (volume) =>
+              (volume.sizeBytes ?? 0) > 0
+                ? `${(((volume.freeBytes ?? 0) / volume.sizeBytes!) * 100).toFixed(1)}%`
+                : '—',
+          },
+          {
+            key: 'health',
+            header: 'Health',
+            defaultDirection: 'desc',
+            sort: (volume) => (volume.healthStatus === 'Healthy' ? 0 : 1),
+            cell: (volume) => (
               <Badge tone={volume.healthStatus === 'Healthy' ? 'ok' : 'warning'}>
                 {volume.healthStatus ?? 'unknown'}
               </Badge>
-            </td>
-            <td>
-              {volume.dirty ? (
+            ),
+          },
+          {
+            key: 'chkdsk',
+            header: 'chkdsk',
+            // A pending chkdsk is the only thing in this column worth reading.
+            defaultDirection: 'desc',
+            sort: (volume) => volume.dirty === true,
+            cell: (volume) =>
+              volume.dirty ? (
                 <Badge tone="critical">dirty bit set</Badge>
               ) : (
                 <span className="faint">clean</span>
-              )}
-            </td>
-            <td>
+              ),
+          },
+          {
+            key: 'lowSpaceAlerts',
+            header: 'Low space alert',
+            sort: (volume) => volume.lowSpaceAlerts,
+            cell: (volume) => (
               <label className="checkbox" title="Raise an alert when this volume runs low on free space">
                 <input
                   type="checkbox"
@@ -238,10 +342,10 @@ function VolumesCard({
                 />
                 <span>{volume.lowSpaceAlerts ? 'on' : 'muted'}</span>
               </label>
-            </td>
-          </tr>
-        ))}
-      </Table>
+            ),
+          },
+        ]}
+      />
     </Card>
   );
 }
@@ -308,47 +412,110 @@ function PrimoCacheCard({
         </EmptyState>
       ) : (
         <>
-          <Table headers={['Cache', 'Level', '#Size', '#Used', '#Reads served', '#Writes absorbed']}>
-            {(data?.caches ?? []).map((cache) => (
-              <tr key={cache.name}>
-                <td>
-                  <strong>{cache.name}</strong>
-                  {cache.volumeStats && cache.volumeStats.length > 0 && (
-                    <div className="hint">
-                      {cache.volumeStats.map((volume) => volume.label ?? `#${volume.volume}`).join(', ')}
-                    </div>
-                  )}
-                </td>
-                <td>{cache.level ?? '—'}</td>
-                <td className="num">{formatBytes(cache.cacheSizeBytes)}</td>
-                <td className="num">{formatBytes(cache.usedBytes)}</td>
-                <td className="num">{percent(cache.readHitRate)}</td>
-                <td className="num">{percent(cache.writeAbsorbedRate)}</td>
-              </tr>
-            ))}
-          </Table>
+          <DataTable
+            rows={data?.caches ?? []}
+            rowKey={(cache) => cache.name}
+            initialSort={{ key: 'name' }}
+            columns={[
+              {
+                key: 'name',
+                header: 'Cache',
+                sort: (cache) => cache.name,
+                cell: (cache) => (
+                  <>
+                    <strong>{cache.name}</strong>
+                    {cache.volumeStats && cache.volumeStats.length > 0 && (
+                      <div className="hint">
+                        {cache.volumeStats.map((volume) => volume.label ?? `#${volume.volume}`).join(', ')}
+                      </div>
+                    )}
+                  </>
+                ),
+              },
+              { key: 'level', header: 'Level', sort: (cache) => cache.level },
+              {
+                key: 'size',
+                header: 'Size',
+                numeric: true,
+                sort: (cache) => cache.cacheSizeBytes,
+                cell: (cache) => formatBytes(cache.cacheSizeBytes),
+              },
+              {
+                key: 'used',
+                header: 'Used',
+                numeric: true,
+                sort: (cache) => cache.usedBytes,
+                cell: (cache) => formatBytes(cache.usedBytes),
+              },
+              {
+                key: 'reads',
+                header: 'Reads served',
+                numeric: true,
+                sort: (cache) => cache.readHitRate,
+                cell: (cache) => percent(cache.readHitRate),
+              },
+              {
+                key: 'writes',
+                header: 'Writes absorbed',
+                numeric: true,
+                sort: (cache) => cache.writeAbsorbedRate,
+                cell: (cache) => percent(cache.writeAbsorbedRate),
+              },
+            ]}
+          />
 
           {(data?.caches ?? []).some((cache) => (cache.volumeStats ?? []).length > 0) && (
-            <Table
-              headers={['Volume', '#Read', '#Served', '#Written', '#Absorbed', 'Prefetch']}
-            >
-              {(data?.caches ?? []).flatMap((cache) =>
-                (cache.volumeStats ?? []).map((volume) => (
-                  <tr key={`${cache.name}-${volume.volume}`}>
-                    <td>{volume.label ?? `Volume #${volume.volume}`}</td>
-                    <td className="num">{formatBytes(volume.readBytes)}</td>
-                    <td className="num">{percent(volume.readHitRate)}</td>
-                    <td className="num">{formatBytes(volume.writeBytes)}</td>
-                    <td className="num">{percent(volume.writeAbsorbedRate)}</td>
-                    <td>
-                      {volume.prefetchState === 'Done' && volume.prefetchTotalBytes
-                        ? `${formatBytes(volume.prefetchLoadedBytes)} of ${formatBytes(volume.prefetchTotalBytes)}`
-                        : (volume.prefetchState ?? '—')}
-                    </td>
-                  </tr>
-                )),
+            <DataTable
+              rows={(data?.caches ?? []).flatMap((cache) =>
+                (cache.volumeStats ?? []).map((volume) => ({ cache: cache.name, volume })),
               )}
-            </Table>
+              rowKey={(row) => `${row.cache}-${row.volume.volume}`}
+              initialSort={{ key: 'label' }}
+              columns={[
+                {
+                  key: 'label',
+                  header: 'Volume',
+                  sort: ({ volume }) => volume.label ?? `Volume #${volume.volume}`,
+                },
+                {
+                  key: 'read',
+                  header: 'Read',
+                  numeric: true,
+                  sort: ({ volume }) => volume.readBytes,
+                  cell: ({ volume }) => formatBytes(volume.readBytes),
+                },
+                {
+                  key: 'served',
+                  header: 'Served',
+                  numeric: true,
+                  sort: ({ volume }) => volume.readHitRate,
+                  cell: ({ volume }) => percent(volume.readHitRate),
+                },
+                {
+                  key: 'written',
+                  header: 'Written',
+                  numeric: true,
+                  sort: ({ volume }) => volume.writeBytes,
+                  cell: ({ volume }) => formatBytes(volume.writeBytes),
+                },
+                {
+                  key: 'absorbed',
+                  header: 'Absorbed',
+                  numeric: true,
+                  sort: ({ volume }) => volume.writeAbsorbedRate,
+                  cell: ({ volume }) => percent(volume.writeAbsorbedRate),
+                },
+                {
+                  key: 'prefetch',
+                  header: 'Prefetch',
+                  sort: ({ volume }) => volume.prefetchState,
+                  cell: ({ volume }) =>
+                    volume.prefetchState === 'Done' && volume.prefetchTotalBytes
+                      ? `${formatBytes(volume.prefetchLoadedBytes)} of ${formatBytes(volume.prefetchTotalBytes)}`
+                      : (volume.prefetchState ?? '—'),
+                },
+              ]}
+            />
           )}
 
           <p className="hint" style={{ padding: '8px 16px' }}>
@@ -400,6 +567,12 @@ export function DriveDetailPage(): JSX.Element {
   const drive = data.drive;
   const rulesById = new Map(DEFAULT_ATTRIBUTE_RULES.map((rule) => [rule.id, rule]));
   const attributes = data.latestSmart?.attributes ?? [];
+  /** Past the rule's warning threshold: the reason to look at this row at all. */
+  const isConcerning = (attribute: SmartReport['attributes'][number]) => {
+    const rule = rulesById.get(attribute.id);
+    const raw = attributeRaw(attribute);
+    return rule !== undefined && raw !== null && raw > rule.warnAbove;
+  };
 
   return (
     <>
@@ -519,44 +692,74 @@ export function DriveDetailPage(): JSX.Element {
               or check whether the controller hides SMART.
             </EmptyState>
           ) : (
-            <Table headers={['ID', 'Attribute', '#Raw', '#Value', '#Worst', '#Threshold', 'Trend', '']}>
-              {attributes.map((attribute) => {
-                const rule = rulesById.get(attribute.id);
-                const raw = attributeRaw(attribute);
-                const history = data.history.find((entry) => entry.attributeId === attribute.id);
-                const concerning =
-                  rule !== undefined && raw !== null && raw > rule.warnAbove;
-                return (
-                  <tr key={attribute.id}>
-                    <td className="mono">{attribute.id}</td>
-                    <td>
-                      {rule?.name ?? attribute.name ?? `Attribute ${attribute.id}`}
-                      {rule && (
-                        <div className="faint" style={{ fontSize: 12 }}>
-                          {rule.description}
-                        </div>
-                      )}
-                    </td>
-                    <td className="num" style={concerning ? { color: 'var(--warning)' } : undefined}>
-                      {attribute.rawString ?? raw ?? '—'}
-                    </td>
-                    <td className="num">{attribute.value ?? '—'}</td>
-                    <td className="num">{attribute.worst ?? '—'}</td>
-                    <td className="num">{attribute.threshold ?? '—'}</td>
-                    <td>
-                      <Sparkline
-                        points={(history?.points ?? []).map((point) => point.raw)}
-                        width={110}
-                        height={26}
-                        color={concerning ? 'var(--warning)' : 'var(--text-faint)'}
-                        fill={false}
-                      />
-                    </td>
-                    <td>{concerning && <Badge tone="warning">watch</Badge>}</td>
-                  </tr>
-                );
-              })}
-            </Table>
+            <DataTable
+              rows={attributes}
+              rowKey={(attribute) => attribute.id}
+              initialSort={{ key: 'id', direction: 'asc' }}
+              columns={[
+                { key: 'id', header: 'ID', numeric: true, className: 'mono', sort: (a) => a.id },
+                {
+                  key: 'name',
+                  header: 'Attribute',
+                  sort: (attribute) =>
+                    rulesById.get(attribute.id)?.name ?? attribute.name ?? `Attribute ${attribute.id}`,
+                  cell: (attribute) => {
+                    const rule = rulesById.get(attribute.id);
+                    return (
+                      <>
+                        {rule?.name ?? attribute.name ?? `Attribute ${attribute.id}`}
+                        {rule && (
+                          <div className="faint" style={{ fontSize: 12 }}>
+                            {rule.description}
+                          </div>
+                        )}
+                      </>
+                    );
+                  },
+                },
+                {
+                  key: 'raw',
+                  header: 'Raw',
+                  numeric: true,
+                  sort: (attribute) => attributeRaw(attribute),
+                  cell: (attribute) => {
+                    const raw = attributeRaw(attribute);
+                    return (
+                      <span style={isConcerning(attribute) ? { color: 'var(--warning)' } : undefined}>
+                        {attribute.rawString ?? raw ?? '—'}
+                      </span>
+                    );
+                  },
+                },
+                { key: 'value', header: 'Value', numeric: true, sort: (a) => a.value },
+                { key: 'worst', header: 'Worst', numeric: true, sort: (a) => a.worst },
+                { key: 'threshold', header: 'Threshold', numeric: true, sort: (a) => a.threshold },
+                {
+                  key: 'trend',
+                  header: 'Trend',
+                  cell: (attribute) => (
+                    <Sparkline
+                      points={(
+                        data.history.find((entry) => entry.attributeId === attribute.id)?.points ?? []
+                      ).map((point) => point.raw)}
+                      width={110}
+                      height={26}
+                      color={isConcerning(attribute) ? 'var(--warning)' : 'var(--text-faint)'}
+                      fill={false}
+                    />
+                  ),
+                },
+                {
+                  key: 'watch',
+                  header: 'Watch',
+                  // So the attributes worth looking at can be brought to the top of a
+                  // list that is otherwise thirty rows of healthy counters.
+                  defaultDirection: 'desc',
+                  sort: (attribute) => isConcerning(attribute),
+                  cell: (attribute) => isConcerning(attribute) && <Badge tone="warning">watch</Badge>,
+                },
+              ]}
+            />
           )}
         </Card>
       </div>

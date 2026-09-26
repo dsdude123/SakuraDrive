@@ -1,14 +1,16 @@
 import { Link } from 'react-router-dom';
 import {
+  SEVERITY_ORDER,
   formatBytes,
   formatCount,
   formatRelative,
   type HealthSummary,
 } from '@sakuradrive/shared';
 import { useQuery } from '../hooks/useApi.js';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
 import { ProgressBar } from '../components/ProgressBar.js';
-import { Badge, Banner, Card, EmptyState, Loading, SeverityBadge, Stat, Table } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading, SeverityBadge, Stat } from '../components/ui.js';
 import type { Alert } from '@sakuradrive/shared';
 
 export function DashboardPage(): JSX.Element {
@@ -202,25 +204,46 @@ export function DashboardPage(): JSX.Element {
                   No open alerts. SMART data, pool health, bit rot and backup coverage are all clear.
                 </EmptyState>
               ) : (
-                <Table headers={['Severity', 'Alert', 'Category', 'Seen']}>
-                  {alerts.data!.alerts.map((alert) => (
-                    <tr key={alert.id}>
-                      <td>
-                        <SeverityBadge severity={alert.severity} />
-                      </td>
-                      <td>
-                        <div>{alert.title}</div>
-                        <div className="faint" style={{ fontSize: 12 }}>
-                          {alert.detail.slice(0, 140)}
-                        </div>
-                      </td>
-                      <td>
-                        <Badge>{alert.category}</Badge>
-                      </td>
-                      <td className="nowrap muted">{formatRelative(alert.lastSeenAt)}</td>
-                    </tr>
-                  ))}
-                </Table>
+                <DataTable
+                  rows={alerts.data!.alerts}
+                  rowKey={(alert) => alert.id}
+                  initialSort={{ key: 'severity' }}
+                  columns={[
+                    {
+                      key: 'severity',
+                      header: 'Severity',
+                      defaultDirection: 'desc',
+                      sort: (alert) => SEVERITY_ORDER[alert.severity],
+                      cell: (alert) => <SeverityBadge severity={alert.severity} />,
+                    },
+                    {
+                      key: 'title',
+                      header: 'Alert',
+                      sort: (alert) => alert.title,
+                      cell: (alert) => (
+                        <>
+                          <div>{alert.title}</div>
+                          <div className="faint" style={{ fontSize: 12 }}>
+                            {alert.detail.slice(0, 140)}
+                          </div>
+                        </>
+                      ),
+                    },
+                    {
+                      key: 'category',
+                      header: 'Category',
+                      sort: (alert) => alert.category,
+                      cell: (alert) => <Badge>{alert.category}</Badge>,
+                    },
+                    {
+                      key: 'seen',
+                      header: 'Seen',
+                      className: 'nowrap muted',
+                      sort: (alert) => sortTime(alert.lastSeenAt),
+                      cell: (alert) => formatRelative(alert.lastSeenAt),
+                    },
+                  ]}
+                />
               )}
             </Card>
           </>

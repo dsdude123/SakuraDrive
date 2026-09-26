@@ -399,6 +399,56 @@ tr.clickable {
   cursor: pointer;
 }
 
+/* Sortable column headings. The button fills the cell so the whole heading is the
+   target, and inherits the th's type so sorting does not restyle the header row.
+   Selectors are `th button.th-sort` on purpose. The generic `button` styling below is
+   a filled, bordered chip, and its `button:hover:not(:disabled)` scores the same
+   specificity as `th .th-sort:hover` -- so on a tie the later rule won and painted a
+   button back over the heading on hover. Naming the element as well puts these above
+   it outright, whatever the order in the file. */
+th button.th-sort,
+th button.th-sort:hover {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: inherit;
+}
+th.num button.th-sort {
+  justify-content: flex-end;
+}
+th button.th-sort:hover {
+  color: var(--text-muted);
+}
+th button.th-sort.active {
+  color: var(--accent);
+}
+th button.th-sort:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+/* The unsorted arrow is a hint, not information: visible enough to invite a click,
+   quiet enough that a row of them does not compete with the data. */
+.th-arrow {
+  font-size: 9px;
+  opacity: 0.35;
+}
+th button.th-sort.active .th-arrow,
+th button.th-sort:hover .th-arrow {
+  opacity: 1;
+}
+
 .empty {
   padding: 36px 16px;
   text-align: center;

@@ -1,10 +1,17 @@
 import { formatDurationMs, formatRelative, type WorkflowRun, type WorkflowStatus } from '@sakuradrive/shared';
+import { DataTable, sortTime } from '../components/DataTable.js';
 import { PageHeader } from '../components/Layout.js';
 import { ProgressBar } from '../components/ProgressBar.js';
-import { Badge, Banner, Card, EmptyState, Loading, Table } from '../components/ui.js';
+import { Badge, Banner, Card, EmptyState, Loading } from '../components/ui.js';
 import { useMutation, useQuery } from '../hooks/useApi.js';
 import { useToast } from '../hooks/useToast.js';
 import { WorkflowStateBadge, formatMinutes } from './Dashboard.js';
+
+/** How long a run took, or null while it is still going. */
+function runDurationMs(run: WorkflowRun): number | null {
+  if (!run.startedAt || !run.finishedAt) return null;
+  return Date.parse(run.finishedAt) - Date.parse(run.startedAt);
+}
 
 export function WorkflowsPage(): JSX.Element {
   const { data, loading, refresh } = useQuery<{ workflows: WorkflowStatus[]; windowOpen: boolean }>(
@@ -177,11 +184,19 @@ export function WorkflowsPage(): JSX.Element {
           {(runs.data?.runs.length ?? 0) === 0 ? (
             <EmptyState title="Nothing has run yet" />
           ) : (
-            <Table headers={['Workflow', 'State', 'Trigger', 'Started', '#Duration', 'Result']}>
-              {runs.data!.runs.map((run) => (
-                <tr key={run.id}>
-                  <td>{run.workflowId}</td>
-                  <td>
+            <DataTable
+              rows={runs.data!.runs}
+              rowKey={(run) => run.id}
+              // Newest first: the server's own order, and what anyone opening a run
+              // history is looking for.
+              initialSort={{ key: 'started', direction: 'desc' }}
+              columns={[
+                { key: 'workflow', header: 'Workflow', sort: (run) => run.workflowId },
+                {
+                  key: 'state',
+                  header: 'State',
+                  sort: (run) => run.state,
+                  cell: (run) => (
                     <Badge
                       tone={
                         run.state === 'completed'
@@ -195,22 +210,42 @@ export function WorkflowsPage(): JSX.Element {
                     >
                       {run.state}
                     </Badge>
-                  </td>
-                  <td className="muted">{run.trigger}</td>
-                  <td className="nowrap muted">{formatRelative(run.startedAt)}</td>
-                  <td className="num">
-                    {run.startedAt && run.finishedAt
-                      ? formatDurationMs(Date.parse(run.finishedAt) - Date.parse(run.startedAt))
-                      : '—'}
-                  </td>
-                  <td className="muted" style={{ fontSize: 12 }}>
-                    {run.error ?? Object.entries(run.stats)
-                      .map(([key, value]) => `${humanise(key)} ${value.toLocaleString()}`)
-                      .join(', ') ?? ''}
-                  </td>
-                </tr>
-              ))}
-            </Table>
+                  ),
+                },
+                { key: 'trigger', header: 'Trigger', className: 'muted', sort: (run) => run.trigger },
+                {
+                  key: 'started',
+                  header: 'Started',
+                  className: 'nowrap muted',
+                  sort: (run) => sortTime(run.startedAt),
+                  cell: (run) => formatRelative(run.startedAt),
+                },
+                {
+                  key: 'duration',
+                  header: 'Duration',
+                  numeric: true,
+                  sort: (run) => runDurationMs(run),
+                  cell: (run) => {
+                    const ms = runDurationMs(run);
+                    return ms === null ? '—' : formatDurationMs(ms);
+                  },
+                },
+                {
+                  key: 'result',
+                  header: 'Result',
+                  className: 'muted',
+                  sort: (run) => run.error ?? '',
+                  cell: (run) => (
+                    <span style={{ fontSize: 12 }}>
+                      {run.error ??
+                        Object.entries(run.stats)
+                          .map(([key, value]) => `${humanise(key)} ${value.toLocaleString()}`)
+                          .join(', ')}
+                    </span>
+                  ),
+                },
+              ]}
+            />
           )}
         </Card>
       </div>
