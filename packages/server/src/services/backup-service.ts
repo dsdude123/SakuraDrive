@@ -10,6 +10,7 @@ import {
   type BackupVerificationSummary,
 } from '@sakuradrive/shared';
 import { nowIso, type Db } from '../db/index.js';
+import { ROWID_CURSOR, readInBatches } from '../db/paging.js';
 import type { AlertService } from './alert-service.js';
 import type { KopiaClient, KopiaEntry } from './kopia-client.js';
 import type { SettingsService } from './settings-service.js';
@@ -231,11 +232,17 @@ export class BackupService {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
-    const rows = this.db
-      .prepare<[string], { rel_path: string; size_bytes: number; mtime_ms: number }>(
-        'SELECT rel_path, size_bytes, mtime_ms FROM files WHERE root_id = ? AND deleted_at IS NULL',
-      )
-      .iterate(expectation.rootId);
+    // Batched rather than `.iterate()`. `flush()` below writes, and better-sqlite3
+    // refuses a write while a statement is iterating; with the old cursor this threw
+    // "This database connection is busy executing a query" the moment a single
+    // expectation reached 500 issues mid-scan. Under that it never fired, which is
+    // exactly why it went unnoticed. See db/paging.ts.
+    const batches = readInBatches<{ rel_path: string; size_bytes: number; mtime_ms: number }>(
+      this.db,
+      `SELECT rel_path, size_bytes, mtime_ms, ${ROWID_CURSOR} FROM files
+        WHERE root_id = ? AND deleted_at IS NULL AND rowid > ? ORDER BY rowid LIMIT ?`,
+      [expectation.rootId],
+    );
 
     const now = nowIso();
     let checked = 0;
@@ -262,53 +269,60 @@ export class BackupService {
       pending.length = 0;
     };
 
-    for (const row of rows) {
-      checked += 1;
-      if (checked % 5000 === 0) {
-        options.onProgress?.(checked, total, `${expectation.name}: ${checked.toLocaleString()} files checked`);
-        if (options.shouldContinue && !options.shouldContinue()) break;
-      }
-
-      const relPath = row.rel_path;
-      if (prefix !== '' && !isUnder(prefix, relPath)) continue;
-      if (excludeMatch(relPath) || !includeMatch(relPath)) continue;
-      if (row.size_bytes < expectation.minFileSizeBytes) continue;
-
-      summary.expectedFiles += 1;
-      const stripped = stripPrefix(relPath, prefix);
-      const snapshotPath = snapshotPrefix === '' ? stripped : `${snapshotPrefix}/${stripped}`;
-      const entry = lookup.get(snapshotPath.toLowerCase());
-
-      if (!entry) {
-        summary.missingFiles += 1;
-        summary.missingBytes += row.size_bytes;
-        pending.push(['missing', relPath, row.size_bytes, null, row.mtime_ms, null]);
-      } else {
-        summary.presentFiles += 1;
-        if (entry.size_bytes >= 0 && entry.size_bytes !== row.size_bytes) {
-          summary.mismatchedFiles += 1;
-          pending.push([
-            'size-mismatch',
-            relPath,
-            row.size_bytes,
-            entry.size_bytes,
-            row.mtime_ms,
-            entry.mtime_ms,
-          ]);
-        } else if (entry.mtime_ms !== null && entry.mtime_ms + 60_000 < row.mtime_ms) {
-          // The file changed after it was backed up, so the copy is out of date.
-          summary.staleFiles += 1;
-          pending.push([
-            'stale',
-            relPath,
-            row.size_bytes,
-            entry.size_bytes,
-            row.mtime_ms,
-            entry.mtime_ms,
-          ]);
+    let stopped = false;
+    for (const batch of batches) {
+      if (stopped) break;
+      for (const row of batch) {
+        checked += 1;
+        if (checked % 5000 === 0) {
+          options.onProgress?.(checked, total, `${expectation.name}: ${checked.toLocaleString()} files checked`);
+          if (options.shouldContinue && !options.shouldContinue()) {
+            stopped = true;
+            break;
+          }
         }
+
+        const relPath = row.rel_path;
+        if (prefix !== '' && !isUnder(prefix, relPath)) continue;
+        if (excludeMatch(relPath) || !includeMatch(relPath)) continue;
+        if (row.size_bytes < expectation.minFileSizeBytes) continue;
+
+        summary.expectedFiles += 1;
+        const stripped = stripPrefix(relPath, prefix);
+        const snapshotPath = snapshotPrefix === '' ? stripped : `${snapshotPrefix}/${stripped}`;
+        const entry = lookup.get(snapshotPath.toLowerCase());
+
+        if (!entry) {
+          summary.missingFiles += 1;
+          summary.missingBytes += row.size_bytes;
+          pending.push(['missing', relPath, row.size_bytes, null, row.mtime_ms, null]);
+        } else {
+          summary.presentFiles += 1;
+          if (entry.size_bytes >= 0 && entry.size_bytes !== row.size_bytes) {
+            summary.mismatchedFiles += 1;
+            pending.push([
+              'size-mismatch',
+              relPath,
+              row.size_bytes,
+              entry.size_bytes,
+              row.mtime_ms,
+              entry.mtime_ms,
+            ]);
+          } else if (entry.mtime_ms !== null && entry.mtime_ms + 60_000 < row.mtime_ms) {
+            // The file changed after it was backed up, so the copy is out of date.
+            summary.staleFiles += 1;
+            pending.push([
+              'stale',
+              relPath,
+              row.size_bytes,
+              entry.size_bytes,
+              row.mtime_ms,
+              entry.mtime_ms,
+            ]);
+          }
+        }
+        if (pending.length >= 500) flush();
       }
-      if (pending.length >= 500) flush();
     }
     flush();
     options.onProgress?.(checked, total, `${expectation.name}: finished`);

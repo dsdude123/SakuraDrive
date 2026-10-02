@@ -256,6 +256,57 @@ describe('verify', () => {
   });
 });
 
+/**
+ * The same defect the export had: the scan read the catalog with `.iterate()` and wrote
+ * issue rows from inside that loop. better-sqlite3 refuses a write while a statement is
+ * iterating, but the write only happens once 500 issues have piled up — so a tidy
+ * backup verified fine and a genuinely broken one died with "This database connection
+ * is busy executing a query", which is precisely backwards.
+ */
+describe('an expectation with more issues than fit in one flush', () => {
+  it('records every missing file rather than failing partway', async () => {
+    const files = Array.from({ length: 1_200 }, (_, i) => ({
+      relPath: `Media/missing${i}.mkv`,
+      size: 100 + i,
+    }));
+    seedCatalog(files);
+
+    // The snapshot is real but holds none of these, so every file is an issue and
+    // `flush()` runs several times while the catalog is still being read. (An empty
+    // listing is refused outright, on the grounds that it is far more likely to be a
+    // failed `kopia ls` than a genuinely empty backup.)
+    const service = makeService(
+      kopiaRunner([{ name: 'Media/unrelated.mkv', type: 'f', size: 1, mtime: '2024-01-01T00:00:00Z' }]),
+    );
+    const summary = await service.verify({ expectation: EXPECTATION, workflowRunId: null });
+
+    expect(summary.error).toBeNull();
+    expect(summary.expectedFiles).toBe(1_200);
+    expect(summary.missingFiles).toBe(1_200);
+    expect(service.listIssues({}).total).toBe(1_200);
+  });
+
+  it('still stops when asked to, mid-read', async () => {
+    seedCatalog(
+      Array.from({ length: 12_000 }, (_, i) => ({ relPath: `Media/f${i}.mkv`, size: 100 })),
+    );
+    const service = makeService(
+      kopiaRunner([{ name: 'Media/unrelated.mkv', type: 'f', size: 1, mtime: '2024-01-01T00:00:00Z' }]),
+    );
+    let seen = 0;
+    const summary = await service.verify({
+      expectation: EXPECTATION,
+      workflowRunId: null,
+      onProgress: (checked) => {
+        seen = checked;
+      },
+      shouldContinue: () => seen < 5_000,
+    });
+    expect(summary.error).toBeNull();
+    expect(summary.expectedFiles).toBeLessThan(12_000);
+  });
+});
+
 describe('a Kopia source that starts higher than the catalog root', () => {
   // Snapshotting a whole pool member disk (D:) captures `PoolPart.<guid>\Tier1\...`,
   // while the catalog strips that folder from a pool part's paths. Without bridging the

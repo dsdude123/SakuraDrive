@@ -137,6 +137,29 @@ space only: the NTFS dirty bit and Windows' own volume health are unrelated to h
 disk is and keep alerting either way. A volume that holds data the pool does not manage,
 such as an SSD tier with its own files on it, is the case the mute is *not* for.
 
+## Never hold a SQLite cursor open across a write
+
+better-sqlite3 allows reads while a statement is iterating and refuses writes, with
+"This database connection is busy executing a query". The asymmetry is what makes the
+rule easy to break by accident: a loop over `.iterate()` that reads a lookup table works
+perfectly, and then one day it also writes something and stops.
+
+Both places that did this failed only under load, which is the worst way to find out.
+The export streamed its bundle from one long cursor and wrote the workflow's progress
+from inside the loop, so it died on any catalog past 10,000 records — nightly, in
+production, while the tests passed on three seeded rows. Backup verification wrote issue
+rows from inside its own cursor once 500 had piled up, so a tidy backup verified fine
+and a genuinely broken one threw.
+
+An async generator makes it worse again: it suspends at every `yield`, so a cursor held
+across one blocks *every* write in the process — agent reports, alerts, other workflows
+— for as long as the whole pipeline takes.
+
+`db/paging.ts` is the way to read a lot of rows: it pages on rowid and closes the
+statement between pages, so the only window where writes are refused is the microseconds
+one page takes. Pages on rowid rather than OFFSET because OFFSET re-walks the table for
+every page, and a row deleted mid-read shifts every later page up and skips one.
+
 ## A snapshot of under-duplication is not a problem
 
 Every file is short of copies from the moment it is written until DrivePool's balancer

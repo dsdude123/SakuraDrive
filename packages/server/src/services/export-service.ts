@@ -14,6 +14,7 @@ import {
   type Settings,
 } from '@sakuradrive/shared';
 import { nowIso, type Db } from '../db/index.js';
+import { ROWID_CURSOR, readInBatches } from '../db/paging.js';
 import type { Logger } from '../logger.js';
 import type { SettingsService } from './settings-service.js';
 
@@ -170,15 +171,25 @@ export class ExportService {
       for (const table of tables) {
         if (options.signal?.aborted) return;
         let tableCount = 0;
-        const rows = self.db.prepare(`SELECT * FROM ${table}`).iterate() as Iterable<
-          Record<string, unknown>
-        >;
-        for (const row of rows) {
+        // Batched rather than one long `.iterate()`. This generator is async and feeds
+        // a gzip pipeline, so it suspends at every yield -- and a statement left
+        // iterating across those suspensions blocks every write in the process for the
+        // whole export. The first thing it blocked was this run's own progress update,
+        // which threw "This database connection is busy executing a query" and failed
+        // the workflow. See db/paging.ts.
+        const batches = readInBatches<Record<string, unknown>>(
+          self.db,
+          `SELECT *, ${ROWID_CURSOR} FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+        );
+        for (const batch of batches) {
           if (options.signal?.aborted) return;
-          yield `${JSON.stringify({ t: table, r: row })}\n`;
-          tableCount += 1;
-          recordCount += 1;
-          if (recordCount % 10_000 === 0) options.onProgress?.(recordCount, table);
+          for (const row of batch) {
+            yield `${JSON.stringify({ t: table, r: row })}\n`;
+            tableCount += 1;
+            recordCount += 1;
+          }
+          // Between batches, not inside one: the connection is writable here.
+          options.onProgress?.(recordCount, table);
         }
         counts[table] = tableCount;
         options.onProgress?.(recordCount, table);
