@@ -4,8 +4,9 @@
 # configured from the web interface. This file only covers what Docker owns: the port,
 # the data volume, and which host paths the container can see.
 #
-# Windows drives appear inside WSL2 under /mnt/<letter>. Every pool mount is read-only
-# on purpose: SakuraDrive never writes to your data.
+# Windows drives appear inside WSL2 under /mnt/<letter>. Nothing holding your data is
+# mounted read-write: the only writable host path below is the export directory, which
+# holds bundles SakuraDrive itself produces.
 #
 # The image is pulled, not built here. CI builds it, smoke-tests it and pushes it to
 # GHCR, so updating is a pull and a restart — which is the operation Portainer's stack
@@ -79,11 +80,24 @@ services:
       # ------------------------------------------------------------------
       # Where automatic export bundles are written.
       #
-      # D:\ is already in the Kopia repository (`Administrator@tokyo-3:D:\`), so a
-      # bundle written here reaches Backblaze with the next snapshot — which is the
-      # whole point: the catalog has to survive the machine that holds it.
+      # `J:\Tier0` is a Kopia source, so a bundle written here reaches Backblaze with
+      # the next snapshot — which is the whole point: the catalog has to survive the
+      # machine that holds it. What makes a destination valid is that Kopia already
+      # snapshots it; `docs/BACKUP-EXPECTATIONS.md` lists the sources it holds.
+      #
+      # This is the only path the container writes to inside the pool, and it holds
+      # SakuraDrive's own output rather than your data. Two things follow from it
+      # living in a catalogued folder, neither of them a problem, both easier to meet
+      # on purpose than to be surprised by:
+      #
+      #   - the bundles are catalogued and hashed like anything else in Tier0, and
+      #     rotating them shows up as created/deleted rows in the change list. Add
+      #     `**/SakuraDriveExports/**` to Settings -> Catalog -> global excludes to
+      #     keep them out of it;
+      #   - they inherit Tier0's duplication level, so a 2x folder stores each bundle
+      #     twice. Lower `retain` on the export destination if that matters.
       # ------------------------------------------------------------------
-      - /mnt/d/SakuraDriveExports:/backup/sakuradrive
+      - /mnt/j/Tier0/SakuraDriveExports:/backup/sakuradrive
 
 volumes:
   # On the WSL2 VM's own disk. See the note above: the database must not sit on drvfs.
