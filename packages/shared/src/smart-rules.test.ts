@@ -352,7 +352,9 @@ describe('evaluatePerformance', () => {
   it('alerts when every sample in the window is slow', () => {
     const findings = evaluatePerformance([sample(600), sample(700), sample(800)], 'DRIVEPOOL27');
     expect(findings.find((f) => f.key === 'perf.latency')!.severity).toBe('critical');
-    expect(findings[0]!.detail).toContain('locks up');
+    // The numbers that tripped it, and nothing else. An alert that editorialises about
+    // what the operator is in for is noise in the one place that has to stay readable.
+    expect(findings[0]!.detail).toBe('Every one of the last 3 samples exceeded 500ms.');
   });
 
   it('warns at the lower latency threshold', () => {

@@ -524,9 +524,10 @@ export interface PerformanceSampleInput {
 }
 
 /**
- * Detect the "disk I/O goes so slow that clients lock up" condition. A single slow
- * sample is normal during a scrub, so a breach only counts when the most recent
- * `consecutiveSamples` readings are all bad.
+ * Sustained I/O latency and queue depth.
+ *
+ * A single slow sample is normal during a scrub, so a breach only counts when the most
+ * recent `consecutiveSamples` readings are all bad.
  */
 export function evaluatePerformance(
   samples: readonly PerformanceSampleInput[],
@@ -545,7 +546,7 @@ export function evaluatePerformance(
       key: 'perf.latency',
       severity: 'critical',
       title: `${name}: I/O latency ${worstLatency.toFixed(0)}ms sustained`,
-      detail: `Every one of the last ${config.consecutiveSamples} samples exceeded ${config.latencyCritMs}ms. This is the pattern that locks up client systems.`,
+      detail: `Every one of the last ${config.consecutiveSamples} samples exceeded ${config.latencyCritMs}ms.`,
       value: worstLatency,
     });
   } else if (worstLatency >= config.latencyWarnMs) {

@@ -645,7 +645,7 @@ export function DriveDetailPage(): JSX.Element {
         {data.performance.length > 0 && (
           <Card
             title="I/O latency"
-            description="Sustained high latency is what makes client systems lock up"
+            description="Read and write latency, and queue depth, over the recorded samples"
           >
             <div className="grid cols-3">
               <div>

@@ -905,7 +905,7 @@ function ThresholdsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): J
 
       <Card
         title="Disk performance"
-        description="The pattern behind “everything locked up”: latency that stays high across several samples"
+        description="Latency and queue depth have to stay bad across several samples before anything is raised"
       >
         <div className="form-grid">
           <Field label="Latency warning (ms)">
