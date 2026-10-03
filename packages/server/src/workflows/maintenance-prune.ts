@@ -151,9 +151,7 @@ function checkRootsReachable(deps: MaintenanceDeps): number {
       category: 'catalog',
       severity: 'critical',
       title: `Catalog root "${root.name}" is not reachable`,
-      detail:
-        `${reason} This root is not being catalogued, hashed or checked, and monitoring of it is ` +
-        'silently blind until it is fixed. The existing catalog for this root is left untouched.',
+      detail: reason,
       context: { root: root.name, hostPath: root.hostPath, driveLabel: root.driveLabel },
     });
   }

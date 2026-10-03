@@ -64,8 +64,7 @@ export function createExportBackupWorkflow(deps: ExportBackupDeps): WorkflowDefi
           category: 'export',
           severity: 'warning',
           title: 'No export destination is configured',
-          detail:
-            'SakuraDrive is a disaster-recovery tool: without an off-box export, a failure that takes out this container also takes out the catalog you would use to recover. Add a destination under Settings → Backup & Export.',
+          detail: 'Add one under Settings → Backup & Export.',
         });
         return { state: 'completed' };
       }
@@ -155,7 +154,7 @@ export function createExportBackupWorkflow(deps: ExportBackupDeps): WorkflowDefi
             category: 'export',
             severity: 'critical',
             title: `Export to "${destination.name}" failed`,
-            detail: `${message}. Until this is fixed there is no off-box copy of the catalog, which is exactly what you would need after a disk failure.`,
+            detail: message,
             context: { destination: destination.name, path: destination.path },
           });
         }

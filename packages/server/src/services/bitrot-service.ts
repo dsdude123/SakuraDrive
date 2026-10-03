@@ -224,10 +224,7 @@ export class BitrotService {
       category: 'bitrot',
       severity: counts.confirmed > 0 ? 'critical' : 'warning',
       title: `${outstanding} file${outstanding === 1 ? '' : 's'} may be suffering bit rot`,
-      detail:
-        `${counts.confirmed} confirmed by re-reading the file, ${counts.open} awaiting verification. ` +
-        'These files changed content while their size and modification time stayed the same. ' +
-        'Restore them from backup and then mark the findings resolved.',
+      detail: `${counts.confirmed} confirmed by re-reading the file, ${counts.open} awaiting verification.`,
       context: {
         confirmed: counts.confirmed,
         unverified: counts.open,

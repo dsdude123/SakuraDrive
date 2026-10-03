@@ -132,7 +132,7 @@ describe('verify', () => {
 
     const alert = alerts.list().alerts.find((a) => a.category === 'backup');
     expect(alert!.severity).toBe('critical');
-    expect(alert!.detail).toContain('not protected');
+    expect(alert!.detail).toBe('1 of 2 expected files were not found in the latest snapshot.');
   });
 
   it('only expects files matching the include rules', async () => {
@@ -231,7 +231,7 @@ describe('verify', () => {
     await service.verify({ expectation: EXPECTATION, workflowRunId: null });
     const alert = alerts.list().alerts.find((a) => a.title.includes('hours old'));
     expect(alert!.severity).toBe('warning');
-    expect(alert!.detail).toContain('scheduled task');
+    expect(alert!.detail).toContain('older than the');
   });
 
   it('clears the missing alert once the gap is filled', async () => {

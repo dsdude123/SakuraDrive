@@ -118,8 +118,7 @@ export function createCatalogHashWorkflow(deps: CatalogHashDeps): WorkflowDefini
           category: 'catalog',
           severity: 'warning',
           title: `${cursor.errors} file${cursor.errors === 1 ? '' : 's'} could not be read during the bit-rot scan`,
-          detail:
-            'Files that cannot be read are excluded from further hashing until the next catalog scan clears the error. Unreadable files on a pool disk are themselves a strong signal that the disk is failing.',
+          detail: 'They are skipped by further hashing until the next catalog scan clears the error.',
           context: { errors: cursor.errors },
         });
       } else {

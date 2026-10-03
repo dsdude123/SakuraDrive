@@ -125,7 +125,7 @@ export class BackupService {
             category: 'backup',
             severity: 'warning',
             title: `Backup for "${expectation.name}" is ${Math.round(ageHours)} hours old`,
-            detail: `The newest snapshot is older than the ${expectation.maxSnapshotAgeHours}-hour limit. Check that the Kopia scheduled task is still running on the host.`,
+            detail: `The newest snapshot is older than the ${expectation.maxSnapshotAgeHours}-hour limit.`,
             context: { expectation: expectation.name, snapshotTime: summary.snapshotTime },
           });
         } else {
@@ -424,9 +424,7 @@ export class BackupService {
       category: 'backup',
       severity: 'critical',
       title: `${summary.missingFiles.toLocaleString()} expected files are not in the backup for "${expectation.name}"`,
-      detail:
-        `${summary.missingFiles.toLocaleString()} of ${summary.expectedFiles.toLocaleString()} expected files were not found in the latest snapshot. ` +
-        'Those files exist on the pool but are not protected — a disk failure would lose them for good.',
+      detail: `${summary.missingFiles.toLocaleString()} of ${summary.expectedFiles.toLocaleString()} expected files were not found in the latest snapshot.`,
       context: {
         expectation: expectation.name,
         missing: summary.missingFiles,

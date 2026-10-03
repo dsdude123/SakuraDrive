@@ -110,10 +110,7 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
             category: 'duplication',
             severity: 'critical',
             title: `Pool ${poolId} has ${collision.rootIds.length} parts on one physical disk`,
-            detail:
-              `${collision.labels.join(', ')} are all on the same disk, so duplicated files whose copies ` +
-              'landed there are lost together when it fails. Duplication only protects data when each part ' +
-              'of the pool is on a disk of its own — remove one of these from the pool, or move it to another disk.',
+            detail: `${collision.labels.join(', ')} are all on the physical disk ${collision.deviceKey}.`,
             context: {
               pool: poolId,
               disk: collision.deviceKey,
@@ -164,14 +161,10 @@ export function createDuplicationWorkflow(deps: DuplicationDeps): WorkflowDefini
                 : `${shortfall.overdue} file${plural} in pool ${poolId} ` +
                   `${shortfall.overdue === 1 ? 'has' : 'have'} fewer copies than configured`,
             detail:
-              'These files exist on fewer physical disks than their duplication setting requires, so losing one disk would lose them. ' +
-              (graceDays > 0
-                ? `DrivePool has had ${describeDays(graceDays)} to re-balance and has not fixed ${shortfall.overdue === 1 ? 'it' : 'them'}` +
-                  `${stuckDays > graceDays ? ` — the oldest has been short for ${describeDays(stuckDays)}` : ''}. `
-                : 'DrivePool usually fixes this on its own once it has free space and time to re-balance. ') +
-              'Check the balancer has run, and that the pool has the free space to place another copy.' +
+              `${formatBytes(shortfall.overdueBytes)} across ${shortfall.overdue} file${plural}` +
+              `${stuckDays > 0 ? `, the oldest short for ${describeDays(stuckDays)}` : ''}.` +
               (shortfall.total > shortfall.overdue
-                ? ` A further ${(shortfall.total - shortfall.overdue).toLocaleString()} file(s) are short of copies but still within the grace period; those are normal after a write.`
+                ? ` ${(shortfall.total - shortfall.overdue).toLocaleString()} more are short but within the grace period.`
                 : ''),
             context: {
               pool: poolId,

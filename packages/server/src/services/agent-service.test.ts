@@ -470,7 +470,7 @@ describe('pool parts', () => {
     const alert = ctx.alerts.list().alerts.find((a) => a.category === 'pool');
     expect(alert!.severity).toBe('critical');
     expect(alert!.title).toContain('DRIVEPOOL27');
-    expect(alert!.detail).toContain('Disaster Recovery');
+    expect(alert!.detail).toBe('DrivePool cannot see this disk.');
   });
 
   it('keeps a missing-part alert when the pool is absent from a later report', () => {

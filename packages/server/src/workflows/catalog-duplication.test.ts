@@ -237,7 +237,7 @@ describe('duplication check', () => {
     expect(run.stats).toMatchObject({ underDuplicated: 2, underDuplicatedOverdue: 1 });
     const alert = alerts.byKey('duplication:hdd:under');
     expect(alert?.title).toContain('1 file');
-    expect(alert?.detail).toContain('A further 1 file(s)');
+    expect(alert?.detail).toContain('1 more are short but within the grace period');
     expect(alert?.context.example).toBe('Media/stuck.mkv');
   });
 

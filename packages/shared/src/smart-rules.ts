@@ -11,6 +11,7 @@
  */
 
 import type { NvmeHealth, SmartAttribute, SmartReport } from './agent-protocol.js';
+import { formatBytes } from './bytes.js';
 
 export type Severity = 'info' | 'warning' | 'critical';
 
@@ -62,7 +63,7 @@ export const DEFAULT_ATTRIBUTE_RULES: SmartAttributeRule[] = [
     warnAbove: 0,
     critAbove: 2,
     increaseSeverity: 'critical',
-    description: 'The motor failed to spin up on the first attempt — usually imminent failure.',
+    description: 'The motor failed to spin up on the first attempt.',
   },
   {
     id: 184,
@@ -78,7 +79,7 @@ export const DEFAULT_ATTRIBUTE_RULES: SmartAttributeRule[] = [
     warnAbove: 0,
     critAbove: 4,
     increaseSeverity: 'critical',
-    description: 'Errors the drive could not correct with ECC — a direct bit-rot risk.',
+    description: 'Errors the drive could not correct with ECC.',
   },
   {
     id: 188,
@@ -86,7 +87,7 @@ export const DEFAULT_ATTRIBUTE_RULES: SmartAttributeRule[] = [
     warnAbove: 100,
     critAbove: 1000,
     increaseSeverity: null,
-    description: 'Commands that timed out. Large jumps often mean cabling or power problems.',
+    description: 'Commands that timed out.',
   },
   {
     id: 196,
@@ -102,7 +103,7 @@ export const DEFAULT_ATTRIBUTE_RULES: SmartAttributeRule[] = [
     warnAbove: 0,
     critAbove: 8,
     increaseSeverity: 'critical',
-    description: 'Unstable sectors waiting to be remapped. Files on them may already be unreadable.',
+    description: 'Unstable sectors waiting to be remapped.',
   },
   {
     id: 198,
@@ -110,7 +111,7 @@ export const DEFAULT_ATTRIBUTE_RULES: SmartAttributeRule[] = [
     warnAbove: 0,
     critAbove: 4,
     increaseSeverity: 'critical',
-    description: 'Sectors that could not be read even offline. Data on them is gone.',
+    description: 'Sectors that could not be read even offline.',
   },
   {
     id: 199,
@@ -118,7 +119,7 @@ export const DEFAULT_ATTRIBUTE_RULES: SmartAttributeRule[] = [
     warnAbove: 0,
     critAbove: 100,
     increaseSeverity: 'warning',
-    description: 'Interface errors — nearly always a bad SATA cable or backplane, not the disk.',
+    description: 'Interface errors between the drive and the controller.',
   },
   {
     id: 201,
@@ -191,8 +192,7 @@ export function evaluateSmart(input: EvaluateSmartInput): SmartFinding[] {
       key: 'smart.overall',
       severity: 'critical',
       title: `${name}: SMART overall health FAILED`,
-      detail:
-        'The drive itself reports that it has failed its own health assessment. Replace it now and verify pool duplication before doing anything else.',
+      detail: 'The drive reports that it has failed its own health assessment.',
     });
   }
 
@@ -201,8 +201,7 @@ export function evaluateSmart(input: EvaluateSmartInput): SmartFinding[] {
       key: 'smart.unsupported',
       severity: 'info',
       title: `${name}: SMART not available`,
-      detail:
-        'The controller does not expose SMART data for this drive. A USB bridge or RAID controller usually needs an explicit smartctl device type.',
+      detail: 'The controller does not expose SMART data for this drive.',
     });
   }
 
@@ -264,7 +263,7 @@ export function evaluateSmart(input: EvaluateSmartInput): SmartFinding[] {
         key: 'smart.temperature',
         severity: 'critical',
         title: `${name}: temperature ${temperature}°C`,
-        detail: `Above the critical threshold of ${thresholds.temperatureCritC}°C. Sustained heat shortens drive life sharply — check airflow.`,
+        detail: `Above the critical threshold of ${thresholds.temperatureCritC}°C.`,
         value: temperature,
       });
     } else if (temperature >= thresholds.temperatureWarnC) {
@@ -321,7 +320,7 @@ function evaluateNvme(
       key: 'nvme.spare',
       severity: 'critical',
       title: `${name}: NVMe available spare ${nvme.availableSpare}%`,
-      detail: `At or below the drive's own spare threshold of ${nvme.availableSpareThreshold}%. The drive is running out of replacement blocks.`,
+      detail: `At or below the drive's own spare threshold of ${nvme.availableSpareThreshold}%.`,
       value: nvme.availableSpare,
     });
   }
@@ -332,7 +331,7 @@ function evaluateNvme(
         key: 'nvme.wear',
         severity: 'critical',
         title: `${name}: NVMe endurance ${nvme.percentageUsed}% used`,
-        detail: `Above the critical wear threshold of ${thresholds.nvmeWearCritPercent}%. Plan a replacement.`,
+        detail: `Above the critical wear threshold of ${thresholds.nvmeWearCritPercent}%.`,
         value: nvme.percentageUsed,
       });
     } else if (nvme.percentageUsed >= thresholds.nvmeWearWarnPercent) {
@@ -411,8 +410,7 @@ export function evaluateVolume(input: VolumeHealthInput): SmartFinding[] {
       key: 'volume.dirty',
       severity: 'critical',
       title: `${name}: NTFS dirty bit is set`,
-      detail:
-        'Windows flagged this volume as needing chkdsk. Until it runs, the filesystem may be inconsistent and further writes can worsen the damage.',
+      detail: 'Windows flagged this volume as needing chkdsk.',
     });
   }
 
@@ -437,7 +435,7 @@ export function evaluateVolume(input: VolumeHealthInput): SmartFinding[] {
         key: 'volume.free-space',
         severity: 'critical',
         title: `${name}: ${(fraction * 100).toFixed(1)}% free`,
-        detail: 'Almost full. DrivePool balancing and duplication need free space to work.',
+        detail: `${formatBytes(free)} free of ${formatBytes(size)}.`,
         value: fraction,
       });
     } else if (fraction <= warnFraction) {
@@ -445,7 +443,7 @@ export function evaluateVolume(input: VolumeHealthInput): SmartFinding[] {
         key: 'volume.free-space',
         severity: 'warning',
         title: `${name}: ${(fraction * 100).toFixed(1)}% free`,
-        detail: 'Running low on free space.',
+        detail: `${formatBytes(free)} free of ${formatBytes(size)}.`,
         value: fraction,
       });
     }
@@ -491,9 +489,7 @@ export function evaluatePoolSpace(input: PoolSpaceInput): SmartFinding[] {
       key: 'pool.free-space',
       severity: critical ? 'critical' : 'warning',
       title: `${name}: ${(fraction * 100).toFixed(1)}% of the pool is free`,
-      detail: critical
-        ? 'The pool is nearly full. DrivePool needs free space to balance and to place the second copy of a duplicated file; once it runs out it can do neither, and new writes start failing.'
-        : 'The pool is running low. Unlike one member disk filling up, this is not something DrivePool can rebalance its way out of.',
+      detail: `${formatBytes(free)} free of ${formatBytes(size)}.`,
       value: fraction,
     },
   ];
@@ -566,7 +562,7 @@ export function evaluatePerformance(
       key: 'perf.queue',
       severity: 'critical',
       title: `${name}: disk queue length ${worstQueue.toFixed(1)}`,
-      detail: 'Requests are piling up faster than the drive can service them.',
+      detail: `Every one of the last ${config.consecutiveSamples} samples was at or above ${config.queueCrit}.`,
       value: worstQueue,
     });
   } else if (worstQueue >= config.queueWarn) {
@@ -574,7 +570,7 @@ export function evaluatePerformance(
       key: 'perf.queue',
       severity: 'warning',
       title: `${name}: disk queue length ${worstQueue.toFixed(1)}`,
-      detail: 'Sustained queue depth above the warning threshold.',
+      detail: `Every one of the last ${config.consecutiveSamples} samples was at or above ${config.queueWarn}.`,
       value: worstQueue,
     });
   }

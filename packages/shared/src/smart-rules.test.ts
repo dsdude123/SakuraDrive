@@ -107,10 +107,13 @@ describe('evaluateSmart', () => {
     expect(findings[0]!.title).not.toContain('rising');
   });
 
-  it('treats CRC errors as a warning because they usually mean a bad cable', () => {
+  // CRC errors are nearly always the SATA cable or the backplane rather than the disk,
+  // which is why they are a warning and not a critical. That is the reason for the
+  // rule, not something the alert needs to argue in front of the operator.
+  it('treats CRC errors as a warning rather than a failure', () => {
     const findings = evaluateSmart({ report: report({ attributes: [attr(199, 5)] }) });
     expect(findings[0]!.severity).toBe('warning');
-    expect(findings[0]!.detail).toContain('cable');
+    expect(findings[0]!.detail).toContain('Interface errors');
   });
 
   it('flags any attribute whose normalised value reached the manufacturer threshold', () => {

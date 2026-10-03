@@ -706,8 +706,7 @@ export class AgentService {
             category: 'pool',
             severity: 'critical',
             title: `${pool.name ?? pool.poolId}: pool part ${part.volumeLabel ?? part.partId} is missing`,
-            detail:
-              'StableBit DrivePool cannot see this disk. Unduplicated files that lived on it are unavailable — check the Disaster Recovery report for exactly which ones.',
+            detail: 'DrivePool cannot see this disk.',
             context: {
               pool: pool.name ?? pool.poolId,
               part: part.volumeLabel ?? part.partId,
@@ -746,7 +745,7 @@ export class AgentService {
           title: `Agent on ${row.hostname} has stopped reporting`,
           detail: `No report received for ${
             Number.isFinite(ageMinutes) ? `${Math.round(ageMinutes)} minutes` : 'a long time'
-          }. SMART monitoring is blind until it comes back — check the scheduled task on the host.`,
+          }.`,
           context: { hostname: row.hostname, lastReportAt: row.last_report_at ?? 'never' },
         });
       }

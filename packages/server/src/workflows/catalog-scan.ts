@@ -328,9 +328,7 @@ async function runAgentScan(
         category: 'catalog',
         severity: 'critical',
         title: `The agent could not scan "${root.name}"`,
-        detail:
-          `${current.error ?? 'The agent stopped without finishing.'} The catalog for this root ` +
-          'was left untouched. Check that the agent is running and that the volume is online.',
+        detail: current.error ?? 'The agent stopped without finishing.',
         context: { root: root.name, hostPath: root.hostPath, job: current.id },
       });
       ctx.log(`Agent scan of "${root.name}" failed: ${current.error ?? 'no reason given'}`);
@@ -366,10 +364,7 @@ function checkMassDeletion(
     category: 'catalog',
     severity: 'critical',
     title: `${deleted.toLocaleString()} files disappeared from "${root.name}"`,
-    detail:
-      `That is ${percent.toFixed(1)}% of everything previously catalogued in this root. ` +
-      'If a pool disk has failed this is expected — open the catalog difference for the exact list. ' +
-      'If not, check the bind mount and the drive before doing anything else. The catalog rows are only marked deleted, never removed, so the list survives either way.',
+    detail: `That is ${percent.toFixed(1)}% of the ${previousTotal.toLocaleString()} files previously catalogued in this root.`,
     context: {
       root: root.name,
       deleted,
