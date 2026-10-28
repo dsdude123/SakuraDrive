@@ -27,6 +27,20 @@ export interface AuthStatus {
   siteName: string;
 }
 
+/**
+ * Whether to show the sign-in screen instead of the application.
+ *
+ * `authRequired` is already the server's combined answer: the `requireLogin` setting
+ * and the `SAKURADRIVE_DISABLE_AUTH` environment variable. When it is false there is
+ * nothing to sign in to, so `needsSetup` is not a reason to stop anyone -- it used to
+ * be, which meant an install with authentication switched off still demanded an
+ * account on first run, and then never used it.
+ */
+export function needsSignIn(status: AuthStatus): boolean {
+  if (!status.authRequired) return false;
+  return status.user === null || status.needsSetup;
+}
+
 export function App(): JSX.Element {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [failed, setFailed] = useState(false);
@@ -65,8 +79,7 @@ export function App(): JSX.Element {
 
   if (!status) return <Loading label="Connecting…" />;
 
-  const signedIn = !status.authRequired || status.user !== null;
-  if (!signedIn || status.needsSetup) {
+  if (needsSignIn(status)) {
     return <LoginPage status={status} onSignedIn={() => void refreshStatus()} />;
   }
 

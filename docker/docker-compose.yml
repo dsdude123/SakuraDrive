@@ -36,8 +36,24 @@ services:
       # Only affects log timestamps; the schedule uses the timezone set in the UI.
       TZ: ${TZ:-America/Los_Angeles}
       SAKURADRIVE_LOG_LEVEL: ${SAKURADRIVE_LOG_LEVEL:-info}
-      # Set to true only on a trusted network, or behind an authenticating proxy.
-      SAKURADRIVE_DISABLE_AUTH: ${SAKURADRIVE_DISABLE_AUTH:-false}
+      # No password on the interface. Anyone who can reach this port has full control,
+      # which on this host is the deliberate choice: the port is not exposed off the
+      # LAN, and the interface shows a file listing of a pool that an attacker already
+      # inside would have far better access to directly.
+      #
+      # Agent tokens are unaffected. The agent endpoints always require a bearer token,
+      # with or without this.
+      #
+      # To put a password back: set this to false, and -- if the old one is lost --
+      # clear the account first so the first-run screen comes back:
+      #
+      #   docker exec sakuradrive \
+      #     node -e "new (require('better-sqlite3'))('/data/sakuradrive.sqlite').exec('DELETE FROM users')"
+      #
+      # (The image has no sqlite3 binary, but it does have the driver the server uses.)
+      #
+      # The next start with authentication on asks for a new one.
+      SAKURADRIVE_DISABLE_AUTH: ${SAKURADRIVE_DISABLE_AUTH:-true}
       # Copied into the volume above on first start, only when that volume has no
       # database. Remove along with the mount once the move is done.
       SAKURADRIVE_LEGACY_DATA_DIR: /data-previous
