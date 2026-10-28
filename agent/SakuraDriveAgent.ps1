@@ -832,14 +832,17 @@ function Invoke-CatalogHashJob {
 
     $files = @($Job.files)
     $hashed = 0
+    $bytes = [long]0
     $state = 'completed'
     $pending = [System.Collections.Generic.List[object]]::new()
     $root = ([string]$Job.hostPath).TrimEnd('\')
 
     foreach ($file in $files) {
         $absolute = Join-Path $root ($file.relPath -replace '/', '\')
-        $pending.Add((Get-CatalogFileHash -FileId ([int]$file.fileId) -Path $absolute -Algorithm $Job.hashAlgorithm))
+        $result = Get-CatalogFileHash -FileId ([int]$file.fileId) -Path $absolute -Algorithm $Job.hashAlgorithm
+        $pending.Add($result)
         $hashed++
+        if ($null -ne $result.sizeBytes) { $bytes += [long]$result.sizeBytes }
 
         # Post in small batches so a closing window is honoured promptly: a single
         # large file can take minutes, and the window edge should not wait for the lot.
@@ -860,11 +863,11 @@ function Invoke-CatalogHashJob {
     Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/finish" -Body ([ordered]@{
             state     = $state
             filesSeen = $hashed
-            bytesSeen = 0
+            bytesSeen = $bytes
             dirsDone  = $hashed
         }) | Out-Null
 
-    return [ordered]@{ state = $state; hashed = $hashed }
+    return [ordered]@{ state = $state; hashed = $hashed; bytes = $bytes }
 }
 
 function Send-AgentHeartbeatReport {
@@ -914,10 +917,17 @@ function Invoke-AgentJobs {
 
         A failure is reported rather than swallowed: the server treats an unfinished scan
         as "changed nothing", never as deletions.
-    #>
-    param($Config, [int] $MaxJobs = 4)
 
-    for ($taken = 0; $taken -lt $MaxJobs; $taken++) {
+        "Until it has none" means several empty answers in a row, not the first one. The
+        server queues the next job only once it has noticed the last one finish, so a
+        claim in that gap correctly returns nothing while the queue is still full. Taking
+        that as the end of the run was worth one job per scheduled wake -- a hundred files
+        every fifteen minutes, whatever was waiting.
+    #>
+    param($Config, [int] $MaxEmptyClaims = 3, [int] $EmptyClaimSleepSeconds = 5)
+
+    $emptyClaims = 0
+    while (Test-AgentClaimAgain -EmptyClaims $emptyClaims -MaxEmptyClaims $MaxEmptyClaims) {
         try {
             $claim = Invoke-AgentApi -Config $Config -Path '/api/agent/jobs/claim' -Body ([ordered]@{
                     # The same fallback the report uses. A blank hostname is rejected by
@@ -932,7 +942,17 @@ function Invoke-AgentJobs {
         }
 
         $job = Get-AgentJobFromClaim -Response $claim
-        if ($null -eq $job) { return }
+        if ($null -eq $job) {
+            # Not necessarily the end of the work: the server queues the next job only
+            # after it notices the last one finish. Wait out that gap before believing it.
+            $emptyClaims++
+            if (Test-AgentClaimAgain -EmptyClaims $emptyClaims -MaxEmptyClaims $MaxEmptyClaims) {
+                Start-Sleep -Seconds $EmptyClaimSleepSeconds
+            }
+            continue
+        }
+
+        $emptyClaims = 0
         Write-AgentLog -Message "Starting $($job.type) for $($job.rootName) ($($job.hostPath))" -Config $Config
 
         try {

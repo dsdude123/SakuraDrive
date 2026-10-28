@@ -936,6 +936,33 @@ Describe 'Helpers' {
     }
 }
 
+Describe 'Asking the server for work' {
+    It 'keeps asking while it is under the limit' {
+        Test-AgentClaimAgain -EmptyClaims 0 -MaxEmptyClaims 3 | Should -BeTrue
+        Test-AgentClaimAgain -EmptyClaims 2 -MaxEmptyClaims 3 | Should -BeTrue
+    }
+
+    It 'gives up once enough answers in a row have been empty' {
+        Test-AgentClaimAgain -EmptyClaims 3 -MaxEmptyClaims 3 | Should -BeFalse
+        Test-AgentClaimAgain -EmptyClaims 9 -MaxEmptyClaims 3 | Should -BeFalse
+    }
+
+    # The bug this exists for: the server queues the next hashing job only after it
+    # notices the last one finish, so the claim immediately after a job legitimately
+    # comes back empty. Treating that as the end of the run meant one job per wake.
+    It 'does not stop on the first empty answer' {
+        Test-AgentClaimAgain -EmptyClaims 1 -MaxEmptyClaims 3 | Should -BeTrue
+    }
+
+    It 'can be told not to wait at all' {
+        Test-AgentClaimAgain -EmptyClaims 0 -MaxEmptyClaims 0 | Should -BeFalse
+    }
+
+    It 'returns a plain boolean rather than something that only looks like one' {
+        Test-AgentClaimAgain -EmptyClaims 0 -MaxEmptyClaims 3 | Should -BeOfType [bool]
+    }
+}
+
 Describe 'New-AgentReport' {
     It 'produces a report with every section present' {
         $report = New-AgentReport -Hostname 'NAS-01'

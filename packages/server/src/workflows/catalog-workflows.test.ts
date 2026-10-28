@@ -286,6 +286,51 @@ describe('catalog scan', () => {
     await manager.drain();
   });
 
+  /** How many files the server put in each hashing job it queued, oldest first. */
+  function hashJobSizes(): number[] {
+    return db
+      .prepare<[], { payload_json: string }>(
+        `SELECT payload_json FROM agent_jobs WHERE type = 'catalog.hash' ORDER BY id`,
+      )
+      .all()
+      .map((row) => (JSON.parse(row.payload_json).files as unknown[]).length);
+  }
+
+  /**
+   * The agent costs a claim, a finish and up to one poll interval per job, so the
+   * batch size decides how much of a hashing run is actual hashing. It used to be
+   * derived from `hashConcurrency` and came out at 100 files, which on a real pool was
+   * a couple of seconds of work for every round trip and a queue that crawled.
+   */
+  it('hands the agent whole batches rather than a hundred files at a time', async () => {
+    for (let i = 0; i < 1_500; i += 1) put(`f${i}.txt`, `contents ${i}`);
+    configureRoot();
+    await runScan();
+    await runHash();
+
+    // One job, not fifteen.
+    expect(hashJobSizes()).toEqual([1_500]);
+  });
+
+  it('honours a configured hash batch size, queueing one job per batch', async () => {
+    for (let i = 0; i < 300; i += 1) put(`f${i}.txt`, `contents ${i}`);
+    configureRoot();
+    await runScan();
+    settings.update({ catalog: { hashBatchSize: 100 } });
+
+    // `runHash` serves a single job; it was written when a batch was 100 files and no
+    // test had more than a handful, so nothing ever exercised a run of several jobs.
+    const started = await manager.start('catalog.hash', { force: true });
+    while (manager.isRunning('catalog.hash')) {
+      if (!(await serveHash({}, () => !manager.isRunning('catalog.hash')))) break;
+    }
+    await manager.drain();
+
+    expect(manager.run(started.id)!.state).toBe('completed');
+    expect(hashJobSizes()).toEqual([100, 100, 100]);
+    expect(catalog.countHashQueue(ROOT_ID, 0, 0, 0)).toBe(0);
+  });
+
   it('records created, modified and deleted differences between runs', async () => {
     put('a.txt', 'one');
     put('b.txt', 'two');

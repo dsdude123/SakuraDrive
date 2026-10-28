@@ -216,6 +216,18 @@ function GeneralTab({
           />
         </Field>
         <Field
+          label="Files per hashing job"
+          help="How many files the server hands the agent at a time. Each job costs a claim, a finish and a poll before the next is queued, so a small batch spends most of its time on plumbing rather than reading disks."
+        >
+          <input
+            type="number"
+            min={50}
+            max={50000}
+            value={draft.catalog.hashBatchSize}
+            onChange={(event) => patch((next) => { next.catalog.hashBatchSize = Number(event.target.value); })}
+          />
+        </Field>
+        <Field
           label="Re-scan every (hours)"
           help="How long to wait after a finished pass before walking every root again. The bit-rot scan shares the disks with the catalog scan and runs after it, so with no gap here the catalog scan restarts the moment it finishes and nothing is ever verified. 0 walks continuously."
         >

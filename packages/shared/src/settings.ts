@@ -204,7 +204,12 @@ export const settingsSchema = z.object({
       maxHashMBps: z.number().min(0).default(0),
       /** Sleep between files, a cheap way to leave headroom for clients. */
       interFileDelayMs: z.number().int().min(0).max(5000).default(0),
-      /** Parallel hashing workers. 1 is gentlest on spinning rust. */
+      /**
+       * Parallel hashing workers.
+       *
+       * Only applies to hashing done inside the container. The Windows agent, which is
+       * what reads the pool, hashes one file at a time regardless.
+       */
       hashConcurrency: z.number().int().min(1).max(16).default(2),
       /** Parallel directory walkers during cataloguing. */
       scanConcurrency: z.number().int().min(1).max(16).default(2),
@@ -249,6 +254,18 @@ export const settingsSchema = z.object({
       massDeletionAlertPercent: z.number().min(0).max(100).default(10),
       /** Files written to the catalog per transaction while walking. */
       batchSize: z.number().int().min(50).max(10_000).default(500),
+      /**
+       * Files handed to the agent in one hashing job.
+       *
+       * Every job costs a claim, a finish and up to one server poll interval before the
+       * next one is queued, so a small batch spends most of its time on plumbing. This
+       * was derived from `hashConcurrency` and came out at 100, which on a real pool is
+       * a couple of seconds of hashing per round trip.
+       *
+       * The agent reports progress every 25 files and stops at the first batch after
+       * the window closes, so a large job is still interruptible to within seconds.
+       */
+      hashBatchSize: z.number().int().min(50).max(50_000).default(2_000),
       /**
        * How often the scan workflow checks on a job it handed to the agent. Short
        * enough that a closing I/O window is acted on promptly, long enough not to spin.

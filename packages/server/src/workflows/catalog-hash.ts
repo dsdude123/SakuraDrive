@@ -96,11 +96,10 @@ export function createCatalogHashWorkflow(deps: CatalogHashDeps): WorkflowDefini
 
       const algorithm = config.catalog.hashAlgorithm;
       const maxBytesPerSecond = Math.round(config.schedule.maxHashMBps * 1024 * 1024);
-      const concurrency = Math.max(1, config.schedule.hashConcurrency);
 
       for (; cursor.rootIndex < roots.length; cursor.rootIndex += 1) {
         const root = roots[cursor.rootIndex]!;
-        if (await hashViaAgent(ctx, { deps, root, algorithm, cursor, concurrency })) {
+        if (await hashViaAgent(ctx, { deps, root, algorithm, cursor })) {
           ctx.setCursor(cursor);
           ctx.log(`Paused after hashing ${cursor.hashed.toLocaleString()} files`);
           return { state: 'paused' };
@@ -162,7 +161,6 @@ async function hashViaAgent(
     root: ScanRoot;
     algorithm: string;
     cursor: HashCursor;
-    concurrency: number;
   },
 ): Promise<boolean> {
   const { deps, root, algorithm, cursor } = args;
@@ -175,7 +173,7 @@ async function hashViaAgent(
     const batch = catalog.hashQueue(
       root.id,
       config.catalog.rehashIntervalDays,
-      Math.max(50, args.concurrency * 50),
+      config.catalog.hashBatchSize,
       root.minHashSizeBytes,
       root.maxHashSizeBytes,
     );

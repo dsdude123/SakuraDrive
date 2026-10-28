@@ -1777,6 +1777,33 @@ function Test-AgentJobContinue {
     [bool]$Response.continue
 }
 
+function Test-AgentClaimAgain {
+    <#
+    .SYNOPSIS
+        Whether to ask the server for work again after it said it had none.
+    .DESCRIPTION
+        The server queues the next hashing job only once it has noticed the last one
+        finish, which it does by polling, so there is a gap of up to one poll interval
+        where a claim correctly returns "no work" and there is plenty of work.
+
+        The agent used to take that first empty answer as the end of the run and exit,
+        which meant one job per scheduled wake -- a hundred files every fifteen minutes,
+        however much was queued. Waiting a few seconds and asking again costs nothing
+        and is the difference between a hash queue that drains and one that does not.
+
+        Still bounded: several empty answers in a row really do mean there is nothing
+        to do, usually because the I/O window has closed.
+    #>
+    [CmdletBinding()]
+    param(
+        [int] $EmptyClaims,
+        [int] $MaxEmptyClaims = 3
+    )
+
+    if ($MaxEmptyClaims -le 0) { return $false }
+    return $EmptyClaims -lt $MaxEmptyClaims
+}
+
 #endregion
 
 #region Self update -----------------------------------------------------------
@@ -2189,6 +2216,7 @@ Export-ModuleMember -Function @(
     'Get-ScheduledTaskResultText'
     'Get-AgentJobFromClaim'
     'Test-AgentJobContinue'
+    'Test-AgentClaimAgain'
     'Get-AgentDistributionFile'
     'Test-AgentScriptSyntax'
     'Get-AgentFileHash'
