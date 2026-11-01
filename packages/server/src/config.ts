@@ -21,6 +21,11 @@ export interface ServerConfig {
    */
   agentDistDir: string;
   /**
+   * Directory holding the cross-platform network benchmark client, served for machines
+   * on the network to download and run against the shares.
+   */
+  clientsDir: string;
+  /**
    * A previous data directory to copy across on first start, if this one is empty.
    * Set to the old bind mount when moving the database off a slow filesystem.
    */
@@ -60,6 +65,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     dataDir,
     databasePath: path.join(dataDir, 'sakuradrive.sqlite'),
     webRoot: path.resolve(envString('SAKURADRIVE_WEB_ROOT', path.join(process.cwd(), 'public'))),
+    clientsDir: path.resolve(envString('SAKURADRIVE_CLIENTS_DIR', path.join(process.cwd(), 'clients'))),
     agentDistDir: path.resolve(
       envString('SAKURADRIVE_AGENT_DIST_DIR', path.join(process.cwd(), 'agent')),
     ),

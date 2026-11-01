@@ -153,6 +153,8 @@ jobs:
           # it was installed with and the distribution endpoint answers 503.
           docker exec sakuradrive-ci test -f /app/agent/SakuraDriveAgent.ps1
           docker exec sakuradrive-ci test -f /app/agent/Bootstrap-SakuraDriveAgent.ps1
+          # And the network benchmark client, or /api/perf/netperf.py answers 404.
+          curl -sf http://127.0.0.1:8080/api/perf/netperf.py | head -1 | grep -q python3
           docker rm -f sakuradrive-ci
 
       # Publishing only from the default branch and from tags. Every other branch still

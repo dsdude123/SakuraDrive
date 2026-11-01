@@ -963,6 +963,139 @@ Describe 'Asking the server for work' {
     }
 }
 
+Describe 'Benchmark arithmetic' {
+    It 'reports throughput in MB/s, 10^6 bytes a second' {
+        ConvertTo-AgentMBps -Bytes 200000000 -Milliseconds 1000 | Should -Be 200
+        ConvertTo-AgentMBps -Bytes 50000000 -Milliseconds 250 | Should -Be 200
+    }
+
+    It 'has no throughput for a test that took no time' {
+        ConvertTo-AgentMBps -Bytes 100 -Milliseconds 0 | Should -BeNullOrEmpty
+    }
+
+    # The server computes these too; a figure must mean the same either side of the wire.
+    It 'summarises latency the way the server does' {
+        $summary = Get-AgentLatencySummary -Samples (1..100)
+        $summary.median | Should -Be 50.5
+        $summary.p95 | Should -Be 95
+        (Get-AgentLatencySummary -Samples @(4, 1, 3)).median | Should -Be 3
+        (Get-AgentLatencySummary -Samples @(7)).p95 | Should -Be 7
+    }
+
+    It 'has no summary for no samples' {
+        $summary = Get-AgentLatencySummary -Samples @()
+        $summary.median | Should -BeNullOrEmpty
+        $summary.p95 | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-AgentPerfTestPath' {
+    It 'puts the file at the root of a volume GUID path, beside the PoolPart folder' {
+        Get-AgentPerfTestPath -Directory '\\?\Volume{9f3a}\' -Tag 'abc' | Should -Be '\\?\Volume{9f3a}\.sakuradrive-perf-abc.tmp'
+    }
+
+    It 'puts the file at the root of a pool drive' {
+        Get-AgentPerfTestPath -Directory 'J:\' -Tag 'abc' | Should -Be 'J:\.sakuradrive-perf-abc.tmp'
+    }
+
+    It 'copes with a directory given without its trailing separator' {
+        Get-AgentPerfTestPath -Directory 'J:' -Tag 'abc' | Should -Be 'J:\.sakuradrive-perf-abc.tmp'
+        Get-AgentPerfTestPath -Directory 'C:\Bench' -Tag 'abc' | Should -Be 'C:\Bench\.sakuradrive-perf-abc.tmp'
+        Get-AgentPerfTestPath -Directory '/tmp/bench' -Tag 'abc' | Should -Be '/tmp/bench/.sakuradrive-perf-abc.tmp'
+    }
+}
+
+Describe 'Get-AgentRandomOffsets' {
+    # Unbuffered reads must start on a sector boundary.
+    It 'returns block-aligned offsets inside the file' {
+        $offsets = Get-AgentRandomOffsets -FileBytes (64MB) -BlockBytes 4096 -Count 200 -Seed 7
+        $offsets.Count | Should -Be 200
+        foreach ($offset in $offsets) {
+            ($offset % 4096) | Should -Be 0
+            $offset | Should -BeLessThan (64MB)
+            $offset | Should -BeGreaterOrEqual 0
+        }
+    }
+
+    It 'returns nothing for a file smaller than one block' {
+        (Get-AgentRandomOffsets -FileBytes 100 -BlockBytes 4096 -Count 5).Count | Should -Be 0
+    }
+
+    It 'returns a real array even for a single offset' {
+        $offsets = Get-AgentRandomOffsets -FileBytes (1MB) -Count 1 -Seed 3
+        $offsets.GetType().IsArray | Should -BeTrue
+        $offsets.Count | Should -Be 1
+    }
+}
+
+Describe 'Measure-AgentStorageTarget' {
+    BeforeEach {
+        $script:BenchDir = Join-Path ([System.IO.Path]::GetTempPath()) "sakura-bench-$([guid]::NewGuid())"
+        $null = New-Item -ItemType Directory -Path $script:BenchDir -Force
+        $script:Target = [pscustomobject]@{ key = 'vol-1'; label = 'DRIVEPOOL1'; kind = 'disk'; path = $script:BenchDir }
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $script:BenchDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'measures a directory and leaves nothing behind' {
+        $result = Measure-AgentStorageTarget -Target $script:Target -SizeBytes (8MB) -LatencySamples 16 -ChunkBytes (4MB)
+        $result.error | Should -BeNullOrEmpty
+        $result.key | Should -Be 'vol-1'
+        $result.kind | Should -Be 'disk'
+        $result.writeMBps | Should -BeGreaterThan 0
+        $result.readMBps | Should -BeGreaterThan 0
+        # Written once and read once.
+        $result.bytesTested | Should -Be (16MB)
+        @(Get-ChildItem -LiteralPath $script:BenchDir -Force).Count | Should -Be 0
+    }
+
+    # From cache, random-read latency is the same few microseconds on every disk.
+    It 'reports latency only when the read bypassed the cache' {
+        $result = Measure-AgentStorageTarget -Target $script:Target -SizeBytes (4MB) -LatencySamples 8 -ChunkBytes (4MB)
+        if ($result.readMayBeCached) {
+            $result.latencyMs | Should -BeNullOrEmpty
+        }
+        else {
+            $result.latencyMs | Should -Not -BeNullOrEmpty
+            $result.latencyP95Ms | Should -BeGreaterOrEqual $result.latencyMs
+        }
+    }
+
+    It 'rounds the test up to whole chunks' {
+        $result = Measure-AgentStorageTarget -Target $script:Target -SizeBytes 1 -LatencySamples 0 -ChunkBytes (1MB)
+        $result.bytesTested | Should -Be (2MB)
+    }
+
+    It 'reports a directory it cannot write to rather than throwing' {
+        $missing = [pscustomobject]@{ key = 'vol-x'; kind = 'disk'; path = (Join-Path $script:BenchDir 'missing') }
+        $result = Measure-AgentStorageTarget -Target $missing -SizeBytes (1MB) -LatencySamples 0 -ChunkBytes (1MB)
+        $result.error | Should -Not -BeNullOrEmpty
+        $result.writeMBps | Should -BeNullOrEmpty
+    }
+
+    It 'still reports throughput when only the latency test fails' {
+        # The read is mocked to succeed unbuffered, so the latency test always runs here --
+        # otherwise a runner whose unbuffered read falls back would skip it and prove nothing.
+        Mock -ModuleName SakuraDrive.Agent Read-AgentWholeFile { [long](2MB) }
+        Mock -ModuleName SakuraDrive.Agent Get-AgentRandomOffsets { throw 'seek failed' }
+        $result = Measure-AgentStorageTarget -Target $script:Target -SizeBytes (2MB) -LatencySamples 4 -ChunkBytes (1MB)
+        $result.error | Should -BeNullOrEmpty
+        $result.readMBps | Should -BeGreaterThan 0
+        $result.latencyMs | Should -BeNullOrEmpty
+    }
+
+    # A gigabyte left behind on somebody's disk is the failure that matters here.
+    It 'removes the file even when reading it back fails' {
+        Mock -ModuleName SakuraDrive.Agent Read-AgentWholeFile { throw 'the disk went away' }
+        $result = Measure-AgentStorageTarget -Target $script:Target -SizeBytes (2MB) -LatencySamples 0 -ChunkBytes (1MB)
+        $result.error | Should -Be 'the disk went away'
+        $result.writeMBps | Should -BeGreaterThan 0
+        @(Get-ChildItem -LiteralPath $script:BenchDir -Force).Count | Should -Be 0
+    }
+}
+
 Describe 'New-AgentReport' {
     It 'produces a report with every section present' {
         $report = New-AgentReport -Hostname 'NAS-01'

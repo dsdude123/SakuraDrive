@@ -44,7 +44,7 @@ export type ExportableTable = (typeof EXPORTABLE_TABLES)[number];
 const HISTORY_TABLES: ExportableTable[] = ['catalog_changes'];
 const CATALOG_TABLES: ExportableTable[] = ['files', 'dir_stats', 'catalog_changes', 'catalog_runs'];
 const SMART_TABLES = ['smart_snapshots', 'smart_attribute_history'] as const;
-const PERFORMANCE_TABLES = ['performance_samples', 'primocache_samples'] as const;
+const PERFORMANCE_TABLES = ['performance_samples', 'primocache_samples', 'perf_results'] as const;
 
 export interface ExportOptions {
   includeCatalog?: boolean;

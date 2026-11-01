@@ -6,9 +6,12 @@ import {
   agentJobClaimSchema,
   agentJobFinishSchema,
   agentReportSchema,
+  networkPerfSubmissionSchema,
+  perfTargetSchema,
 } from '@sakuradrive/shared';
 import { nowIso } from '../db/index.js';
 import type { Services } from '../services/container.js';
+import { rootForJob } from '../services/agent-job-service.js';
 import { applyAgentHashes } from '../services/hash-ingest.js';
 import { parseBody } from './helpers.js';
 
@@ -16,7 +19,7 @@ import { parseBody } from './helpers.js';
 const BOOTSTRAP_FILE = 'Bootstrap-SakuraDriveAgent.ps1';
 
 export function registerAgentRoutes(app: FastifyInstance, services: Services): void {
-  const { agentDist, agents, agentJobs, auth, bitrot, catalog, db, settings, logger } = services;
+  const { agentDist, agents, agentJobs, auth, bitrot, catalog, db, settings, logger, perf } = services;
 
   /** Bearer token, or null. The agent is a scheduled task: no cookie, no password. */
   const authenticate = (request: { headers: Record<string, unknown> }): string | null => {
@@ -59,6 +62,9 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
     }
 
     const result = agents.ingest(report);
+    // Coverage changes when a cache task is edited on the host, so it is checked on
+    // every report rather than waiting for the weekly benchmark.
+    perf.syncCacheCoverage();
     return {
       accepted: true,
       agentId: String(result.agentId),
@@ -66,6 +72,21 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
       alertsRaised: result.alertsRaised,
       warnings: [...warnings, ...result.warnings],
     };
+  });
+
+  /**
+   * A network benchmark from the cross-platform client, run on some machine that uses
+   * the shares. Authenticated with an agent token like the agent itself: the client is
+   * a script, often run from a scheduler, with no browser and no password.
+   */
+  app.post('/api/agent/perf/network', async (request, reply) => {
+    if (!authenticate(request)) {
+      return reply.code(401).send({ error: 'unauthorized', message: 'A valid agent token is required' });
+    }
+    const body = parseBody(networkPerfSubmissionSchema, request, reply);
+    if (!body) return reply;
+    const result = perf.recordNetwork(body);
+    return { accepted: true, id: result.id };
   });
 
   /* ----------------------------------------------------- agent distribution */
@@ -142,7 +163,7 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
     const job = agentJobs.claim(body.hostname);
     if (!job) return reply.code(204).send();
 
-    const root = settings.get().catalog.roots.find((candidate) => candidate.id === job.rootId);
+    const root = rootForJob(job, settings.get().catalog.roots);
     if (!root) {
       // The root was removed while the job sat in the queue. Say so rather than handing
       // out work against a path nobody configured any more.
@@ -174,13 +195,17 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
       return { accepted: 0, continue: false };
     }
 
-    const root = settings.get().catalog.roots.find((candidate) => candidate.id === job.rootId);
+    const root = rootForJob(job, settings.get().catalog.roots);
     if (!root) {
       agentJobs.cancel(job.id, 'The catalog root no longer exists.');
       return { accepted: 0, continue: false };
     }
 
     let accepted = 0;
+    if (job.type === 'perf.benchmark' && body.perf.length > 0) {
+      const targets = z.array(perfTargetSchema).catch([]).parse(job.payload.targets);
+      accepted = perf.recordAgentMeasurements(job.workflowRunId, job.claimedBy ?? '', targets, body.perf);
+    }
     if (job.type === 'catalog.scan' && body.entries.length > 0 && job.catalogRunId !== null) {
       accepted = await catalog.recordAgentFilesYielding(job.catalogRunId, root, body.entries);
     } else if (job.type === 'catalog.hash' && body.hashes.length > 0) {
@@ -254,8 +279,8 @@ export function registerAgentRoutes(app: FastifyInstance, services: Services): v
         id: job.id,
         type: job.type,
         rootId: job.rootId,
-        rootName: roots.find((root) => root.id === job.rootId)?.name ?? job.rootId,
-        hostPath: roots.find((root) => root.id === job.rootId)?.hostPath ?? '',
+        rootName: rootForJob(job, roots)?.name ?? job.rootId,
+        hostPath: job.type === 'perf.benchmark' ? '' : (rootForJob(job, roots)?.hostPath ?? ''),
         state: job.state,
         claimedBy: job.claimedBy,
         error: job.error,

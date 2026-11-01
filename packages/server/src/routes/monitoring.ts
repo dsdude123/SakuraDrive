@@ -6,8 +6,11 @@ import {
   type HealthSummary,
   type Severity,
 } from '@sakuradrive/shared';
+import fs from 'node:fs';
+import path from 'node:path';
 import { nowIso } from '../db/index.js';
 import type { Services } from '../services/container.js';
+import { lastCompletedAt } from '../workflows/support.js';
 import { SESSION_COOKIE, intParam, parseBody, parseQuery, sendCsv, toCsv } from './helpers.js';
 
 export function registerMonitoringRoutes(app: FastifyInstance, services: Services): void {
@@ -48,6 +51,27 @@ export function registerMonitoringRoutes(app: FastifyInstance, services: Service
   });
 
   app.get('/api/volumes', async () => ({ volumes: agents.listVolumes() }));
+
+  /* ------------------------------------------------------------ performance */
+
+  app.get('/api/perf', async () => services.perf.overview(lastCompletedAt(services.db, 'perf.benchmark')));
+
+  /**
+   * The cross-platform network benchmark client, as a download.
+   *
+   * Served rather than published elsewhere so the version a client runs always matches
+   * the server it submits to.
+   */
+  app.get('/api/perf/netperf.py', async (_request, reply) => {
+    const file = path.join(services.config.clientsDir, 'sakuradrive-netperf.py');
+    if (!fs.existsSync(file)) {
+      return reply.code(404).send({ error: 'not_found', message: 'This image was built without the network client' });
+    }
+    return reply
+      .header('content-type', 'text/x-python; charset=utf-8')
+      .header('content-disposition', 'attachment; filename="sakuradrive-netperf.py"')
+      .send(fs.readFileSync(file));
+  });
 
   /**
    * Arm or mute low-free-space alerts for one or more volumes.

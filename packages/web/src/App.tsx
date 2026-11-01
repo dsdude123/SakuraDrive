@@ -10,6 +10,7 @@ import { CatalogPage } from './pages/Catalog.js';
 import { DashboardPage } from './pages/Dashboard.js';
 import { DriveDetailPage, DrivesPage } from './pages/Drives.js';
 import { LoginPage } from './pages/Login.js';
+import { PerformancePage } from './pages/Performance.js';
 import { PoolsPage } from './pages/Pools.js';
 import { RecoveryPage } from './pages/Recovery.js';
 import { SchedulePage } from './pages/Schedule.js';
@@ -90,6 +91,7 @@ export function App(): JSX.Element {
         <Route path="/drives" element={<DrivesPage />} />
         <Route path="/drives/:id" element={<DriveDetailPage />} />
         <Route path="/pools" element={<PoolsPage />} />
+        <Route path="/performance" element={<PerformancePage />} />
         <Route path="/catalog" element={<CatalogPage />} />
         <Route path="/storage" element={<StoragePage />} />
         <Route path="/bitrot" element={<BitrotPage />} />

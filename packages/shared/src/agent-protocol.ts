@@ -309,7 +309,7 @@ export type AgentReportResponse = z.infer<typeof agentReportResponseSchema>;
  * the pair of hands, not the brain. That keeps one implementation of "what a scan
  * means" and makes the container's view of the host irrelevant to the design.
  */
-export const agentJobTypeSchema = z.enum(['catalog.scan', 'catalog.hash']);
+export const agentJobTypeSchema = z.enum(['catalog.scan', 'catalog.hash', 'perf.benchmark']);
 export type AgentJobType = z.infer<typeof agentJobTypeSchema>;
 
 /** One file the agent found, in the same shape the container-side walker produces. */
@@ -342,6 +342,66 @@ export const agentHashResultSchema = z.object({
 });
 export type AgentHashResult = z.infer<typeof agentHashResultSchema>;
 
+/**
+ * Something the agent should benchmark: a disk, by volume GUID path, or a pool through
+ * its own drive letter.
+ *
+ * A disk is tested at its volume root, outside the `PoolPart.*` folder, so DrivePool
+ * never sees the file. A pool is tested through the pool drive, so the figure includes
+ * everything a client's I/O goes through.
+ */
+export const perfTargetSchema = z.object({
+  /** Volume GUID for a disk, pool id for a pool. Echoed back with the result. */
+  key: nonEmpty,
+  label: z.string().default(''),
+  kind: z.enum(['disk', 'pool']),
+  /** Directory the test file is written into, e.g. `\\?\Volume{...}\` or `J:\`. */
+  path: nonEmpty,
+});
+export type PerfTarget = z.infer<typeof perfTargetSchema>;
+
+/** What one benchmark of one target measured. */
+export const perfMeasurementSchema = z.object({
+  key: nonEmpty,
+  kind: z.enum(['disk', 'pool']),
+  bytesTested: z.number().nonnegative().default(0),
+  /** Sequential write with write-through, in MB/s (10^6 bytes). */
+  writeMBps: optionalNumber,
+  /** Sequential read after dropping the file from the Windows cache, in MB/s. */
+  readMBps: optionalNumber,
+  /** Random 4 KiB reads: median and 95th percentile, in milliseconds. */
+  latencyMs: optionalNumber,
+  latencyP95Ms: optionalNumber,
+  /** True when the agent could not drop the file from the cache before reading. */
+  readMayBeCached: z.boolean().default(false),
+  /** Why the target was not tested at all, e.g. not enough free space. */
+  skipped: z.string().nullish(),
+  error: z.string().nullish(),
+});
+export type PerfMeasurement = z.infer<typeof perfMeasurementSchema>;
+
+/**
+ * A network benchmark, submitted by the cross-platform client from a machine on the
+ * network: throughput to and from an SMB share, as that machine sees it.
+ */
+export const networkPerfSubmissionSchema = z.object({
+  /** The machine that ran the test. */
+  client: nonEmpty,
+  platform: z.string().default(''),
+  /** The share as the client addressed it, e.g. `\\tokyo-3\Tier1` or `/Volumes/Tier1`. */
+  share: nonEmpty,
+  bytesTested: z.number().nonnegative().default(0),
+  writeMBps: optionalNumber,
+  readMBps: optionalNumber,
+  /** Create, write 4 KiB, close and delete one small file: median and p95, ms. */
+  latencyMs: optionalNumber,
+  latencyP95Ms: optionalNumber,
+  readMayBeCached: z.boolean().default(false),
+  error: z.string().nullish(),
+  clientVersion: z.string().default(''),
+});
+export type NetworkPerfSubmission = z.infer<typeof networkPerfSubmissionSchema>;
+
 export const agentJobSchema = z.object({
   jobId: z.number().int(),
   type: agentJobTypeSchema,
@@ -371,6 +431,10 @@ export const agentJobSchema = z.object({
     .default([]),
   /** Bytes per second the agent should not exceed while hashing. 0 is unthrottled. */
   maxBytesPerSecond: z.number().nonnegative().default(0),
+  /** `perf.benchmark` only: what to test, and how hard. */
+  targets: z.array(perfTargetSchema).default([]),
+  testSizeBytes: z.number().int().nonnegative().default(0),
+  latencySamples: z.number().int().nonnegative().default(0),
 });
 export type AgentJob = z.infer<typeof agentJobSchema>;
 
@@ -383,6 +447,7 @@ export const agentJobClaimSchema = z.object({
 export const agentJobBatchSchema = z.object({
   entries: z.array(agentFileEntrySchema).default([]),
   hashes: z.array(agentHashResultSchema).default([]),
+  perf: z.array(perfMeasurementSchema).default([]),
   /** Directories the agent could not read. Reported, never silently skipped. */
   errors: z.array(z.object({ relPath: z.string(), message: z.string() })).default([]),
   cursor: z.unknown().nullish(),

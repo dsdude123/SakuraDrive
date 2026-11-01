@@ -341,6 +341,45 @@ export const settingsSchema = z.object({
     })
     .default({}),
 
+  perfTest: z
+    .object({
+      /**
+       * Scheduled benchmarks of every disk and pool, run by the agent inside the I/O
+       * window. Each test writes a temporary file, reads it back and deletes it.
+       */
+      enabled: z.boolean().default(true),
+      /** How often to run the scheduled benchmark. */
+      intervalDays: z.number().min(1).max(365).default(7),
+      /**
+       * Size of the file written to each disk and pool. Bigger is more honest -- it
+       * outlasts write-back caches -- and costs that much free space and time per disk.
+       */
+      diskTestSizeMB: z.number().int().min(64).max(65_536).default(1024),
+      /** Random 4 KiB reads timed per disk, for the latency figure. */
+      latencySamples: z.number().int().min(8).max(4096).default(64),
+      /** Also test through the pool's own drive letter, DrivePool and all. */
+      includePools: z.boolean().default(true),
+      /** Volume GUIDs never benchmarked, nor checked for cache coverage. */
+      excludedVolumeIds: z.array(z.string()).default([]),
+      /**
+       * A disk is flagged when it manages less than this fraction of the median of
+       * comparable disks -- same pool, same media -- or of its own recent results.
+       */
+      slowFraction: z.number().min(0.05).max(0.95).default(0.5),
+      /** Raise an alert for a pool member no PrimoCache task fronts. */
+      checkCacheCoverage: z.boolean().default(true),
+      /** Benchmarks of the container's own storage: its data volume and bind mounts. */
+      wsl: z
+        .object({
+          enabled: z.boolean().default(true),
+          testSizeMB: z.number().int().min(16).max(16_384).default(256),
+          /** fsync'd 4 KiB writes timed, which is what a database pays per commit. */
+          syncSamples: z.number().int().min(8).max(2000).default(100),
+        })
+        .default({}),
+    })
+    .default({}),
+
   bitrot: z
     .object({
       enabled: z.boolean().default(true),

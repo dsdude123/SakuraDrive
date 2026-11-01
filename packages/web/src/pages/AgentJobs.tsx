@@ -8,7 +8,7 @@ import { useToast } from '../hooks/useToast.js';
 
 interface AgentJob {
   id: number;
-  type: 'catalog.scan' | 'catalog.hash';
+  type: 'catalog.scan' | 'catalog.hash' | 'perf.benchmark';
   rootId: string;
   rootName: string;
   hostPath: string;
@@ -42,6 +42,7 @@ interface JobsResponse {
 const TYPE_LABEL: Record<AgentJob['type'], string> = {
   'catalog.scan': 'Catalog scan',
   'catalog.hash': 'Bit-rot hashing',
+  'perf.benchmark': 'Benchmark',
 };
 
 /** An agent that has not spoken for this long is probably not coming back. */

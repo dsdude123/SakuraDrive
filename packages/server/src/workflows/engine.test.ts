@@ -439,6 +439,112 @@ describe('scheduler tick', () => {
     expect(manager.runs('catalog.hash')[0]!.state).toBe('completed');
   });
 
+  /** A hash run that only returns once it is asked to stop, like the real one. */
+  function longHash(log: string[]) {
+    return makeWorkflow({
+      id: 'catalog.hash',
+      name: 'Hash',
+      run: async (ctx: WorkflowContext) => {
+        log.push('hash');
+        while (ctx.shouldContinue()) await new Promise((resolve) => setTimeout(resolve, 5));
+        log.push(`hash stopped: ${ctx.stopReason()}`);
+        return { state: 'paused' };
+      },
+    });
+  }
+
+  /**
+   * On a pool still being hashed, the hash run holds the disks for every minute of
+   * every window: it pauses at the close and resumes first at the open. A benchmark
+   * queued behind it would never run, so a preempting workflow asks it to pause.
+   */
+  it('lets a due preempting workflow pause a long run in its group and go first', async () => {
+    const log: string[] = [];
+    let benchmarkDue = true;
+    manager.register(longHash(log));
+    manager.register(
+      makeWorkflow({
+        id: 'perf.benchmark',
+        name: 'Benchmark',
+        preempts: true,
+        hasWork: () => benchmarkDue,
+        run: async () => {
+          log.push('benchmark');
+          benchmarkDue = false;
+          return { state: 'completed' };
+        },
+      }),
+    );
+
+    // The hash already has the disks.
+    benchmarkDue = false;
+    await manager.start('catalog.hash', { trigger: 'schedule' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The benchmark falls due: the hash is asked to pause, and the benchmark runs once
+    // the disks are free -- ahead of the paused hash, which is otherwise resumed first.
+    benchmarkDue = true;
+    await manager.tick();
+    await settle();
+    expect(log).toEqual(['hash', 'hash stopped: preempted']);
+    await manager.tick();
+    await settle();
+    expect(log.slice(0, 3)).toEqual(['hash', 'hash stopped: preempted', 'benchmark']);
+    expect(manager.runs('catalog.hash')[0]!.state).toBe('paused');
+
+    // And the hash carries on afterwards, from its cursor.
+    await manager.tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(log).toContain('benchmark');
+    expect(log.filter((entry) => entry === 'hash')).toHaveLength(2);
+    manager.stop('catalog.hash');
+    await settle();
+  });
+
+  it('does not interrupt a run someone started with "Run now"', async () => {
+    const log: string[] = [];
+    manager.register(longHash(log));
+    manager.register(
+      makeWorkflow({
+        id: 'perf.benchmark',
+        name: 'Benchmark',
+        preempts: true,
+        run: async () => {
+          log.push('benchmark');
+          return { state: 'completed' };
+        },
+      }),
+    );
+    await manager.start('catalog.hash', { force: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    await manager.tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(log).toEqual(['hash']);
+    expect(manager.isRunning('catalog.hash')).toBe(true);
+    manager.stop('catalog.hash');
+    await settle();
+  });
+
+  it('does not preempt outside the window', async () => {
+    const log: string[] = [];
+    manager.register(
+      makeWorkflow({
+        id: 'perf.benchmark',
+        name: 'Benchmark',
+        preempts: true,
+        run: async () => {
+          log.push('benchmark');
+          return { state: 'completed' };
+        },
+      }),
+    );
+    settings.update({ schedule: { heavyIo: emptySchedule() } });
+    await manager.tick();
+    await settle();
+    expect(log).toEqual([]);
+  });
+
   it('does not overlap ticks', async () => {
     let concurrent = 0;
     let max = 0;

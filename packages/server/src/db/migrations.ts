@@ -553,6 +553,44 @@ export const MIGRATIONS: Migration[] = [
     CREATE INDEX files_path_group ON files(path_key, root_id) WHERE deleted_at IS NULL;
     `,
   },
+  {
+    version: 7,
+    name: 'perf-results',
+    up: `
+    -- Active benchmarks, as opposed to the passive latency samples in
+    -- performance_samples: a disk or pool the agent wrote to and read back, a share a
+    -- client on the network tested, or a path inside the container.
+    --
+    -- One table for all four because the questions asked of them are the same -- how
+    -- fast now, how fast before, how fast next to its peers -- and every row has the
+    -- same handful of figures. Throughput is MB/s, 10^6 bytes per second, because that
+    -- is the unit every disk datasheet uses.
+    CREATE TABLE perf_results (
+      id                 INTEGER PRIMARY KEY,
+      workflow_run_id    INTEGER,
+      -- disk | pool | network | wsl
+      kind               TEXT NOT NULL,
+      -- Volume GUID, pool id, share path or container path.
+      target_key         TEXT NOT NULL,
+      target_label       TEXT NOT NULL DEFAULT '',
+      host               TEXT NOT NULL DEFAULT '',
+      bytes_tested       INTEGER NOT NULL DEFAULT 0,
+      write_mbps         REAL,
+      read_mbps          REAL,
+      latency_ms         REAL,
+      latency_p95_ms     REAL,
+      -- Set when the test could not get the file out of the cache before reading it
+      -- back, so the read figure may be memory speed rather than storage speed.
+      read_may_be_cached INTEGER NOT NULL DEFAULT 0,
+      skipped            TEXT,
+      error              TEXT,
+      details_json       TEXT NOT NULL DEFAULT '{}',
+      measured_at        TEXT NOT NULL
+    );
+    CREATE INDEX perf_results_target ON perf_results(kind, target_key, measured_at DESC);
+    CREATE INDEX perf_results_run ON perf_results(workflow_run_id);
+    `,
+  },
 ];
 
 export function currentSchemaVersion(): number {

@@ -1,4 +1,5 @@
 import {
+  scanRootSchema,
   type AgentJob,
   type AgentJobBatch,
   type AgentJobFinish,
@@ -91,6 +92,26 @@ export interface EnqueueInput {
   catalogRunId: number | null;
   payload: Record<string, unknown>;
   cursor?: unknown;
+}
+
+/**
+ * The root a benchmark job is filed under.
+ *
+ * Jobs belong to a catalog root because almost all of them walk one, and that is what
+ * stops two agents scanning the same tree at once. A benchmark walks nothing; this
+ * stands in so the queue's one-job-per-root rule still means one benchmark at a time.
+ */
+export const PERF_ROOT: ScanRoot = scanRootSchema.parse({
+  id: '__perf',
+  name: 'Performance benchmark',
+  kind: 'disk',
+  hostPath: '-',
+});
+
+/** The root a job runs against: the benchmark's stand-in, or the configured catalog root. */
+export function rootForJob(job: Pick<AgentJobRow, 'type' | 'rootId'>, roots: readonly ScanRoot[]): ScanRoot | null {
+  if (job.type === 'perf.benchmark') return PERF_ROOT;
+  return roots.find((root) => root.id === job.rootId) ?? null;
 }
 
 /** A claimed job that has not been heard from for this long is considered abandoned. */
@@ -294,6 +315,9 @@ export class AgentJobService {
       hashAlgorithm: payload.hashAlgorithm ?? 'sha256',
       maxBytesPerSecond: payload.maxBytesPerSecond ?? 0,
       files: payload.files ?? [],
+      targets: payload.targets ?? [],
+      testSizeBytes: payload.testSizeBytes ?? 0,
+      latencySamples: payload.latencySamples ?? 0,
     };
   }
 }

@@ -870,6 +870,59 @@ function Invoke-CatalogHashJob {
     return [ordered]@{ state = $state; hashed = $hashed; bytes = $bytes }
 }
 
+function Invoke-PerfBenchmarkJob {
+    <#
+    .SYNOPSIS
+        Benchmark each disk and pool the server named, one at a time.
+    .DESCRIPTION
+        One target at a time on purpose: two disks benchmarked together share a
+        controller and a bus, and each would measure slower than it is.
+
+        Each result is posted as soon as it is in, so a window that closes part-way
+        keeps what was measured, and the next window carries on with the rest.
+    #>
+    param($Config, $Job)
+
+    $targets = @($Job.targets)
+    $size = [long]$Job.testSizeBytes
+    if ($size -le 0) { $size = 1GB }
+    $samples = [int]$Job.latencySamples
+    if ($samples -le 0) { $samples = 64 }
+
+    $done = 0
+    $bytes = [long]0
+    $state = 'completed'
+    foreach ($target in $targets) {
+        Write-AgentLog -Config $Config -Message "Benchmarking $($target.label) ($($target.path))"
+        $measurement = Measure-AgentStorageTarget -Target $target -SizeBytes $size -LatencySamples $samples
+        $bytes += [long]$measurement.bytesTested
+        $done++
+
+        if ($measurement.error) {
+            Write-AgentLog -Config $Config -Level 'WARN' -Message "Benchmark of $($target.label) failed: $($measurement.error)"
+        }
+
+        $response = Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/batch" -Body ([ordered]@{
+                perf          = @($measurement)
+                dirsDone      = $done
+                dirsRemaining = ($targets.Count - $done)
+            })
+        if (-not (Test-AgentJobContinue -Response $response) -and $done -lt $targets.Count) {
+            $state = 'paused'; break
+        }
+        Send-AgentHeartbeatReport -Config $Config | Out-Null
+    }
+
+    Invoke-AgentApi -Config $Config -Path "/api/agent/jobs/$($Job.jobId)/finish" -Body ([ordered]@{
+            state     = $state
+            filesSeen = $done
+            bytesSeen = $bytes
+            dirsDone  = $done
+        }) | Out-Null
+
+    return [ordered]@{ state = $state; measured = $done }
+}
+
 function Send-AgentHeartbeatReport {
     <#
     .SYNOPSIS
@@ -959,6 +1012,7 @@ function Invoke-AgentJobs {
             $result = switch ($job.type) {
                 'catalog.scan' { Invoke-CatalogScanJob -Config $Config -Job $job }
                 'catalog.hash' { Invoke-CatalogHashJob -Config $Config -Job $job }
+                'perf.benchmark' { Invoke-PerfBenchmarkJob -Config $Config -Job $job }
                 default { throw "The server asked for '$($job.type)', which this agent does not know how to do. Update the agent." }
             }
             Write-AgentLog -Message "Finished $($job.type) for $($job.rootName): $($result.state)" -Config $Config

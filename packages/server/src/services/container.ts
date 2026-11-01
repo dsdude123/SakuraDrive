@@ -6,6 +6,8 @@ import { openDatabase, type Db } from '../db/index.js';
 import { createLogger, createSilentLogger, type Logger } from '../logger.js';
 import { createBackupVerifyWorkflow } from '../workflows/backup-verify.js';
 import { createCatalogHashWorkflow } from '../workflows/catalog-hash.js';
+import { createPerfBenchmarkWorkflow } from '../workflows/perf-benchmark.js';
+import { PerfService } from './perf-service.js';
 import { createCatalogScanWorkflow } from '../workflows/catalog-scan.js';
 import { createDuplicationWorkflow } from '../workflows/catalog-duplication.js';
 import { WorkflowManager } from '../workflows/engine.js';
@@ -39,6 +41,7 @@ export interface Services {
   rootDetection: RootDetectionService;
   agentJobs: AgentJobService;
   bitrot: BitrotService;
+  perf: PerfService;
   backup: BackupService;
   exports: ExportService;
   notifier: DiscordNotifier;
@@ -81,6 +84,7 @@ export function createServices(options: CreateServicesOptions): Services {
   const catalog = new CatalogService(db, settings);
   const bitrot = new BitrotService(db, alerts);
   const agentJobs = new AgentJobService(db);
+  const perf = new PerfService(db, settings, alerts);
 
   const kopia = (): KopiaClient => {
     if (options.kopiaRunner) return new KopiaClient(options.kopiaRunner);
@@ -126,6 +130,9 @@ export function createServices(options: CreateServicesOptions): Services {
   workflows.register(createCatalogScanWorkflow({ db, settings, catalog, alerts, agentJobs }));
   workflows.register(createCatalogHashWorkflow({ settings, catalog, bitrot, alerts, agentJobs }));
   workflows.register(createDuplicationWorkflow({ db, settings, catalog, alerts }));
+  workflows.register(
+    createPerfBenchmarkWorkflow({ db, settings, perf, agentJobs, alerts, dataDir: config.dataDir }),
+  );
   workflows.register(createBackupVerifyWorkflow({ db, settings, backup }));
   workflows.register(
     createExportBackupWorkflow({
@@ -160,6 +167,7 @@ export function createServices(options: CreateServicesOptions): Services {
     config,
     db,
     agentJobs,
+    perf,
     logger,
     settings,
     alerts,

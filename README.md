@@ -187,4 +187,5 @@ pwsh -Command "Invoke-Pester -Path agent/tests -Output Detailed"     # 78 tests
 Further reading: [architecture](docs/ARCHITECTURE.md) ·
 [deploying](docs/DEPLOY.md) · [agent setup](docs/AGENT.md) ·
 [disaster recovery](docs/DISASTER-RECOVERY.md) ·
-[backup expectations](docs/BACKUP-EXPECTATIONS.md) · [API reference](docs/API.md)
+[backup expectations](docs/BACKUP-EXPECTATIONS.md) · [performance](docs/PERFORMANCE.md) ·
+[API reference](docs/API.md)

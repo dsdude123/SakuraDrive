@@ -37,6 +37,7 @@ matching HTTP status.
 | POST | `/api/agent/jobs/claim` | Bearer token. Returns a job, or 204 when there is none |
 | POST | `/api/agent/jobs/:id/batch` | Bearer token. Results, and whether to keep going |
 | POST | `/api/agent/jobs/:id/finish` | Bearer token. Final state and cursor |
+| POST | `/api/agent/perf/network` | Bearer token. Body is `networkPerfSubmissionSchema`; sent by `sakuradrive-netperf.py` |
 | GET | `/api/agent/dist` | Bearer token. The agent manifest: version, and every file with its SHA-256 |
 | GET | `/api/agent/dist/file?path=…` | Bearer token. One file as bytes; only names in the manifest are served |
 | GET | `/api/agents/dist` | What the interface renders the install command from |
@@ -59,6 +60,8 @@ matching HTTP status.
 | PATCH | `/api/volumes/low-space-alerts` | `{ ids: number[], enabled: boolean }` — arm or mute free-space alerts per volume |
 | GET | `/api/pools` | Pools and their parts |
 | GET | `/api/primocache` | Most recent PrimoCache sample |
+| GET | `/api/perf` | Latest benchmark per disk, pool, share and container path, with slowness and cache coverage |
+| GET | `/api/perf/netperf.py` | The network benchmark client. Public |
 
 ## Alerts
 

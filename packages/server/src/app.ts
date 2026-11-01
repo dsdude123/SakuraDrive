@@ -21,6 +21,9 @@ const PUBLIC_PATHS = new Set([
   '/api/auth/setup',
   '/api/auth/login',
   '/api/auth/logout',
+  // The network benchmark client: a script with no secrets in it, fetched with curl
+  // from machines that have no session. It still needs an agent token to submit.
+  '/api/perf/netperf.py',
 ]);
 
 export async function buildApp(services: Services): Promise<FastifyInstance> {

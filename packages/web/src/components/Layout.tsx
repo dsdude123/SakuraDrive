@@ -33,6 +33,7 @@ export function Layout({
     { to: '/', label: 'Dashboard' },
     { to: '/drives', label: 'Drives' },
     { to: '/pools', label: 'Pools' },
+    { to: '/performance', label: 'Performance' },
     {
       to: '/alerts',
       label: 'Alerts',

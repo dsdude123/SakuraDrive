@@ -14,7 +14,7 @@ import { fromJson, nowIso, toJson, type Db } from '../db/index.js';
 import type { Logger } from '../logger.js';
 import type { SettingsService } from '../services/settings-service.js';
 
-export type StopReason = 'none' | 'manual' | 'window-closed' | 'shutdown';
+export type StopReason = 'none' | 'manual' | 'window-closed' | 'shutdown' | 'preempted';
 
 export interface WorkflowContext {
   runId: number;
@@ -52,6 +52,19 @@ export interface WorkflowDefinition {
   concurrencyGroup: string | null;
   /** Start automatically when the window opens and there is work to do. */
   autoStart: boolean;
+  /**
+   * Short, periodic work that may interrupt a long run in its group rather than wait
+   * behind it.
+   *
+   * Without this a benchmark never runs on a pool still being hashed: the hash run
+   * pauses at every window close and resumes first at every window open, so it holds
+   * the disks for every minute of every window until the pool is done -- months. And
+   * running the benchmark alongside it is no answer, because a disk busy hashing
+   * measures slow and gets flagged for it. So the benchmark asks the long run to pause
+   * the same cooperative way a closing window does, runs for its few minutes, and the
+   * long run resumes from its cursor.
+   */
+  preempts?: boolean;
   /** Cheap check used by the scheduler to avoid starting empty runs. */
   hasWork(): boolean | Promise<boolean>;
   run(ctx: WorkflowContext): Promise<WorkflowResult>;
@@ -277,6 +290,17 @@ export class WorkflowManager extends EventEmitter {
       const resumableFor = new Map(
         candidates.map((definition) => [definition.id, this.resumableRun(definition.id)]),
       );
+
+      // Due preempting work first: it asks whatever holds its group to pause, and starts
+      // on a later tick once that run has wound down.
+      const due = new Set<WorkflowId>();
+      for (const definition of candidates) {
+        if (!definition.preempts || this.active.has(definition.id)) continue;
+        if (definition.respectsSchedule && !open) continue;
+        if (!(await definition.hasWork())) continue;
+        due.add(definition.id);
+        this.preemptGroup(definition);
+      }
       /**
        * Work already begun, before work not yet begun.
        *
@@ -289,8 +313,9 @@ export class WorkflowManager extends EventEmitter {
        * that are both fresh, or both part-done.
        */
       const ordered = [
-        ...candidates.filter((definition) => resumableFor.get(definition.id)),
-        ...candidates.filter((definition) => !resumableFor.get(definition.id)),
+        ...candidates.filter((definition) => due.has(definition.id)),
+        ...candidates.filter((definition) => !due.has(definition.id) && resumableFor.get(definition.id)),
+        ...candidates.filter((definition) => !due.has(definition.id) && !resumableFor.get(definition.id)),
       ];
 
       for (const definition of ordered) {
@@ -404,6 +429,7 @@ export class WorkflowManager extends EventEmitter {
     const order: WorkflowId[] = [
       'catalog.scan',
       'catalog.duplication',
+      'perf.benchmark',
       'catalog.hash',
       'backup.verify',
       'export.backup',
@@ -412,6 +438,26 @@ export class WorkflowManager extends EventEmitter {
     return [...this.definitions.values()].sort(
       (a, b) => order.indexOf(a.id) - order.indexOf(b.id),
     );
+  }
+
+  /**
+   * Ask runs sharing `definition`'s group to pause so it can have the disks.
+   *
+   * A run someone started with "Run now" is left alone -- that was an explicit request
+   * -- and so is another preempting run. The stop is cooperative and not awaited: the
+   * tick moves on, and the preempting workflow starts on whichever tick finds the
+   * group free.
+   */
+  private preemptGroup(definition: WorkflowDefinition): void {
+    if (!definition.concurrencyGroup) return;
+    for (const [otherId, active] of this.active) {
+      const other = this.definitions.get(active.workflowId);
+      if (!other || other.concurrencyGroup !== definition.concurrencyGroup) continue;
+      if (other.preempts || active.stopReason !== 'none') continue;
+      if (this.run(active.runId)?.params.force === true) continue;
+      this.logger.info({ workflow: otherId, for: definition.id }, 'pausing a run to make way');
+      this.stop(otherId, 'preempted');
+    }
   }
 
   private groupBusy(group: string | null): boolean {

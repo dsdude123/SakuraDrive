@@ -89,6 +89,9 @@ COPY --from=build /app/packages/web/dist ./public
 # by deploying this image rather than by copying scripts onto Windows by hand.
 COPY agent/ ./agent/
 
+# The network benchmark client, served to machines on the network from /api/perf.
+COPY clients/sakuradrive-netperf.py ./clients/
+
 # Present only when the image was built with INSTALL_KOPIA=true.
 COPY --from=kopia /out/ /usr/local/bin/
 

@@ -1806,6 +1806,273 @@ function Test-AgentClaimAgain {
 
 #endregion
 
+#region Performance benchmarks ------------------------------------------------
+
+function ConvertTo-AgentMBps {
+    <#
+    .SYNOPSIS
+        Throughput in MB/s -- 10^6 bytes a second, the unit disk datasheets use.
+    #>
+    [CmdletBinding()]
+    param(
+        [long] $Bytes,
+        [double] $Milliseconds
+    )
+
+    if ($Milliseconds -le 0) { return $null }
+    return [double]($Bytes / 1e6 / ($Milliseconds / 1000))
+}
+
+function Get-AgentLatencySummary {
+    <#
+    .SYNOPSIS
+        Median and 95th percentile of a set of timings, as the server computes them.
+    .DESCRIPTION
+        Nearest-rank percentile and a median that averages the two middle values, so a
+        figure means the same thing whichever side of the wire produced it.
+    #>
+    [CmdletBinding()]
+    param(
+        [double[]] $Samples
+    )
+
+    $result = [ordered]@{ median = $null; p95 = $null }
+    $sorted = @($Samples | Where-Object { $null -ne $_ } | Sort-Object)
+    if ($sorted.Count -eq 0) { return $result }
+
+    $middle = [int][Math]::Floor($sorted.Count / 2)
+    if ($sorted.Count % 2 -eq 1) {
+        $result.median = [double]$sorted[$middle]
+    }
+    else {
+        $result.median = ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2
+    }
+    $rank = [int][Math]::Ceiling(0.95 * $sorted.Count)
+    $rank = [Math]::Min($sorted.Count, [Math]::Max(1, $rank))
+    $result.p95 = [double]$sorted[$rank - 1]
+    return $result
+}
+
+function Get-AgentPerfTestPath {
+    <#
+    .SYNOPSIS
+        Where the benchmark file goes, in a directory the server named.
+    .DESCRIPTION
+        Built by hand rather than with Join-Path. The directories are volume GUID paths
+        (\\?\Volume{...}\) and pool roots (J:\), and Join-Path treats the ? in the
+        first as a wildcard and wants a provider for the second, neither of which is
+        anything to depend on in the one place a file is created.
+
+        The file lands at the volume root, beside -- not inside -- the PoolPart folder,
+        so DrivePool never sees it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Directory,
+        [Parameter(Mandatory)] [string] $Tag
+    )
+
+    # A drive letter is a Windows path even without its backslash.
+    $windows = $Directory.Contains('\') -or $Directory -match '^[A-Za-z]:'
+    $separator = if ($windows) { '\' } else { '/' }
+    return $Directory.TrimEnd('\', '/') + $separator + ".sakuradrive-perf-$Tag.tmp"
+}
+
+function Get-AgentRandomOffsets {
+    <#
+    .SYNOPSIS
+        Block-aligned offsets inside a file, for timing random reads.
+    .DESCRIPTION
+        Aligned because an unbuffered read must start on a sector boundary, and 4 KiB
+        covers every sector size there is.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [long] $FileBytes,
+        [int] $BlockBytes = 4096,
+        [int] $Count = 64,
+        [int] $Seed = 0
+    )
+
+    $blocks = [long][Math]::Floor($FileBytes / $BlockBytes)
+    $offsets = New-Object 'System.Collections.Generic.List[long]'
+    if ($blocks -lt 1 -or $Count -lt 1) { return , $offsets.ToArray() }
+
+    $random = if ($Seed -ne 0) { [System.Random]::new($Seed) } else { [System.Random]::new() }
+    $limit = [int][Math]::Min($blocks, [long][int]::MaxValue)
+    for ($i = 0; $i -lt $Count; $i++) {
+        $offsets.Add([long]$random.Next(0, $limit) * $BlockBytes)
+    }
+    return , $offsets.ToArray()
+}
+
+function Open-AgentReadStream {
+    <#
+    .SYNOPSIS
+        Open a file for reading, bypassing the Windows cache when -Unbuffered is set.
+    .DESCRIPTION
+        FILE_FLAG_NO_BUFFERING is what makes a read measure the disk rather than memory.
+        .NET has no name for it, and PowerShell refuses to cast an undefined value to a
+        flags enum, so it is built with Enum.ToObject, which does not check.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [int] $BufferBytes = 4096,
+        [switch] $Unbuffered,
+        [switch] $Random
+    )
+
+    $options = if ($Random) { [System.IO.FileOptions]::RandomAccess } else { [System.IO.FileOptions]::SequentialScan }
+    if ($Unbuffered) {
+        $options = [System.Enum]::ToObject([System.IO.FileOptions], ([int]$options -bor 0x20000000))
+    }
+    return [System.IO.FileStream]::new(
+        $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite, $BufferBytes, $options)
+}
+
+function Read-AgentWholeFile {
+    <#
+    .SYNOPSIS
+        Read a file start to finish in whole chunks; returns the bytes read.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [byte[]] $Buffer,
+        [switch] $Unbuffered
+    )
+
+    $stream = Open-AgentReadStream -Path $Path -BufferBytes $Buffer.Length -Unbuffered:$Unbuffered
+    $total = [long]0
+    try {
+        while ($true) {
+            $read = $stream.Read($Buffer, 0, $Buffer.Length)
+            if ($read -le 0) { break }
+            $total += $read
+        }
+    }
+    finally { $stream.Dispose() }
+    return $total
+}
+
+function Measure-AgentStorageTarget {
+    <#
+    .SYNOPSIS
+        Benchmark one disk or pool: write a file, read it back, time random reads, delete it.
+    .DESCRIPTION
+        The write is write-through, so the figure is what reached the disk -- or the
+        block cache in front of it, which on a PrimoCache-fronted volume is the honest
+        answer to "how fast is a write here".
+
+        The reads try to bypass the Windows cache. Unbuffered I/O formally wants
+        sector-aligned memory, which a .NET array does not promise; most storage stacks
+        accept it anyway, and where one does not the reads are repeated through the
+        cache and the result is marked readMayBeCached. The random-read latency is only
+        reported when it came from the disk: from cache it would be the same handful of
+        microseconds on every disk and say nothing.
+
+        The file is removed in a finally block, so a failure part-way never leaves a
+        gigabyte behind on somebody's disk.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Target,
+        [long] $SizeBytes = 1GB,
+        [int] $LatencySamples = 64,
+        [int] $ChunkBytes = 4MB
+    )
+
+    $result = [ordered]@{
+        key             = [string]$Target.key
+        kind            = [string]$Target.kind
+        bytesTested     = [long]0
+        writeMBps       = $null
+        readMBps        = $null
+        latencyMs       = $null
+        latencyP95Ms    = $null
+        readMayBeCached = $false
+        skipped         = $null
+        error           = $null
+    }
+
+    $chunks = [long][Math]::Max(1, [Math]::Ceiling($SizeBytes / $ChunkBytes))
+    $total = $chunks * $ChunkBytes
+    $path = Get-AgentPerfTestPath -Directory ([string]$Target.path) -Tag ([guid]::NewGuid().ToString('N').Substring(0, 12))
+    $buffer = New-Object byte[] $ChunkBytes
+    # Random rather than zeros, so a compressing filesystem cannot flatter itself.
+    ([System.Random]::new()).NextBytes($buffer)
+
+    try {
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $stream = [System.IO.FileStream]::new(
+            $path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+        try {
+            for ($i = 0; $i -lt $chunks; $i++) { $stream.Write($buffer, 0, $ChunkBytes) }
+            $stream.Flush($true)
+        }
+        finally { $stream.Dispose() }
+        $watch.Stop()
+        $result.writeMBps = ConvertTo-AgentMBps -Bytes $total -Milliseconds $watch.Elapsed.TotalMilliseconds
+        $result.bytesTested = $total
+
+        $unbuffered = $true
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $read = Read-AgentWholeFile -Path $path -Buffer $buffer -Unbuffered
+        }
+        catch {
+            $unbuffered = $false
+            $result.readMayBeCached = $true
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            $read = Read-AgentWholeFile -Path $path -Buffer $buffer
+        }
+        $watch.Stop()
+        $result.readMBps = ConvertTo-AgentMBps -Bytes $read -Milliseconds $watch.Elapsed.TotalMilliseconds
+        $result.bytesTested += $read
+
+        if ($unbuffered -and $LatencySamples -gt 0) {
+            # Its own try: throughput is already measured, and a latency test that fails
+            # means no latency figure, not a disk reported as failing its benchmark.
+            try {
+                $block = New-Object byte[] 4096
+                $timings = New-Object 'System.Collections.Generic.List[double]'
+                $random = Open-AgentReadStream -Path $path -BufferBytes 4096 -Unbuffered -Random
+                try {
+                    foreach ($offset in (Get-AgentRandomOffsets -FileBytes $total -BlockBytes 4096 -Count $LatencySamples)) {
+                        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                        [void]$random.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                        [void]$random.Read($block, 0, 4096)
+                        $watch.Stop()
+                        $timings.Add($watch.Elapsed.TotalMilliseconds)
+                    }
+                }
+                finally { $random.Dispose() }
+                $summary = Get-AgentLatencySummary -Samples $timings.ToArray()
+                $result.latencyMs = $summary.median
+                $result.latencyP95Ms = $summary.p95
+            }
+            catch {
+                $result.latencyMs = $null
+                $result.latencyP95Ms = $null
+            }
+        }
+    }
+    catch {
+        $result.error = $_.Exception.Message
+    }
+    finally {
+        # File.Delete does not throw for a file that is not there.
+        try { [System.IO.File]::Delete($path) } catch { }
+    }
+
+    return $result
+}
+
+#endregion
+
 #region Self update -----------------------------------------------------------
 
 function Get-AgentDistributionFile {
@@ -2217,6 +2484,13 @@ Export-ModuleMember -Function @(
     'Get-AgentJobFromClaim'
     'Test-AgentJobContinue'
     'Test-AgentClaimAgain'
+    'ConvertTo-AgentMBps'
+    'Get-AgentLatencySummary'
+    'Get-AgentPerfTestPath'
+    'Get-AgentRandomOffsets'
+    'Open-AgentReadStream'
+    'Read-AgentWholeFile'
+    'Measure-AgentStorageTarget'
     'Get-AgentDistributionFile'
     'Test-AgentScriptSyntax'
     'Get-AgentFileHash'

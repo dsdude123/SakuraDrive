@@ -971,6 +971,77 @@ function ThresholdsTab({ draft, patch }: { draft: Settings; patch: PatchFn }): J
           />
         </div>
       </Card>
+
+      <Card
+        title="Benchmarks"
+        description="Scheduled read/write tests of every disk, pool and the container's storage; see the Performance page"
+      >
+        <div className="form-grid">
+          <Field label="Every (days)">
+            <input
+              type="number"
+              min={1}
+              value={draft.perfTest.intervalDays}
+              onChange={(event) => patch((next) => { next.perfTest.intervalDays = Number(event.target.value); })}
+            />
+          </Field>
+          <Field label="Disk test size (MB)" help="Needs twice this free on each disk.">
+            <input
+              type="number"
+              min={64}
+              value={draft.perfTest.diskTestSizeMB}
+              onChange={(event) => patch((next) => { next.perfTest.diskTestSizeMB = Number(event.target.value); })}
+            />
+          </Field>
+          <Field label="4K latency samples">
+            <input
+              type="number"
+              min={8}
+              value={draft.perfTest.latencySamples}
+              onChange={(event) => patch((next) => { next.perfTest.latencySamples = Number(event.target.value); })}
+            />
+          </Field>
+          <Field label="Slow below (% of peers)" help="Compared with disks of the same media in the same pool, and with the disk's own history.">
+            <input
+              type="number"
+              min={5}
+              max={95}
+              value={Math.round(draft.perfTest.slowFraction * 100)}
+              onChange={(event) => patch((next) => { next.perfTest.slowFraction = Number(event.target.value) / 100; })}
+            />
+          </Field>
+          <Field label="Container test size (MB)">
+            <input
+              type="number"
+              min={16}
+              value={draft.perfTest.wsl.testSizeMB}
+              onChange={(event) => patch((next) => { next.perfTest.wsl.testSizeMB = Number(event.target.value); })}
+            />
+          </Field>
+        </div>
+        <div className="stack" style={{ marginTop: 12 }}>
+          <Checkbox
+            label="Run scheduled benchmarks"
+            checked={draft.perfTest.enabled}
+            onChange={(value) => patch((next) => { next.perfTest.enabled = value; })}
+          />
+          <Checkbox
+            label="Benchmark pools through their drive letter"
+            checked={draft.perfTest.includePools}
+            onChange={(value) => patch((next) => { next.perfTest.includePools = value; })}
+          />
+          <Checkbox
+            label="Alert on pool members PrimoCache does not cover"
+            checked={draft.perfTest.checkCacheCoverage}
+            onChange={(value) => patch((next) => { next.perfTest.checkCacheCoverage = value; })}
+          />
+          <Checkbox
+            label="Benchmark the container's storage"
+            checked={draft.perfTest.wsl.enabled}
+            onChange={(value) => patch((next) => { next.perfTest.wsl.enabled = value; })}
+          />
+        </div>
+      </Card>
     </div>
   );
 }

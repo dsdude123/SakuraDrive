@@ -53,6 +53,7 @@ export const WORKFLOW_IDS = [
   'backup.verify',
   'export.backup',
   'maintenance.prune',
+  'perf.benchmark',
 ] as const;
 export type WorkflowId = (typeof WORKFLOW_IDS)[number];
 
@@ -434,4 +435,73 @@ export interface ApiError {
   error: string;
   message: string;
   details?: unknown;
+}
+
+/* ------------------------------------------------------------- performance */
+
+export type PerfKind = 'disk' | 'pool' | 'network' | 'wsl';
+
+/** One stored benchmark of one target. Throughput is MB/s (10^6 bytes per second). */
+export interface PerfResult {
+  id: number;
+  kind: PerfKind;
+  /** Volume GUID, pool id, share path or container path. */
+  targetKey: string;
+  targetLabel: string;
+  /** The agent, client or container that ran the test. */
+  host: string;
+  bytesTested: number;
+  writeMBps: number | null;
+  readMBps: number | null;
+  /** Median and 95th-percentile small-I/O latency, in milliseconds. */
+  latencyMs: number | null;
+  latencyP95Ms: number | null;
+  readMayBeCached: boolean;
+  skipped: string | null;
+  error: string | null;
+  details: Record<string, unknown>;
+  measuredAt: string;
+}
+
+/** Why a disk was flagged, in the words the alert uses. */
+export interface PerfSlowness {
+  reason: 'peers' | 'history';
+  metric: 'read' | 'write' | 'latency';
+  value: number;
+  reference: number;
+  detail: string;
+}
+
+export interface PerfDiskRow {
+  volumeId: string;
+  label: string | null;
+  driveLetter: string | null;
+  poolId: string | null;
+  poolName: string | null;
+  mediaType: string | null;
+  excluded: boolean;
+  /** Fronted by a PrimoCache task. Null when PrimoCache is not reporting. */
+  cached: boolean | null;
+  latest: PerfResult | null;
+  /** Read MB/s of the most recent results, oldest first. */
+  history: Array<number | null>;
+  /** Median read of comparable disks in the same run: same pool, same media. */
+  peerMedianReadMBps: number | null;
+  peers: number;
+  slowness: PerfSlowness[];
+}
+
+export interface PerfOverview {
+  enabled: boolean;
+  lastRunAt: string | null;
+  nextDueAt: string | null;
+  disks: PerfDiskRow[];
+  pools: PerfResult[];
+  network: PerfResult[];
+  wsl: PerfResult[];
+  cacheCoverage: {
+    /** PrimoCache is reporting at least one cache task. */
+    available: boolean;
+    uncovered: Array<{ volumeId: string; label: string }>;
+  };
 }
