@@ -213,15 +213,25 @@ export function CatalogPage(): JSX.Element {
 
 function BrowseTab({ rootId }: { rootId: string }): JSX.Element {
   const [path, setPath] = useState('');
-  const { data, loading } = useQuery<{ entries: DirectoryEntry[]; total: number }>(
+  const response = useQuery<{ rootId: string; path: string; entries: DirectoryEntry[]; total: number }>(
     rootId ? '/api/catalog/browse' : null,
     { query: { rootId, path, limit: 500 } },
   );
+  // The hook keeps the last answer while the next one loads. Shown under the new path
+  // that was the previous folder's listing, so a click looked like it had done nothing
+  // until a slow pool directory came back. Only show a listing for the path asked for.
+  const data =
+    response.data &&
+    response.data.rootId === rootId &&
+    response.data.path.toLowerCase() === path.toLowerCase()
+      ? response.data
+      : null;
 
   return (
     <div className="stack">
       <Breadcrumbs path={path} onNavigate={setPath} />
-      {loading && !data && <Loading />}
+      {!data && response.error && <Banner tone="critical">{response.error.message}</Banner>}
+      {!data && !response.error && <Loading />}
       {data && data.entries.length === 0 && <EmptyState title="This directory is empty" />}
       {data && data.entries.length > 0 && (
         <DataTable
