@@ -501,6 +501,66 @@ describe('scheduler tick', () => {
     await settle();
   });
 
+  /**
+   * The catalog going stale behind hashing: the hash run is paused at a window close,
+   * so at the next open it is resumable and the scan, finished last time, is not. The
+   * scan has to get the disks first anyway once it is due.
+   */
+  it('runs a due catalog scan ahead of a paused hash run', async () => {
+    const log: string[] = [];
+    let scanDue = false;
+    let scanMayPreempt = true;
+    manager.register(longHash(log));
+    manager.register(
+      makeWorkflow({
+        id: 'catalog.scan',
+        name: 'Scan',
+        preempts: () => scanMayPreempt,
+        hasWork: () => scanDue,
+        run: async () => {
+          log.push('scan');
+          scanDue = false;
+          return { state: 'completed' };
+        },
+      }),
+    );
+
+    await manager.start('catalog.hash', { trigger: 'schedule' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    manager.stop('catalog.hash');
+    await settle();
+    expect(manager.runs('catalog.hash')[0]!.state).toBe('paused');
+
+    scanDue = true;
+    await manager.tick();
+    await settle();
+    expect(log.slice(2)).toEqual(['scan']);
+
+    // Hashing picks up again, and is paused for the next due scan while it runs.
+    await manager.tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(log.slice(2)).toEqual(['scan', 'hash']);
+    scanDue = true;
+    await manager.tick();
+    await settle();
+    expect(log.slice(2)).toEqual(['scan', 'hash', 'hash stopped: preempted']);
+    await manager.tick();
+    await settle();
+    expect(log.slice(2)).toEqual(['scan', 'hash', 'hash stopped: preempted', 'scan']);
+
+    // When the scan may not preempt, it waits for the disks rather than taking them.
+    await manager.tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    scanMayPreempt = false;
+    scanDue = true;
+    await manager.tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(log.at(-1)).toBe('hash');
+    expect(manager.isRunning('catalog.hash')).toBe(true);
+    manager.stop('catalog.hash');
+    await settle();
+  });
+
   it('does not interrupt a run someone started with "Run now"', async () => {
     const log: string[] = [];
     manager.register(longHash(log));

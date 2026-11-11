@@ -12,6 +12,16 @@ export function lastCompletedAt(db: Db, workflowId: WorkflowId): string | null {
   return row?.finished_at ?? null;
 }
 
+/** Did this workflow's most recent run fail within the last `hours`? */
+export function failedWithin(db: Db, workflowId: WorkflowId, hours: number): boolean {
+  const last = db
+    .prepare<[string], { state: string; finished_at: string | null }>(
+      'SELECT state, finished_at FROM workflow_runs WHERE workflow_id = ? ORDER BY id DESC LIMIT 1',
+    )
+    .get(workflowId);
+  return last?.state === 'failed' && hoursSince(last.finished_at) < hours;
+}
+
 export function hoursSince(iso: string | null): number {
   if (!iso) return Number.POSITIVE_INFINITY;
   const parsed = Date.parse(iso);

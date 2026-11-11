@@ -254,6 +254,27 @@ describe('catalog scan', () => {
     expect(manager.definition('catalog.scan')!.hasWork()).toBe(false);
   });
 
+  it('pauses hashing when due, except with a zero interval or straight after a failure', () => {
+    configureRoot();
+    const preempts = () => {
+      const rule = manager.definition('catalog.scan')!.preempts;
+      return typeof rule === 'function' ? rule() : rule;
+    };
+    settings.update({ catalog: { rescanIntervalHours: 24 } });
+    expect(preempts()).toBe(true);
+
+    // Always due at zero: preempting would mean hashing never runs.
+    settings.update({ catalog: { rescanIntervalHours: 0 } });
+    expect(preempts()).toBe(false);
+
+    settings.update({ catalog: { rescanIntervalHours: 24 } });
+    db.prepare(
+      `INSERT INTO workflow_runs (workflow_id, state, trigger, started_at, finished_at, updated_at)
+       VALUES ('catalog.scan', 'failed', 'schedule', ?, ?, ?)`,
+    ).run(new Date().toISOString(), new Date().toISOString(), new Date().toISOString());
+    expect(preempts()).toBe(false);
+  });
+
   it('still walks continuously when the interval is set to zero', async () => {
     put('a.txt', 'one');
     configureRoot();

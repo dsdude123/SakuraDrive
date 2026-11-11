@@ -8,7 +8,7 @@ import type { CatalogService } from '../services/catalog-service.js';
 import type { SettingsService } from '../services/settings-service.js';
 import type { Db } from '../db/index.js';
 import type { WorkflowContext, WorkflowDefinition, WorkflowResult } from './engine.js';
-import { hoursSince, lastCompletedAt } from './support.js';
+import { failedWithin, hoursSince, lastCompletedAt } from './support.js';
 
 /**
  * Cursor shape persisted on pause.
@@ -90,6 +90,17 @@ export function createCatalogScanWorkflow(deps: CatalogScanDeps): WorkflowDefini
       const interval = settings.get().catalog.rescanIntervalHours;
       return hoursSince(lastCompletedAt(db, 'catalog.scan')) >= interval;
     },
+
+    /**
+     * Due scans pause hashing rather than wait for it. Hashing is always a part-done run
+     * at window open, so it resumes first and holds the window until it closes; behind
+     * it, the catalog went stale for as long as the pool took to hash.
+     *
+     * Not with a zero interval, where the scan is always due and hashing would never
+     * run; and not straight after a failed scan, which would otherwise stop hashing on
+     * every tick while the failure lasts. Both still run when the disks are free.
+     */
+    preempts: () => settings.get().catalog.rescanIntervalHours > 0 && !failedWithin(db, 'catalog.scan', 6),
 
     async run(ctx: WorkflowContext): Promise<WorkflowResult> {
       const cursor: ScanCursor = { ...emptyCursor(), ...(ctx.getCursor<ScanCursor>() ?? {}) };

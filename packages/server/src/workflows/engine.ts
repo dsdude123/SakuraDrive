@@ -63,8 +63,13 @@ export interface WorkflowDefinition {
    * measures slow and gets flagged for it. So the benchmark asks the long run to pause
    * the same cooperative way a closing window does, runs for its few minutes, and the
    * long run resumes from its cursor.
+   *
+   * The catalog scan does the same once its rescan interval is up: it is never a
+   * resumable run at window open, hashing always is, so without this it never ran again
+   * once hashing could fill a window. A function decides per tick; a workflow with one
+   * still counts as preempting, so it is never itself paused for another.
    */
-  preempts?: boolean;
+  preempts?: boolean | (() => boolean);
   /** Cheap check used by the scheduler to avoid starting empty runs. */
   hasWork(): boolean | Promise<boolean>;
   run(ctx: WorkflowContext): Promise<WorkflowResult>;
@@ -295,7 +300,7 @@ export class WorkflowManager extends EventEmitter {
       // on a later tick once that run has wound down.
       const due = new Set<WorkflowId>();
       for (const definition of candidates) {
-        if (!definition.preempts || this.active.has(definition.id)) continue;
+        if (!preemptsNow(definition) || this.active.has(definition.id)) continue;
         if (definition.respectsSchedule && !open) continue;
         if (!(await definition.hasWork())) continue;
         due.add(definition.id);
@@ -453,7 +458,7 @@ export class WorkflowManager extends EventEmitter {
     for (const [otherId, active] of this.active) {
       const other = this.definitions.get(active.workflowId);
       if (!other || other.concurrencyGroup !== definition.concurrencyGroup) continue;
-      if (other.preempts || active.stopReason !== 'none') continue;
+      if (other.preempts || active.stopReason !== 'none') continue; // never pause a preempting run
       if (this.run(active.runId)?.params.force === true) continue;
       this.logger.info({ workflow: otherId, for: definition.id }, 'pausing a run to make way');
       this.stop(otherId, 'preempted');
@@ -633,4 +638,8 @@ export class WorkflowManager extends EventEmitter {
     while (log.length > 200) log.shift();
     this.db.prepare('UPDATE workflow_runs SET log_json = ? WHERE id = ?').run(toJson(log), runId);
   }
+}
+
+function preemptsNow(definition: WorkflowDefinition): boolean {
+  return typeof definition.preempts === 'function' ? definition.preempts() : definition.preempts === true;
 }
